@@ -3,7 +3,7 @@ import React from 'react';
 import { useMC, DEPLOY_TYPES, REL_STATUS, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
 import { Icon, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Tabs, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { Console, DeployDialog, RestoreDialog } from '../components/pipeline.jsx';
-import { listAgentBackups } from '../lib/api.js';
+import { listAgentBackups, streamAppLogs } from '../lib/api.js';
 
 function InfoRow({ label, children, mono }) {
   return (
@@ -182,32 +182,50 @@ function BackupsTab({ app, onRestore }) {
 // ---------- 实时日志 ----------
 function LogViewer({ app }) {
   const genActive = app.status === "running" || app.status === "static" || app.status === "failed";
-  const [lines, setLines] = React.useState(() => {
-    const arr = []; let t = Date.now() - 1000 * 60 * 3;
-    const n = app.status === "stopped" ? 14 : 28;
-    for (let i = 0; i < n; i++) {
-      const l = genLogLine(app);
-      arr.push({ ts: t, level: l.level, text: l.text });
-      t += 2000 + Math.random() * 8000;
-    }
-    return arr;
-  });
+  // 进程类应用(systemd journal)优先接 Agent 真实日志流;失败则回退模拟。
+  const canReal = app.type === "go-binary" || app.type === "java-jar";
+  const [realFailed, setRealFailed] = React.useState(false);
+  const useReal = canReal && !realFailed;
+
+  const [lines, setLines] = React.useState([]);
   const [follow, setFollow] = React.useState(true);
   const [filter, setFilter] = React.useState("");
   const [onlyMatch, setOnlyMatch] = React.useState(false);
   const [logFile, setLogFile] = React.useState(app.logPaths[0]);
 
+  const append = (line) => setLines((s) => { const n = [...s, line]; return n.length > 400 ? n.slice(-400) : n; });
+
+  // 真实日志:订阅 Agent journal SSE;暂停/切换/离开时 abort,不可达则标记回退模拟。
   React.useEffect(() => {
+    if (!useReal || !follow) return;
+    const ac = new AbortController();
+    let cancelled = false;
+    setLines([]); // 重新拉取 tail,避免暂停后重复
+    streamAppLogs(app.id, { tail: 200, signal: ac.signal, onLine: (l) => { if (!cancelled) append(l); } })
+      .then((res) => { if (res && res.error && !cancelled) setRealFailed(true); });
+    return () => { cancelled = true; ac.abort(); };
+  }, [useReal, follow, app.id]);
+
+  // 模拟日志:非进程类应用或真实流回退时使用。
+  React.useEffect(() => {
+    if (useReal) return;
+    setLines(() => {
+      const arr = []; let t = Date.now() - 1000 * 60 * 3;
+      const n = app.status === "stopped" ? 14 : 28;
+      for (let i = 0; i < n; i++) {
+        const l = genLogLine(app);
+        arr.push({ ts: t, level: l.level, text: l.text });
+        t += 2000 + Math.random() * 8000;
+      }
+      return arr;
+    });
     if (!follow || !genActive) return;
     const iv = setInterval(() => {
-      setLines((s) => {
-        const l = genLogLine(app);
-        const next = [...s, { ts: Date.now(), level: l.level, text: l.text }];
-        return next.length > 400 ? next.slice(-400) : next;
-      });
+      const l = genLogLine(app);
+      append({ ts: Date.now(), level: l.level, text: l.text });
     }, app.status === "failed" ? 2400 : 850);
     return () => clearInterval(iv);
-  }, [follow, app.id, app.status]);
+  }, [useReal, follow, app.id, app.status]);
 
   const shown = onlyMatch && filter.trim() ? lines.filter((l) => l.text.includes(filter)) : lines;
 
@@ -225,16 +243,17 @@ function LogViewer({ app }) {
           <Switch on={onlyMatch} onChange={setOnlyMatch} />仅匹配行
         </label>
         <div style={{ flex: 1 }}></div>
-        <Badge tone={follow && genActive ? "success" : "default"} dot={follow && genActive}>
-          {genActive ? (follow ? "tail -F 实时跟随" : "已暂停") : "进程未运行 · 历史日志"}
+        <Badge tone={follow ? "success" : "default"} dot={follow}>
+          {useReal ? (follow ? "Agent journal 实时" : "已暂停")
+            : genActive ? (follow ? "tail -F 实时跟随(演示)" : "已暂停") : "进程未运行 · 历史日志"}
         </Badge>
         <Btn size="sm" icon={follow ? "pause" : "play"} onClick={() => setFollow(!follow)}>{follow ? "暂停" : "继续"}</Btn>
         <Btn size="sm" icon="download" onClick={() => toast(`已按时间范围打包 ${app.id}-logs-${tsDir(Date.now())}.tar.gz(模拟下载)`)}>下载</Btn>
       </div>
       <Console lines={shown} filter={filter} height={460} />
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>
-        <span className="mono">{logFile}</span>
-        <span>缓冲 {lines.length} / 400 行 · 轮转安全(fsnotify 重开文件)</span>
+        <span className="mono">{useReal ? `journalctl -u deploy-${app.id}` : logFile}</span>
+        <span>缓冲 {lines.length} / 400 行 · {useReal ? "journald 跟随(轮转安全)" : "轮转安全(fsnotify 重开文件)"}</span>
       </div>
     </div>
   );

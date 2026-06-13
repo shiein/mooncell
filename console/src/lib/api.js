@@ -182,9 +182,53 @@ async function restoreViaAgentStream(appId, config, backup, onEvent) {
   }
 }
 
+// 订阅应用运行时日志(Agent journal SSE):先收最近 tail 行再实时跟随。
+// onLine({ts,level,text}) 每行回调;signal 用于暂停/离开时中断。
+// 返回 {ended}|{aborted}|{error}——error 时调用方回退到模拟日志。
+async function streamAppLogs(appId, { tail = 200, signal, onLine }) {
+  let r;
+  try {
+    r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/logs/stream?tail=${tail}`, {
+      credentials: 'same-origin', signal,
+    });
+  } catch (e) {
+    return e.name === 'AbortError' ? { aborted: true } : { error: 'Agent 不可达: ' + (e.message || e) };
+  }
+  if (!r.ok || !(r.headers.get('Content-Type') || '').includes('text/event-stream')) {
+    const d = await r.json().catch(() => ({}));
+    return { error: d.error || `日志流不可用 (${r.status})` };
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let ev = 'message', data = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) ev = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (ev === 'line' && data) {
+          try { onLine && onLine(JSON.parse(data)); } catch { /* 跳过坏帧 */ }
+        }
+      }
+    }
+  } catch (e) {
+    return e.name === 'AbortError' ? { aborted: true } : { error: e.message || String(e) };
+  }
+  return { ended: true };
+}
+
 export {
   login, logout, getSession,
   getAgentCapabilities, getAgentSystem, getAgentPing,
   hydrateData, putEntity, deleteEntity, deployViaAgent, deployViaAgentStream,
-  listAgentBackups, restoreViaAgentStream,
+  listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };
