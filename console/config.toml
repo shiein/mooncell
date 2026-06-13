@@ -15,3 +15,9 @@ ttl_hours = 168   # 会话有效期(小时),168 = 7 天
 # 库已存在用户后修改此处不会改动已有账号。
 username = "admin"
 password = "jch@9388"
+
+[agent]
+# Console 主动连接的 Agent;单机版默认指向本机 Agent。
+# token 须与 Agent 端 config.toml 的 [security] token 一致。
+addr  = "127.0.0.1:9100"
+token = "mc_ag_change_me"

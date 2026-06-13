@@ -12,6 +12,13 @@ type Config struct {
 	Database DatabaseConfig `toml:"database"`
 	Session  SessionConfig  `toml:"session"`
 	Admin    AdminConfig    `toml:"admin"`
+	Agent    AgentConfig    `toml:"agent"`
+}
+
+// AgentConfig 是 Console 连接 Agent 的地址与共享 token(单机版默认指向本机 Agent)。
+type AgentConfig struct {
+	Addr  string `toml:"addr"`
+	Token string `toml:"token"`
 }
 
 type ServerConfig struct {
@@ -38,6 +45,7 @@ func loadConfig(path string) *Config {
 		Database: DatabaseConfig{Path: "mooncell.db"},
 		Session:  SessionConfig{TTLHours: 168}, // 7 天
 		Admin:    AdminConfig{Username: "admin", Password: "jch@9388"},
+		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: "mc_ag_change_me"},
 	}
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		log.Printf("[config] 未能读取 %s(%v),使用内置默认配置", path, err)

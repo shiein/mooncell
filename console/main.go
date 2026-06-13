@@ -21,12 +21,17 @@ func main() {
 	defer store.Close()
 	store.seedAdmin(cfg.Admin.Username, cfg.Admin.Password)
 
-	a := &api{store: store}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("GET /api/session", a.session)
+
+	// Agent 代理(需登录):Console 持共享 token 调用本机/远端 Agent,前端只与 Console 通信。
+	mux.HandleFunc("GET /api/agent/ping", a.requireAuth(a.agentProxy("/api/ping")))
+	mux.HandleFunc("GET /api/agent/capabilities", a.requireAuth(a.agentProxy("/api/capabilities")))
+	mux.HandleFunc("GET /api/agent/system", a.requireAuth(a.agentProxy("/api/system")))
 
 	// 其余路径交给嵌入的前端静态资源(单页应用,无 URL 路由)。
 	sub, err := fs.Sub(distFS, "dist")
