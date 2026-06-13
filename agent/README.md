@@ -37,12 +37,17 @@ backup_dir   = "/opt/deploy-agent/backups"
 | `GET /api/ping` | 连通性测试:返回主机名、版本、OS/Arch、运行时长 |
 | `GET /api/capabilities` | 能力清单:systemd / java / pm2 / nginx / python / node / tomcat 是否可用及版本 |
 | `GET /api/system` | 资源水位:CPU / 内存 / 磁盘百分比与用量(gopsutil 采集) |
+| `POST /api/apps/{id}/deploy` | 部署(go-binary):multipart 上传 `config`(JSON)+ `artifact`;同步跑流水线返回逐步结果 |
+| `GET /api/apps/{id}/status` | systemd 托管状态:active / state / MainPID |
+| `DELETE /api/apps/{id}` | 下线:停止 + 移除 unit(保留制品与备份) |
 
 能力自检在启动时执行一次并缓存;Console 总览页据此过滤可选 Runner、绘制资源曲线与磁盘水位告警。
 
+部署流水线(已在 Ubuntu 真机验证):校验 sha256 → 备份(滚动保留)→ 停止 → 原子 rename 替换 → 生成 systemd unit + 启动 → HTTP 健康检查(5×2s 重试)→ 失败自动回滚还原备份。制品路径经 `deploy_roots` 白名单校验(防穿越)。
+
 ## 待实现(路线图)
 
-- **P0 剩余**:`java-jar`(nohup/systemd)与 `static-nginx` 两个 Deployer;上传(分块 + sha256)→ 部署流水线 → 健康检查闭环;部署日志 SSE/WS。
-- **P1+**:自动备份 + 一键还原;应用日志 tail -F 实时流(fsnotify 处理轮转)+ 打包下载;pm2 Runner;tomcat-war / go-binary / python Deployer。
+- **P0 剩余**:`static-nginx`(软链切换 + reload)与 `java-jar`(复用 systemd Runner + JRE)两个 Deployer;部署日志 SSE/WS 实时推送。
+- **P1+**:应用日志 tail -F 实时流(fsnotify 处理轮转)+ 打包下载;pm2 Runner;tomcat-war / python Deployer;分块上传 + 断点续传。
 
 详见 [../docs/deploy-platform-design-v1.md](../docs/deploy-platform-design-v1.md) §3 §4 §5 §8。
