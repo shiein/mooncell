@@ -222,7 +222,8 @@ func (a *agent) backupCurrent(cfg DeployConfig) (string, error) {
 	if _, err := os.Stat(cfg.BinPath); err != nil {
 		return "", nil // 首次部署
 	}
-	ts := time.Now().Format("20060102_150405")
+	// 纳秒精度:避免同秒内连续部署/还原撞同一目录名而互相覆盖,丢失备份。字典序仍 = 时间序。
+	ts := time.Now().Format("20060102_150405.000000000")
 	dir := filepath.Join(a.cfg.Paths.BackupDir, cfg.ID, ts)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
@@ -297,16 +298,21 @@ func healthCheck(url string, logs *[]string) bool {
 
 // ---------- 部署流水线 ----------
 
-// runDeploy 按应用类型分发:static-nginx 走软链切换,其余(go-binary/java-jar)复用 systemd 进程流水线。
+// runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
+// 其余(go-binary/java-jar/python)复用 systemd 进程流水线。
 // emit 在每步完成时回调(用于 SSE 实时流);同步 JSON 端点传 nil 即可。
 func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
 	if emit == nil {
 		emit = func(Step) {}
 	}
-	if cfg.Type == "static-nginx" {
+	switch cfg.Type {
+	case "static-nginx":
 		return a.runDeployStatic(cfg, artifact, emit)
+	case "tomcat-war":
+		return a.runDeployTomcat(cfg, artifact, emit)
+	default:
+		return a.runDeployProcess(cfg, artifact, emit)
 	}
-	return a.runDeployProcess(cfg, artifact, emit)
 }
 
 // runDeployProcess 执行已验证的进程类部署闭环:备份 → 停 → 原子替换 → 生成 unit + 启动 → 健康检查;失败自动回滚。
@@ -452,8 +458,8 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 		add("备份当前版本", true, "当前指向 "+prevTarget)
 	}
 
-	// 3. 解包到新 release 目录
-	ts := time.Now().Format("20060102_150405")
+	// 3. 解包到新 release 目录(纳秒精度,避免同秒连续部署撞目录)
+	ts := time.Now().Format("20060102_150405.000000000")
 	releasesDir := cfg.BinPath + "-releases"
 	newRelease := filepath.Join(releasesDir, ts)
 	if err := os.MkdirAll(newRelease, 0755); err != nil {
@@ -547,6 +553,96 @@ func (a *agent) rotateReleases(releasesDir string, keep int) {
 		os.RemoveAll(filepath.Join(releasesDir, dirs[0]))
 		dirs = dirs[1:]
 	}
+}
+
+// ---------- Tomcat WAR(容器托管)----------
+
+// runDeployTomcat 部署 WAR 到 Tomcat webapps:容器由运维长驻,平台只负责原子替换 WAR、
+// 清旧展开目录(令容器重新展开)、可选 reload 钩子、健康检查;失败回滚 WAR。
+// cfg.BinPath 是 webapps 下的 WAR 路径(如 /opt/tomcat/webapps/app.war);展开目录为同名去 .war。
+// 不停容器进程(同容器内可能跑着别的应用),与进程类的 systemctl stop 不同。
+func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
+	res := DeployResult{Version: cfg.Version}
+	add := func(name string, ok bool, logs ...string) {
+		s := Step{Name: name, OK: ok, Logs: logs}
+		res.Steps = append(res.Steps, s)
+		emit(s)
+	}
+	exploded := strings.TrimSuffix(cfg.BinPath, ".war") // 容器展开目录
+
+	// 1. 校验制品
+	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "WAR "+cfg.BinPath)
+
+	// 2. 备份当前 WAR(无 systemd unit,backupCurrent 仅备份 WAR 文件)
+	bkDir, err := a.backupCurrent(cfg)
+	if err != nil {
+		add("备份当前版本", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	if bkDir == "" {
+		add("备份当前版本", true, "首次部署,无当前 WAR 需备份")
+	} else {
+		add("备份当前版本", true, "备份 → "+bkDir+" · 滚动保留 "+fmt.Sprint(cfg.BackupKeep)+" 份")
+	}
+
+	// 3. 原子替换 WAR + 清旧展开目录(令容器重新展开为新版本)
+	os.MkdirAll(filepath.Dir(cfg.BinPath), 0755)
+	if err := atomicReplace(artifact, cfg.BinPath); err != nil {
+		add("替换 WAR", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	if exploded != cfg.BinPath {
+		os.RemoveAll(exploded)
+	}
+	add("替换 WAR", true, "原子替换 "+cfg.BinPath, "清理展开目录 "+exploded)
+
+	// 4. 可选 reload 钩子(如 touch WAR 触发热部署 / 重启 Tomcat / 调 manager API)
+	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
+		out, err := exec.Command("sh", "-c", rc).CombinedOutput()
+		add("reload", err == nil, rc+" → "+strings.TrimSpace(string(out)))
+	}
+
+	// 5. 健康检查(容器重部署需时间,沿用重试)
+	var hlog []string
+	if healthCheck(cfg.Health, &hlog) {
+		add("健康检查", true, hlog...)
+		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
+		res.Result = "success"
+		return res
+	}
+	add("健康检查", false, hlog...)
+
+	// 6. 失败 → 回滚 WAR
+	if bkDir == "" {
+		add("回滚", false, "首次部署无备份可回滚")
+		res.Result = "failed"
+		return res
+	}
+	rlog := []string{"读取 " + bkDir, "还原备份 WAR(原子替换)"}
+	if err := atomicReplace(filepath.Join(bkDir, "app"), cfg.BinPath); err != nil {
+		rlog = append(rlog, "还原失败: "+err.Error())
+		add("回滚 · 还原 WAR", false, rlog...)
+		res.Result = "failed"
+		return res
+	}
+	if exploded != cfg.BinPath {
+		os.RemoveAll(exploded)
+	}
+	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
+		exec.Command("sh", "-c", rc).Run()
+	}
+	var rh []string
+	ok := healthCheck(cfg.Health, &rh)
+	rlog = append(rlog, rh...)
+	add("回滚 · 还原 WAR", ok, rlog...)
+	if ok {
+		res.Result = "rolledback"
+	} else {
+		res.Result = "failed"
+	}
+	return res
 }
 
 func fileExists(p string) bool {
