@@ -33,6 +33,11 @@ func main() {
 	mux.HandleFunc("GET /api/agent/capabilities", a.requireAuth(a.agentProxy("/api/capabilities")))
 	mux.HandleFunc("GET /api/agent/system", a.requireAuth(a.agentProxy("/api/system")))
 
+	// 业务数据持久化(需登录):JSON 文档存储,首启由前端种子,后续重载取库中数据。
+	mux.HandleFunc("POST /api/data", a.requireAuth(a.hydrate))
+	mux.HandleFunc("PUT /api/data/{kind}/{id}", a.requireAuth(a.putEntity))
+	mux.HandleFunc("DELETE /api/data/{kind}/{id}", a.requireAuth(a.deleteEntity))
+
 	// 其余路径交给嵌入的前端静态资源(单页应用,无 URL 路由)。
 	sub, err := fs.Sub(distFS, "dist")
 	if err != nil {

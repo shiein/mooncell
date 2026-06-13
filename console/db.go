@@ -37,6 +37,13 @@ func openDB(cfg *Config) *Store {
 			expires_at INTEGER NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+		CREATE TABLE IF NOT EXISTS entities (
+			seq  INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind TEXT NOT NULL,
+			id   TEXT NOT NULL,
+			data TEXT NOT NULL,
+			UNIQUE(kind, id)
+		);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
 	}

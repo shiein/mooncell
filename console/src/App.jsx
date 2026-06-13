@@ -11,7 +11,7 @@ import { LoginPage, SetupWizard } from './pages/Login.jsx';
 import { OverviewPage, CabinetPage, AuditPage } from './pages/Overview.jsx';
 import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
-import { logout as apiLogout, getSession } from './lib/api.js';
+import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -51,16 +51,46 @@ function App() {
   };
 
   // ---- domain state ----
+  // 初始为 mock,登录后从后端水合(首启用 mock 作种子,后续取持久化数据);后端不可达则保留 mock。
   const [apps, setApps] = React.useState(INITIAL_APPS);
   const [releases, setReleases] = React.useState(INITIAL_RELEASES);
   const [backups, setBackups] = React.useState(INITIAL_BACKUPS);
   const [cabinet, setCabinet] = React.useState(INITIAL_CABINET);
   const [audit, setAudit] = React.useState(INITIAL_AUDIT);
 
+  const hydratedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!session || hydratedRef.current) return;
+    hydratedRef.current = true;
+    hydrateData({
+      apps: INITIAL_APPS, releases: INITIAL_RELEASES, backups: INITIAL_BACKUPS,
+      cabinet: INITIAL_CABINET, audit: INITIAL_AUDIT,
+    }).then((data) => {
+      if (!data) return; // 后端不可达:保留 mock,页面照常 1:1
+      const byTimeDesc = (arr) => [...(arr || [])].sort((a, b) => (b.time || 0) - (a.time || 0));
+      if (data.apps && data.apps.length) setApps(data.apps); // apps 保持插入顺序
+      setReleases(byTimeDesc(data.releases));
+      setBackups(byTimeDesc(data.backups));
+      setCabinet(byTimeDesc(data.cabinet));
+      setAudit(byTimeDesc(data.audit));
+    });
+  }, [session]);
+
+  // 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅 console 告警,不打断 UI)。
+  const persist = (kind, obj) => putEntity(kind, obj);
+  const remove = (kind, id) => deleteEntity(kind, id);
+
   const addAudit = (action, target, result) => {
-    setAudit((s) => [{ id: "a" + Date.now() + Math.random(), time: Date.now(), user, action, target, result, ip: "192.168.10.2" }, ...s]);
+    const a = { id: "a" + Date.now() + Math.random(), time: Date.now(), user, action, target, result, ip: "192.168.10.2" };
+    setAudit((s) => [a, ...s]);
+    persist("audit", a);
   };
-  const patchApp = (id, patch) => setApps((s) => s.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  const patchApp = (id, patch) => setApps((s) => s.map((a) => {
+    if (a.id !== id) return a;
+    const next = { ...a, ...patch };
+    persist("app", next);
+    return next;
+  }));
 
   const store = {
     user, nav, route,
@@ -68,8 +98,10 @@ function App() {
 
     finishDeploy(app, { version, size, result }) {
       const now = Date.now();
-      setBackups((s) => [{ id: "b" + now, appId: app.id, version: app.version, time: now, size: size || "—", auto: true, operator: user, dir: tsDir(now), note: "" }, ...s]);
-      setReleases((s) => [{ id: "r" + now, appId: app.id, version, status: result === "success" ? "success" : "rolledback", time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" }, ...s]);
+      const backup = { id: "b" + now, appId: app.id, version: app.version, time: now, size: size || "—", auto: true, operator: user, dir: tsDir(now), note: "" };
+      const release = { id: "r" + now, appId: app.id, version, status: result === "success" ? "success" : "rolledback", time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" };
+      setBackups((s) => [backup, ...s]); persist("backup", backup);
+      setReleases((s) => [release, ...s]); persist("release", release);
       if (result === "success") {
         patchApp(app.id, {
           version, lastDeploy: now,
@@ -89,7 +121,8 @@ function App() {
 
     finishRestore(app, backup) {
       const now = Date.now();
-      setBackups((s) => [{ id: "b" + now, appId: app.id, version: app.version, time: now, size: backup.size, auto: true, operator: user, dir: tsDir(now), note: "还原前自动备份" }, ...s]);
+      const bak = { id: "b" + now, appId: app.id, version: app.version, time: now, size: backup.size, auto: true, operator: user, dir: tsDir(now), note: "还原前自动备份" };
+      setBackups((s) => [bak, ...s]); persist("backup", bak);
       patchApp(app.id, {
         version: backup.version, lastDeploy: now,
         status: app.type === "static-nginx" ? "static" : "running",
@@ -109,14 +142,14 @@ function App() {
     },
 
     addApp(app) {
-      setApps((s) => [...s, app]);
+      setApps((s) => [...s, app]); persist("app", app);
       addAudit("创建应用", app.name, "成功");
       toast(`应用「${app.name}」创建成功,预检通过`);
       nav("app-detail", { appId: app.id });
     },
 
     updateApp(id, patch) {
-      patchApp(id, patch);
+      patchApp(id, patch); // patchApp 内部落库合并后的整应用
       const a = apps.find((x) => x.id === id);
       addAudit("修改配置", (a ? a.name : id), "成功");
       toast("配置已保存 · Agent 端校验通过");
@@ -124,36 +157,39 @@ function App() {
 
     addManualBackup(app) {
       const now = Date.now();
-      setBackups((s) => [{ id: "b" + now, appId: app.id, version: app.version, time: now, size: "≈ " + (10 + Math.random() * 40 | 0) + " MB", auto: false, operator: user, dir: tsDir(now), note: "手动备份" }, ...s]);
+      const bak = { id: "b" + now, appId: app.id, version: app.version, time: now, size: "≈ " + (10 + Math.random() * 40 | 0) + " MB", auto: false, operator: user, dir: tsDir(now), note: "手动备份" };
+      setBackups((s) => [bak, ...s]); persist("backup", bak);
       addAudit("手动备份", app.name, "成功");
       toast(`已创建手动备份 backups/${app.id}/${tsDir(now)}/`);
     },
 
     deleteBackup(app, b) {
-      setBackups((s) => s.filter((x) => x.id !== b.id));
+      setBackups((s) => s.filter((x) => x.id !== b.id)); remove("backup", b.id);
       addAudit("删除备份", `${app.name} · ${b.dir}`, "成功");
       toast("备份已删除", { icon: "trash" });
     },
 
     addCabinetFile(name, size, anon) {
       const code = Array.from({ length: 4 }, () => "ABCDEFGHJKMNPQRSTWXYZ123456789"[Math.random() * 30 | 0]).join("");
-      setCabinet((s) => [{
+      const f = {
         id: "cf" + Date.now(), name, size,
         uploader: anon ? "192.168.10.99(匿名)" : user, time: Date.now(),
         expires: Date.now() + 7 * MC_DAY, code, public: false, downloads: 0,
-      }, ...s]);
+      };
+      setCabinet((s) => [f, ...s]); persist("cabinet", f);
       if (!anon) addAudit("上传文件", "文件柜 · " + name, "成功");
       toast(`上传成功 · 提取码 ${code}(7 天后过期)`);
     },
 
     deleteCabinetFile(f) {
-      setCabinet((s) => s.filter((x) => x.id !== f.id));
+      setCabinet((s) => s.filter((x) => x.id !== f.id)); remove("cabinet", f.id);
       addAudit("删除文件", "文件柜 · " + f.name, "成功");
       toast("文件已删除", { icon: "trash" });
     },
 
     toggleCabinetPublic(f) {
-      setCabinet((s) => s.map((x) => (x.id === f.id ? { ...x, public: !x.public } : x)));
+      const next = { ...f, public: !f.public };
+      setCabinet((s) => s.map((x) => (x.id === f.id ? next : x))); persist("cabinet", next);
       toast(f.public ? `「${f.name}」已设为私有` : `「${f.name}」已公开,匿名可见`);
     },
   };

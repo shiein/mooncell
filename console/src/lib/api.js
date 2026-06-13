@@ -48,4 +48,46 @@ const getAgentCapabilities = () => agentGet('/api/agent/capabilities');
 const getAgentSystem = () => agentGet('/api/agent/system');
 const getAgentPing = () => agentGet('/api/agent/ping');
 
-export { login, logout, getSession, getAgentCapabilities, getAgentSystem, getAgentPing };
+// ---------- 业务数据持久化(SQLite 文档存储)----------
+// hydrateData:首启用 seed 种子初始化,始终返回库中当前全部数据;失败返回 null(前端回退 mock)。
+async function hydrateData(seed) {
+  try {
+    const r = await fetch('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(seed),
+      credentials: 'same-origin',
+    });
+    if (!r.ok) return null;
+    return await r.json(); // { apps, releases, backups, cabinet, audit }
+  } catch (e) {
+    return null;
+  }
+}
+
+// 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅告警,不打断 UI)。
+async function putEntity(kind, obj) {
+  try {
+    await fetch(`/api/data/${kind}/${encodeURIComponent(obj.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj),
+      credentials: 'same-origin',
+    });
+  } catch (e) { console.error('[persist] put', kind, e); }
+}
+
+async function deleteEntity(kind, id) {
+  try {
+    await fetch(`/api/data/${kind}/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    });
+  } catch (e) { console.error('[persist] delete', kind, e); }
+}
+
+export {
+  login, logout, getSession,
+  getAgentCapabilities, getAgentSystem, getAgentPing,
+  hydrateData, putEntity, deleteEntity,
+};
