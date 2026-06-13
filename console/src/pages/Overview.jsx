@@ -3,6 +3,8 @@ import React from 'react';
 import { useMC, AGENT, genSeries, timeAgo, fmtTime, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
 import { Btn, Icon, Badge, Progress, Sparkline, Seg, Switch, CopyChip, EmptyState, Select, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
+import { useAgent } from '../lib/agent.js';
+import { getAgentPing } from '../lib/api.js';
 
 function StatCard({ label, value, unit, series, color, extra }) {
   return (
@@ -19,23 +21,44 @@ function StatCard({ label, value, unit, series, color, extra }) {
 
 function OverviewPage() {
   const store = useMC();
+  const { caps, system, online } = useAgent();
   const [cpuS, setCpuS] = React.useState(() => genSeries(AGENT.cpu, 9));
   const [memS, setMemS] = React.useState(() => genSeries(AGENT.mem, 4));
   const [testing, setTesting] = React.useState(false);
+
+  // 有真实读数:把 Agent 上报值追加进曲线
   React.useEffect(() => {
+    if (!system) return;
+    setCpuS((s) => [...s.slice(1), Math.round(system.cpuPercent)]);
+    setMemS((s) => [...s.slice(1), Math.round(system.memPercent)]);
+  }, [system]);
+
+  // 离线 / 探测中:维持模拟动画,保证纯前端或 Agent 未运行时页面 1:1 有动效
+  React.useEffect(() => {
+    if (online) return;
     const iv = setInterval(() => {
       setCpuS((s) => [...s.slice(1), Math.max(3, Math.min(95, s[s.length - 1] + (Math.random() - 0.5) * 14)) | 0]);
       setMemS((s) => [...s.slice(1), Math.max(20, Math.min(92, s[s.length - 1] + (Math.random() - 0.5) * 5)) | 0]);
     }, 2000);
     return () => clearInterval(iv);
-  }, []);
+  }, [online]);
+
   const cpu = cpuS[cpuS.length - 1], mem = memS[memS.length - 1];
   const d = AGENT.diskDetail;
+  const disk = system ? Math.round(system.diskPercent) : AGENT.disk;
+  const diskUsed = system ? system.diskUsedGB : d.used;
+  const diskTotal = system ? system.diskTotalGB : d.total;
+  const memLabel = system
+    ? `${(system.memUsedMB / 1024).toFixed(1)} GB / ${Math.round(system.memTotalMB / 1024)} GB`
+    : "15.8 GB / 32 GB";
   const failedApps = store.apps.filter((a) => a.status === "failed");
 
-  const testConn = () => {
+  const testConn = async () => {
     setTesting(true);
-    setTimeout(() => { setTesting(false); toast("Agent 连通性正常 · 延迟 2ms · token 校验通过"); }, 1100);
+    const ping = await getAgentPing();
+    setTesting(false);
+    if (ping) toast(`Agent 连通正常 · ${ping.agent} · ${ping.os} · 运行 ${Math.floor((ping.uptime || 0) / 60)} 分钟`);
+    else toast("Agent 不可达 · 请检查 Agent 是否运行、token 是否与 Console 配置一致", { tone: "error", icon: "alert" });
   };
 
   return (
@@ -46,15 +69,15 @@ function OverviewPage() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 14 }}>
         <StatCard label="CPU" value={cpu} unit="%" series={cpuS} color="var(--info)" />
         <StatCard label="内存" value={mem} unit="%" series={memS} color="var(--cyan)"
-          extra={<div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>15.8 GB / 32 GB</div>} />
+          extra={<div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{memLabel}</div>} />
         <div className="card card-pad" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center" }}>
             <span style={{ fontSize: 12.5, color: "var(--muted-fg)", fontWeight: 500 }}>磁盘水位</span>
-            {AGENT.disk > 85 ? <Badge tone="error" style={{ marginLeft: "auto" }}>禁止部署</Badge> :
-              AGENT.disk > 70 ? <Badge tone="warn" style={{ marginLeft: "auto" }}>接近阈值</Badge> : null}
+            {disk > 85 ? <Badge tone="error" style={{ marginLeft: "auto" }}>禁止部署</Badge> :
+              disk > 70 ? <Badge tone="warn" style={{ marginLeft: "auto" }}>接近阈值</Badge> : null}
           </div>
-          <div className="stat-num">{AGENT.disk}<span style={{ fontSize: 14, color: "var(--muted-fg)", fontWeight: 500 }}> % · {d.used}/{d.total} GB</span></div>
-          <Progress value={AGENT.disk} height={7} color={AGENT.disk > 85 ? "var(--error)" : AGENT.disk > 70 ? "var(--warn)" : "var(--success)"} />
+          <div className="stat-num">{disk}<span style={{ fontSize: 14, color: "var(--muted-fg)", fontWeight: 500 }}> % · {diskUsed}/{diskTotal} GB</span></div>
+          <Progress value={disk} height={7} color={disk > 85 ? "var(--error)" : disk > 70 ? "var(--warn)" : "var(--success)"} />
           <div style={{ display: "flex", gap: 12, fontSize: 11.5, color: "var(--muted-fg)", whiteSpace: "nowrap" }}>
             <span>备份 {d.backups} GB</span><span>文件柜 {d.cabinet} GB</span><span>日志 {d.logs} GB</span>
           </div>
@@ -67,10 +90,12 @@ function OverviewPage() {
           <div className="card card-pad">
             <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
               <h4 style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 7 }}><Icon name="server" size={14} style={{ color: "var(--primary)" }} />Agent 能力清单</h4>
-              <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted-fg)" }}>启动自检上报 · 前端按能力过滤可选 Runner</span>
+              {online === false
+                ? <Badge tone="error" dot style={{ marginLeft: "auto" }}>Agent 离线 · 显示缓存</Badge>
+                : <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted-fg)" }}>启动自检上报 · 前端按能力过滤可选 Runner</span>}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-              {AGENT.caps.map((c) => (
+              {caps.map((c) => (
                 <div key={c.key} className="card" style={{ padding: "9px 12px", boxShadow: "none", background: c.ok ? "var(--bg)" : "var(--muted)", opacity: c.ok ? 1 : .6 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600 }}>
                     <Icon name={c.ok ? "check" : "x"} size={12} style={{ color: c.ok ? "var(--success)" : "var(--muted-fg)" }} />{c.label}
