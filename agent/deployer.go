@@ -76,6 +76,18 @@ func execStart(cfg DeployConfig) (string, error) {
 			parts = append(parts, a)
 		}
 		return strings.Join(parts, " "), nil
+	case "python":
+		// 首版:单文件入口,system python3 托管运行(systemd 需绝对路径)。
+		// 多文件/venv/requirements 为后续增强。
+		py, err := exec.LookPath("python3")
+		if err != nil {
+			return "", fmt.Errorf("未找到 python3: %w", err)
+		}
+		parts := []string{py, cfg.BinPath}
+		if a := strings.TrimSpace(cfg.Args); a != "" {
+			parts = append(parts, a)
+		}
+		return strings.Join(parts, " "), nil
 	default: // go-binary
 		es := cfg.BinPath
 		if a := strings.TrimSpace(cfg.Args); a != "" {

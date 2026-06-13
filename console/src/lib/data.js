@@ -12,10 +12,15 @@ const DEPLOY_TYPES = {
   "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "nohup", "pm2"], artifactExt: ".jar" },
   "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war" },
   "go-binary":    { label: "Go Binary",    tone: "cyan",    runners: ["systemd", "nohup"], artifactExt: "" },
-  "python":       { label: "Python",       tone: "info",    runners: ["systemd", "nohup", "pm2"], artifactExt: ".tar.gz" },
+  "python":       { label: "Python",       tone: "info",    runners: ["systemd", "nohup", "pm2"], artifactExt: ".py" },
   "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".tar.gz" },
   "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["无进程"], artifactExt: ".tar.gz" },
 };
+
+// 进程类应用:走 systemd 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。
+// static-nginx 走软链切换、node 暂未接真机,故不在内。
+const PROCESS_TYPES = ["go-binary", "java-jar", "python"];
+const isProcessType = (t) => PROCESS_TYPES.includes(t);
 
 const APP_STATUS = {
   running:   { label: "运行中", tone: "success" },
@@ -299,7 +304,7 @@ function nextVersion(v) {
 }
 
 export {
-  MCStore, useMC, DEPLOY_TYPES, APP_STATUS, REL_STATUS,
+  MCStore, useMC, DEPLOY_TYPES, isProcessType, APP_STATUS, REL_STATUS,
   INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
   AGENT, genSeries, genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
   NOW as MC_NOW, MIN as MC_MIN, HOUR as MC_HOUR, DAY as MC_DAY,

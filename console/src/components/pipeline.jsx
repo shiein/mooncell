@@ -1,6 +1,6 @@
 // Mooncell — 部署流水线:计划构建 + 模拟引擎 + 视图 + 部署/还原对话框
 import React from 'react';
-import { useMC, tsDir, DEPLOY_TYPES, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
+import { useMC, tsDir, DEPLOY_TYPES, isProcessType, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
 import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
 
@@ -325,8 +325,8 @@ function DeployDialog({ app, open, onClose }) {
   const sha = React.useMemo(() => randSha(), [open, up.file && up.file.name]);
   if (!app) return null;
 
-  // go-binary 且上传了真实文件 → 走 Agent 真实部署;否则(其它类型 / 示例制品)沿用模拟。
-  const isReal = app.type === "go-binary" && !!realFile;
+  // 进程类(go-binary/java-jar/python)且上传了真实文件 → 走 Agent 真实部署;否则(其它类型 / 示例制品)沿用模拟。
+  const isReal = isProcessType(app.type) && !!realFile;
   const ext = DEPLOY_TYPES[app.type].artifactExt;
   const chunks = up.file ? Math.ceil(up.file.sizeMB / 4) : 0;
 
@@ -374,7 +374,7 @@ function DeployDialog({ app, open, onClose }) {
     <Dialog open={open} onClose={onClose} noClose={running} width={stage === "pipeline" ? 860 : 560}
       title={`部署 · ${app.name}`}
       desc={stage === "upload"
-        ? (isReal ? "go-binary · 将下发到 Agent 真机部署:备份 → 停止 → 替换 → 启动 → 健康检查" : "上传制品后将自动执行:备份 → 停止 → 替换 → 启动 → 健康检查")
+        ? (isReal ? `${app.type} · 将下发到 Agent 真机部署:备份 → 停止 → 替换 → 启动 → 健康检查` : "上传制品后将自动执行:备份 → 停止 → 替换 → 启动 → 健康检查")
         : `Release ${version} · 操作人 ${store.user}`}
       foot={stage === "upload" ? (
         <React.Fragment>
@@ -518,8 +518,8 @@ function RestoreDialog({ app, backup, open, onClose }) {
   React.useEffect(() => { if (open) { setStage("confirm"); setReal(null); pipe.reset(); } }, [open, backup && backup.id]);
   if (!app || !backup) return null;
 
-  // go-binary 且该备份是 Agent 上的真实备份 → 走真机还原;否则(其它类型 / mock 备份)沿用模拟。
-  const isReal = app.type === "go-binary" && !!backup.real;
+  // 进程类且该备份是 Agent 上的真实备份 → 走真机还原;否则(其它类型 / mock 备份)沿用模拟。
+  const isReal = isProcessType(app.type) && !!backup.real;
 
   const startRestore = async () => {
     setStage("pipeline");
@@ -551,7 +551,7 @@ function RestoreDialog({ app, backup, open, onClose }) {
   return (
     <Dialog open={open} onClose={onClose} noClose={running} width={stage === "pipeline" ? 860 : 540}
       title={`一键还原 · ${app.name}`}
-      desc={isReal ? `go-binary · 下发 Agent 真机还原到备份 ${backup.dir}` : `还原到备份 ${backup.dir} (${backup.version})`}
+      desc={isReal ? `${app.type} · 下发 Agent 真机还原到备份 ${backup.dir}` : `还原到备份 ${backup.dir} (${backup.version})`}
       foot={stage === "confirm" ? (
         <React.Fragment>
           <Btn variant="ghost" onClick={onClose}>取消</Btn>
