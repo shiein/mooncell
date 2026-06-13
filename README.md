@@ -23,8 +23,8 @@ mooncell/
 | Console 登录后端(SQLite + bcrypt + httpOnly 会话)| ✅ 完成 |
 | Agent 骨架(token 认证 + 能力自检 + 系统上报)| ✅ 完成(P0)|
 | Console↔Agent 协议(代理 + 总览页接真实数据)| ✅ 完成 |
-| Deployer(java-jar / static-nginx)+ 部署闭环 | ⏳ 待开发(需目标机)|
-| Console 其余业务(应用 / 部署 / 备份 / 文件柜 真实 API)| ⏳ 待开发(当前为前端 mock)|
+| Console 业务数据持久化(应用/部署/备份/文件柜/审计落 SQLite)| ✅ 完成(JSON 文档存储,重载不丢)|
+| Deployer(java-jar / static-nginx)+ 真实部署闭环 | ⏳ 待开发(需目标机)|
 
 实施路线见方案文档 §12(P0 → P3)。
 
