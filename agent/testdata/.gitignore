@@ -1,0 +1,5 @@
+# 集成测试制品为可再生产物,不入库(由各自源目录现场构建)
+demojava/build/
+*.jar
+*.tar.gz
+*.class

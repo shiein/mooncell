@@ -19,14 +19,17 @@ import (
 type DeployConfig struct {
 	ID         string            `json:"id"`
 	Name       string            `json:"name"`
-	BinPath    string            `json:"binPath"` // 制品落盘绝对路径,须在 deploy_roots 白名单内
+	Type       string            `json:"type"`    // go-binary | java-jar | static-nginx;空默认 go-binary
+	BinPath    string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
 	Workdir    string            `json:"workdir"`
-	Args       string            `json:"args"` // 启动参数(空格分隔)
+	Args       string            `json:"args"`    // 启动参数
+	JvmArgs    string            `json:"jvmArgs"` // java-jar:JVM 参数
 	Env        map[string]string `json:"env"`
 	User       string            `json:"user"`
 	Health     string            `json:"health"` // HTTP 健康检查 URL,空则跳过
 	Version    string            `json:"version"`
 	BackupKeep int               `json:"backupKeep"`
+	ReloadCmd  string            `json:"reloadCmd"` // static-nginx:部署后可选钩子(如 nginx -s reload),空则跳过
 }
 
 // Step 是流水线一步的执行记录;Result 为整体结果。
@@ -55,14 +58,41 @@ func sysctl(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// execStart 按类型拼 systemd ExecStart。systemd 要求绝对路径,
+// java-jar 需用 exec.LookPath 把 "java" 解析为绝对路径。
+func execStart(cfg DeployConfig) (string, error) {
+	switch cfg.Type {
+	case "java-jar":
+		java, err := exec.LookPath("java")
+		if err != nil {
+			return "", fmt.Errorf("未找到 java(请先安装 JRE): %w", err)
+		}
+		parts := []string{java}
+		if j := strings.TrimSpace(cfg.JvmArgs); j != "" {
+			parts = append(parts, j)
+		}
+		parts = append(parts, "-jar", cfg.BinPath)
+		if a := strings.TrimSpace(cfg.Args); a != "" {
+			parts = append(parts, a)
+		}
+		return strings.Join(parts, " "), nil
+	default: // go-binary
+		es := cfg.BinPath
+		if a := strings.TrimSpace(cfg.Args); a != "" {
+			es += " " + a
+		}
+		return es, nil
+	}
+}
+
 func writeUnit(cfg DeployConfig) error {
 	var env strings.Builder
 	for k, v := range cfg.Env {
 		fmt.Fprintf(&env, "Environment=%s=%s\n", k, v)
 	}
-	execStart := cfg.BinPath
-	if a := strings.TrimSpace(cfg.Args); a != "" {
-		execStart += " " + a
+	es, err := execStart(cfg)
+	if err != nil {
+		return err
 	}
 	user := cfg.User
 	if user == "" {
@@ -86,7 +116,7 @@ User=%s
 
 [Install]
 WantedBy=multi-user.target
-`, cfg.Name, wd, execStart, env.String(), user)
+`, cfg.Name, wd, es, env.String(), user)
 	return os.WriteFile(unitPath(cfg.ID), []byte(unit), 0644)
 }
 
@@ -236,8 +266,17 @@ func healthCheck(url string, logs *[]string) bool {
 
 // ---------- 部署流水线 ----------
 
-// runDeploy 执行已验证的部署闭环:备份 → 停 → 原子替换 → 生成 unit + 启动 → 健康检查;失败自动回滚。
+// runDeploy 按应用类型分发:static-nginx 走软链切换,其余(go-binary/java-jar)复用 systemd 进程流水线。
 func (a *agent) runDeploy(cfg DeployConfig, artifact string) DeployResult {
+	if cfg.Type == "static-nginx" {
+		return a.runDeployStatic(cfg, artifact)
+	}
+	return a.runDeployProcess(cfg, artifact)
+}
+
+// runDeployProcess 执行已验证的进程类部署闭环:备份 → 停 → 原子替换 → 生成 unit + 启动 → 健康检查;失败自动回滚。
+// go-binary 与 java-jar 共用此流水线,差异只在 execStart 与制品落盘(jar 同样按文件原子替换)。
+func (a *agent) runDeployProcess(cfg DeployConfig, artifact string) DeployResult {
 	res := DeployResult{Version: cfg.Version}
 	add := func(name string, ok bool, logs ...string) {
 		res.Steps = append(res.Steps, Step{Name: name, OK: ok, Logs: logs})
@@ -323,6 +362,143 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string) DeployResult {
 		res.Result = "failed"
 	}
 	return res
+}
+
+// ---------- 静态站点(软链切换)----------
+
+// extractTarGz 把 tar.gz 制品解包到 dest 目录(dest 须已建)。用系统 tar,省去手写流解析。
+func extractTarGz(archive, dest string) error {
+	out, err := exec.Command("tar", "-xzf", archive, "-C", dest).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tar 解包失败: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// switchSymlink 原子切换软链 link → target:先建临时软链再 rename 覆盖,避免出现 link 短暂消失的窗口。
+func switchSymlink(target, link string) error {
+	tmp := link + ".tmp"
+	os.Remove(tmp)
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
+	}
+	return os.Rename(tmp, link)
+}
+
+// runDeployStatic 静态站点部署:解包到带时间戳的 release 目录,原子切换软链对外暴露,失败回滚到旧 release。
+// cfg.BinPath 是对外 web root 软链路径(如 /srv/apps/site/current);releases 存于 <BinPath>-releases/<ts>/。
+func (a *agent) runDeployStatic(cfg DeployConfig, artifact string) DeployResult {
+	res := DeployResult{Version: cfg.Version}
+	add := func(name string, ok bool, logs ...string) {
+		res.Steps = append(res.Steps, Step{Name: name, OK: ok, Logs: logs})
+	}
+
+	// 1. 校验制品
+	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "软链 "+cfg.BinPath)
+
+	// 2. 记录当前软链指向(用于回滚);首次部署无旧目标
+	prevTarget, _ := os.Readlink(cfg.BinPath)
+	if prevTarget == "" {
+		add("备份当前版本", true, "首次部署,无旧 release 需记录")
+	} else {
+		add("备份当前版本", true, "当前指向 "+prevTarget)
+	}
+
+	// 3. 解包到新 release 目录
+	ts := time.Now().Format("20060102_150405")
+	releasesDir := cfg.BinPath + "-releases"
+	newRelease := filepath.Join(releasesDir, ts)
+	if err := os.MkdirAll(newRelease, 0755); err != nil {
+		add("解包制品", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	if err := extractTarGz(artifact, newRelease); err != nil {
+		os.RemoveAll(newRelease)
+		add("解包制品", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	add("解包制品", true, "tar -xzf → "+newRelease)
+
+	// 4. 原子切换软链
+	if err := switchSymlink(newRelease, cfg.BinPath); err != nil {
+		add("切换软链", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	add("切换软链", true, cfg.BinPath+" → "+newRelease)
+
+	// 5. 可选 reload 钩子(如 nginx -s reload)
+	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
+		out, err := exec.Command("sh", "-c", rc).CombinedOutput()
+		if err != nil {
+			add("reload", false, rc+" → "+strings.TrimSpace(string(out)))
+		} else {
+			add("reload", true, rc)
+		}
+	}
+
+	// 6. 健康检查
+	var hlog []string
+	if healthCheck(cfg.Health, &hlog) {
+		add("健康检查", true, hlog...)
+		// 软链 release 也按份数滚动清理
+		a.rotateReleases(releasesDir, cfg.BackupKeep)
+		res.Result = "success"
+		return res
+	}
+	add("健康检查", false, hlog...)
+
+	// 7. 失败 → 回滚软链
+	if prevTarget == "" {
+		add("回滚", false, "首次部署无旧 release 可回滚")
+		res.Result = "failed"
+		return res
+	}
+	rlog := []string{"切回 " + prevTarget}
+	if err := switchSymlink(prevTarget, cfg.BinPath); err != nil {
+		rlog = append(rlog, "回滚失败: "+err.Error())
+		add("回滚 · 软链", false, rlog...)
+		res.Result = "failed"
+		return res
+	}
+	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
+		exec.Command("sh", "-c", rc).Run()
+	}
+	var rh []string
+	ok := healthCheck(cfg.Health, &rh)
+	rlog = append(rlog, rh...)
+	add("回滚 · 软链", ok, rlog...)
+	os.RemoveAll(newRelease) // 失效 release 清理
+	if ok {
+		res.Result = "rolledback"
+	} else {
+		res.Result = "failed"
+	}
+	return res
+}
+
+// rotateReleases 按份数滚动保留 release 目录;当前软链指向的目录永不删除。
+func (a *agent) rotateReleases(releasesDir string, keep int) {
+	if keep <= 0 {
+		keep = 5
+	}
+	entries, err := os.ReadDir(releasesDir)
+	if err != nil {
+		return
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	sort.Strings(dirs)
+	for len(dirs) > keep {
+		os.RemoveAll(filepath.Join(releasesDir, dirs[0]))
+		dirs = dirs[1:]
+	}
 }
 
 func short(s string) string {
