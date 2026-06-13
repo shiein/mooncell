@@ -32,6 +32,9 @@ func main() {
 	mux.HandleFunc("GET /api/agent/ping", a.requireAuth(a.agentProxy("/api/ping")))
 	mux.HandleFunc("GET /api/agent/capabilities", a.requireAuth(a.agentProxy("/api/capabilities")))
 	mux.HandleFunc("GET /api/agent/system", a.requireAuth(a.agentProxy("/api/system")))
+	mux.HandleFunc("POST /api/agent/apps/{id}/deploy", a.requireAuth(a.agentDeploy))
+	mux.HandleFunc("GET /api/agent/apps/{id}/status", a.requireAuth(a.agentAppStatus))
+	mux.HandleFunc("DELETE /api/agent/apps/{id}", a.requireAuth(a.agentUndeploy))
 
 	// 业务数据持久化(需登录):JSON 文档存储,首启由前端种子,后续重载取库中数据。
 	mux.HandleFunc("POST /api/data", a.requireAuth(a.hydrate))
