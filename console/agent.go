@@ -134,6 +134,12 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
 	resp, err := a.agent.postStream("/api/apps/"+id+"/deploy/stream", r.Header.Get("Content-Type"), r.Body)
+	a.streamAgentResp(w, resp, err)
+}
+
+// streamAgentResp 把 Agent 的流式响应边读边 flush 透传给前端;Agent 出错(非 SSE)时原样回传 JSON 便于前端读到 error。
+// 部署与还原的 SSE 透传共用此逻辑。
+func (a *api) streamAgentResp(w http.ResponseWriter, resp *http.Response, err error) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Agent 不可达", "detail": err.Error(), "online": false})
 		return
@@ -145,9 +151,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "不支持流式响应"})
 		return
 	}
-	// Agent 出错(非 SSE)时原样回传 JSON,便于前端读到 error。
-	ct := resp.Header.Get("Content-Type")
-	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(resp.StatusCode)
@@ -166,6 +170,21 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// agentListBackups 透传 GET 历史备份列表。
+func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	status, body, err := a.agent.get("/api/apps/" + id + "/backups")
+	relayAgent(w, status, body, err)
+}
+
+// agentRestoreStream 把 Agent 的 SSE 还原流透传给前端(请求体为 JSON,无制品上传)。
+func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	defer r.Body.Close()
+	resp, err := a.agent.postStream("/api/apps/"+id+"/restore/stream", r.Header.Get("Content-Type"), r.Body)
+	a.streamAgentResp(w, resp, err)
 }
 
 func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {

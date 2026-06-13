@@ -104,6 +104,40 @@ async function deployViaAgent(appId, config, file) {
   }
 }
 
+// consumeSSE 消费一个 text/event-stream 响应:按 \n\n 分帧,解析 event/data,
+// 每帧回调 onEvent(type, data);返回最终 done 事件数据。部署与还原共用。
+async function consumeSSE(r, onEvent, errLabel) {
+  if (!r.ok || !(r.headers.get('Content-Type') || '').includes('text/event-stream')) {
+    const d = await r.json().catch(() => ({}));
+    return { error: d.error || `${errLabel} (${r.status})` };
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let done = null;
+  for (;;) {
+    const { value, done: finished } = await reader.read();
+    if (finished) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let ev = 'message', data = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { continue; }
+      onEvent && onEvent(ev, parsed);
+      if (ev === 'done') done = parsed;
+    }
+  }
+  return done || { error: '流中断,未收到结果' };
+}
+
 // 真实部署(SSE 实时流):multipart 上传后,Agent 每完成一步推送 step 事件,结束推送 done。
 // onEvent(type, data) 在每个事件到达时回调(type ∈ "step"|"done");返回最终结果 {result,version,steps} 或 {error}。
 async function deployViaAgentStream(appId, config, file, onEvent) {
@@ -114,36 +148,35 @@ async function deployViaAgentStream(appId, config, file, onEvent) {
     const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, {
       method: 'POST', body: fd, credentials: 'same-origin',
     });
-    // 非 SSE(出错)→ 当作 JSON 错误处理
-    if (!r.ok || !(r.headers.get('Content-Type') || '').includes('text/event-stream')) {
-      const d = await r.json().catch(() => ({}));
-      return { error: d.error || `部署失败 (${r.status})` };
-    }
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let done = null;
-    for (;;) {
-      const { value, done: finished } = await reader.read();
-      if (finished) break;
-      buf += decoder.decode(value, { stream: true });
-      let sep;
-      while ((sep = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, sep);
-        buf = buf.slice(sep + 2);
-        let ev = 'message', data = '';
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('event:')) ev = line.slice(6).trim();
-          else if (line.startsWith('data:')) data += line.slice(5).trim();
-        }
-        if (!data) continue;
-        let parsed;
-        try { parsed = JSON.parse(data); } catch { continue; }
-        onEvent && onEvent(ev, parsed);
-        if (ev === 'done') done = parsed;
-      }
-    }
-    return done || { error: '部署流中断,未收到结果' };
+    return await consumeSSE(r, onEvent, '部署失败');
+  } catch (e) {
+    return { error: 'Agent 不可达: ' + (e.message || e) };
+  }
+}
+
+// 列出某应用在 Agent 上的真实历史备份(新→旧);失败返回 null,调用方回退 mock。
+async function listAgentBackups(appId) {
+  try {
+    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/backups`, { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return Array.isArray(d.backups) ? d.backups : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 真实还原(SSE 实时流):用指定备份(backup=时间戳目录名)重跑部署流水线,逐步推送。
+// onEvent(type, data) 回调;返回 {result,version,steps} 或 {error}。
+async function restoreViaAgentStream(appId, config, backup, onEvent) {
+  try {
+    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/restore/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config, backup }),
+      credentials: 'same-origin',
+    });
+    return await consumeSSE(r, onEvent, '还原失败');
   } catch (e) {
     return { error: 'Agent 不可达: ' + (e.message || e) };
   }
@@ -153,4 +186,5 @@ export {
   login, logout, getSession,
   getAgentCapabilities, getAgentSystem, getAgentPing,
   hydrateData, putEntity, deleteEntity, deployViaAgent, deployViaAgentStream,
+  listAgentBackups, restoreViaAgentStream,
 };

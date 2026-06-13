@@ -44,6 +44,11 @@ func main() {
 	mux.HandleFunc("GET /api/apps/{id}/status", a.tokenAuth(a.appStatus))
 	mux.HandleFunc("DELETE /api/apps/{id}", a.tokenAuth(a.undeploy))
 
+	// 一键还原:列出历史备份,用指定备份制品重跑部署流水线(还原前自动备份当前版本,失败自动回滚)
+	mux.HandleFunc("GET /api/apps/{id}/backups", a.tokenAuth(a.listBackups))
+	mux.HandleFunc("POST /api/apps/{id}/restore", a.tokenAuth(a.restore))
+	mux.HandleFunc("POST /api/apps/{id}/restore/stream", a.tokenAuth(a.restoreStream)) // SSE 实时日志流
+
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Addr, cfg.Server.Port)
 	log.Printf("Mooncell Agent %s 运行于 http://%s", agentVersion, addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {

@@ -191,7 +191,21 @@ func withinRoots(p string, roots []string) bool {
 
 // ---------- 备份 ----------
 
+// verSidecar 是记录"当前落盘制品版本"的旁车文件,紧邻制品。Agent 无状态,靠它在备份时
+// 得知被备份的(旧)制品版本——而非正在部署的新版本,避免备份版本标签错位。
+func verSidecar(binPath string) string { return binPath + ".ver" }
+
+// currentVersion 读取制品旁车记录的版本;无旁车(早期部署/首次)返回空。
+func currentVersion(binPath string) string {
+	b, err := os.ReadFile(verSidecar(binPath))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // backupCurrent 把当前制品复制到 backups/<id>/<ts>/,附 meta.json;首次部署(无当前制品)返回空。
+// meta.version 取旧制品旁车记录的版本(被备份的就是这个版本),不是正在部署的新版本。
 func (a *agent) backupCurrent(cfg DeployConfig) (string, error) {
 	if _, err := os.Stat(cfg.BinPath); err != nil {
 		return "", nil // 首次部署
@@ -205,7 +219,7 @@ func (a *agent) backupCurrent(cfg DeployConfig) (string, error) {
 		return "", err
 	}
 	meta := fmt.Sprintf(`{"version":%q,"sha256":%q,"time":%d,"operator":"console"}`,
-		cfg.Version, sha256File(cfg.BinPath), time.Now().UnixMilli())
+		currentVersion(cfg.BinPath), sha256File(cfg.BinPath), time.Now().UnixMilli())
 	os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0644)
 	a.rotateBackups(cfg.ID, cfg.BackupKeep)
 	return dir, nil
@@ -336,6 +350,8 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	var hlog []string
 	if healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
+		// 记录当前落盘版本到旁车,供下次部署/还原备份时正确标注被备份的版本。
+		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
 		res.Result = "success"
 		return res
 	}

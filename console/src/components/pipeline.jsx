@@ -2,11 +2,11 @@
 import React from 'react';
 import { useMC, tsDir, DEPLOY_TYPES, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
-import { deployViaAgentStream } from '../lib/api.js';
+import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
 
-// 把 Agent 返回的真实部署结果({result, steps:[{name,ok,logs}]})转成 PipelineView 可渲染的形状,
-// 复用与模拟部署完全一致的视觉。
-function realToPipe(res) {
+// 把 Agent 返回的真实部署/还原结果({result, steps:[{name,ok,logs}]})转成 PipelineView 可渲染的形状,
+// 复用与模拟完全一致的视觉。verb 仅用于收尾汇总行文案("部署"/"还原")。
+function realToPipe(res, verb = "部署") {
   const steps = (res.steps || []).map((s, i) => ({
     id: "r" + i, label: s.name,
     status: s.ok ? "success" : "failed",
@@ -26,7 +26,7 @@ function realToPipe(res) {
   }
   lines.push({
     ts: t,
-    text: res.result === "success" ? "═ 部署成功 ═" : res.result === "rolledback" ? "═ 部署失败,已自动回滚 ═" : "═ 部署失败 ═",
+    text: res.result === "success" ? `═ ${verb}成功 ═` : res.result === "rolledback" ? `═ ${verb}失败,已自动回滚 ═` : `═ ${verb}失败 ═`,
     cls: res.result === "success" ? "ok" : "err",
   });
   return { steps, lines };
@@ -513,32 +513,57 @@ function DeployDialog({ app, open, onClose }) {
 function RestoreDialog({ app, backup, open, onClose }) {
   const store = useMC();
   const [stage, setStage] = React.useState("confirm");
+  const [real, setReal] = React.useState(null); // 真实还原:{streaming,steps}|{error}|{result,steps}
   const pipe = usePipeline();
-  React.useEffect(() => { if (open) { setStage("confirm"); pipe.reset(); } }, [open, backup && backup.id]);
+  React.useEffect(() => { if (open) { setStage("confirm"); setReal(null); pipe.reset(); } }, [open, backup && backup.id]);
   if (!app || !backup) return null;
 
-  const startRestore = () => {
+  // go-binary 且该备份是 Agent 上的真实备份 → 走真机还原;否则(其它类型 / mock 备份)沿用模拟。
+  const isReal = app.type === "go-binary" && !!backup.real;
+
+  const startRestore = async () => {
     setStage("pipeline");
+    if (isReal) {
+      setReal({ streaming: true, steps: [] });
+      const cfg = {
+        name: app.name, type: app.type, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
+        health: /^https?:\/\//.test(app.health || "") ? app.health : "",
+        version: backup.version, backupKeep: app.backupKeep || 5,
+      };
+      const res = await restoreViaAgentStream(app.id, cfg, backup.dir, (type, data) => {
+        if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
+      });
+      if (res.error) { setReal({ error: res.error }); return; }
+      setReal(res);
+      if (res.result === "success") store.finishRestore(app, backup);
+      return;
+    }
     pipe.start(makeRestorePlan(app, backup), () => store.finishRestore(app, backup));
   };
-  const running = pipe.state === "running";
+
+  // 统一两条路径状态:resultKind ∈ idle|running|success|rolledback|error
+  const resultKind = real
+    ? (real.streaming ? "running" : real.error ? "error" : real.result === "success" ? "success" : (real.result || "failed"))
+    : pipe.state;
+  const running = resultKind === "running";
+  const doneState = resultKind === "success" || resultKind === "rolledback";
 
   return (
     <Dialog open={open} onClose={onClose} noClose={running} width={stage === "pipeline" ? 860 : 540}
       title={`一键还原 · ${app.name}`}
-      desc={`还原到备份 ${backup.dir} (${backup.version})`}
+      desc={isReal ? `go-binary · 下发 Agent 真机还原到备份 ${backup.dir}` : `还原到备份 ${backup.dir} (${backup.version})`}
       foot={stage === "confirm" ? (
         <React.Fragment>
           <Btn variant="ghost" onClick={onClose}>取消</Btn>
-          <Btn variant="primary" icon="rotate" onClick={startRestore}>开始还原</Btn>
+          <Btn variant="primary" icon="rotate" onClick={startRestore}>{isReal ? "开始还原(真机)" : "开始还原"}</Btn>
         </React.Fragment>
-      ) : <Btn variant={pipe.state === "success" ? "primary" : "outline"} disabled={running} onClick={onClose}>{running ? "还原中…" : "关闭"}</Btn>}>
+      ) : <Btn variant={resultKind === "success" ? "primary" : "outline"} disabled={running} onClick={onClose}>{running ? "还原中…" : "关闭"}</Btn>}>
       {stage === "confirm" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="card" style={{ padding: 14, background: "var(--bg)" }}>
             <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "7px 16px", fontSize: 13 }}>
               <span style={{ color: "var(--muted-fg)" }}>备份目录</span><span className="mono" style={{ fontSize: 12 }}>backups/{app.id}/{backup.dir}/</span>
-              <span style={{ color: "var(--muted-fg)" }}>备份版本</span><span className="mono" style={{ fontSize: 12 }}>{backup.version} · {backup.size}</span>
+              <span style={{ color: "var(--muted-fg)" }}>备份版本</span><span className="mono" style={{ fontSize: 12 }}>{backup.version || "—"} · {backup.size}</span>
               <span style={{ color: "var(--muted-fg)" }}>创建时间</span><span>{fmtTime(backup.time)}({backup.auto ? "部署自动备份" : "手动备份"})</span>
               <span style={{ color: "var(--muted-fg)" }}>当前版本</span><span className="mono" style={{ fontSize: 12 }}>{app.version}</span>
             </div>
@@ -550,6 +575,30 @@ function RestoreDialog({ app, backup, open, onClose }) {
             <Icon name="archive" size={15} style={{ flex: "none", marginTop: 1 }} />
             <span>还原会走与部署相同的流水线;开始前会先备份当前版本 {app.version},防止"还原错了回不去"。</span>
           </div>
+        </div>
+      ) : real ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {real.error ? (
+            <div className="card" style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, background: "var(--error-soft)", color: "var(--error)" }}>
+              <Icon name="alert" size={16} /><span style={{ fontSize: 13 }}>还原失败:{real.error}</span>
+            </div>
+          ) : (
+            <React.Fragment>
+              {doneState ? (
+                <div className="fade-up" style={{
+                  borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10,
+                  background: resultKind === "success" ? "var(--success-soft)" : "var(--warn-soft)",
+                  color: resultKind === "success" ? "var(--success)" : "var(--warn)",
+                }}>
+                  <Icon name={resultKind === "success" ? "check" : "rotate"} size={17} />
+                  <div style={{ fontWeight: 650, fontSize: 13.5 }}>
+                    {resultKind === "success" ? `还原成功 · ${backup.version || "备份"} 已恢复运行` : `还原失败 · 已自动回滚至原版本`}
+                  </div>
+                </div>
+              ) : null}
+              <PipelineView pipe={realToPipe(real, "还原")} />
+            </React.Fragment>
+          )}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>

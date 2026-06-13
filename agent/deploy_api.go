@@ -73,7 +73,12 @@ func (a *agent) deployStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanup()
+	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeploy(cfg, tmpPath, emit) })
+}
 
+// runSSE 建立 SSE 响应头,执行 run(emit) 流水线:每步完成推 `event: step`,结束推 `event: done`。
+// 部署与还原共用同一套流式骨架,差异只在传入的 run 闭包(制品来源不同)。
+func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "服务端不支持流式响应"})
@@ -92,7 +97,7 @@ func (a *agent) deployStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	res := a.runDeploy(cfg, tmpPath, func(s Step) { sse("step", s) })
+	res := run(func(s Step) { sse("step", s) })
 	sse("done", res)
 }
 

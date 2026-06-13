@@ -3,6 +3,7 @@ import React from 'react';
 import { useMC, DEPLOY_TYPES, REL_STATUS, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
 import { Icon, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Tabs, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { Console, DeployDialog, RestoreDialog } from '../components/pipeline.jsx';
+import { listAgentBackups } from '../lib/api.js';
 
 function InfoRow({ label, children, mono }) {
   return (
@@ -112,9 +113,29 @@ function ReleasesTab({ app }) {
   );
 }
 
+// 把 Agent 真实备份({dir,version,sha256,time,size:字节})归一到列表展示形状,并标记 real。
+function normAgentBackup(b, appId) {
+  const mb = b.size ? (b.size / 1048576).toFixed(1) + " MB" : "—";
+  return {
+    id: "ab-" + b.dir, appId, dir: b.dir, version: b.version || "—", size: mb,
+    time: b.time || 0, auto: true, operator: "agent", note: "Agent 真实备份", real: true,
+  };
+}
+
 function BackupsTab({ app, onRestore }) {
   const store = useMC();
-  const list = store.backups.filter((b) => b.appId === app.id);
+  // go-binary:优先拉取 Agent 真实备份(还原目标须真实存在);拉到(含空数组)即用真实列表,否则回退 mock。
+  const [realBaks, setRealBaks] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    if (app.type === "go-binary") {
+      listAgentBackups(app.id).then((arr) => {
+        if (alive && arr) setRealBaks(arr.map((b) => normAgentBackup(b, app.id)));
+      });
+    } else setRealBaks(null);
+    return () => { alive = false; };
+  }, [app.id, app.type]);
+  const list = realBaks !== null ? realBaks : store.backups.filter((b) => b.appId === app.id);
   const [backing, setBacking] = React.useState(false);
   const manualBackup = () => {
     setBacking(true);
@@ -124,9 +145,9 @@ function BackupsTab({ app, onRestore }) {
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
         <div style={{ fontSize: 12.5, color: "var(--muted-fg)", flex: 1 }}>
-          每次部署/还原前自动备份至 <span className="code-chip">backups/{app.id}/</span> · 滚动保留 {app.backupKeep} 份 · 当前占用 {list.length > 0 ? "约 " + list.length * 30 + " MB" : "0"}
+          每次部署/还原前自动备份至 <span className="code-chip">backups/{app.id}/</span> · 滚动保留 {app.backupKeep} 份{realBaks !== null ? " · 来自 Agent 真实备份" : " · 当前占用 " + (list.length > 0 ? "约 " + list.length * 30 + " MB" : "0")}
         </div>
-        <Btn size="sm" icon={backing ? undefined : "archive"} disabled={backing} onClick={manualBackup}>
+        <Btn size="sm" icon={backing ? undefined : "archive"} disabled={backing || realBaks !== null} title={realBaks !== null ? "真实备份在部署/还原时自动生成" : undefined} onClick={manualBackup}>
           {backing ? <React.Fragment><Spinner size={12} /> 备份中…</React.Fragment> : "手动备份"}
         </Btn>
       </div>
@@ -145,7 +166,7 @@ function BackupsTab({ app, onRestore }) {
                 <td>
                   <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                     <Btn size="sm" variant="primary" icon="rotate" onClick={() => onRestore(b)}>还原</Btn>
-                    <Btn size="sm" variant="ghost" icon="trash" title="删除备份" onClick={() => store.deleteBackup(app, b)}></Btn>
+                    {b.real ? null : <Btn size="sm" variant="ghost" icon="trash" title="删除备份" onClick={() => store.deleteBackup(app, b)}></Btn>}
                   </div>
                 </td>
               </tr>
