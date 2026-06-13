@@ -218,6 +218,11 @@ func (a *agent) backupCurrent(cfg DeployConfig) (string, error) {
 	if err := copyFile(cfg.BinPath, filepath.Join(dir, "app"), 0755); err != nil {
 		return "", err
 	}
+	// 一并备份当前 unit(env/args/ExecStart 等运行期配置):回滚要连配置一起还原,
+	// 否则旧制品会跑在新部署改过的 unit 下(如 env 变更),回滚后行为仍是错的。
+	if up := unitPath(cfg.ID); fileExists(up) {
+		copyFile(up, filepath.Join(dir, "unit.service"), 0644)
+	}
 	meta := fmt.Sprintf(`{"version":%q,"sha256":%q,"time":%d,"operator":"console"}`,
 		currentVersion(cfg.BinPath), sha256File(cfg.BinPath), time.Now().UnixMilli())
 	os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0644)
@@ -372,6 +377,13 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 		res.Result = "failed"
 		return res
 	}
+	// 连同 unit 一起还原(env/args 等),否则旧制品会跑在本次失败部署改过的配置下。
+	if bu := filepath.Join(bkDir, "unit.service"); fileExists(bu) {
+		if err := copyFile(bu, unitPath(cfg.ID), 0644); err == nil {
+			sysctl("daemon-reload")
+			rlog = append(rlog, "还原 unit + daemon-reload")
+		}
+	}
 	sysctl("start", unitName(cfg.ID))
 	time.Sleep(time.Second)
 	var rh []string
@@ -523,6 +535,11 @@ func (a *agent) rotateReleases(releasesDir string, keep int) {
 		os.RemoveAll(filepath.Join(releasesDir, dirs[0]))
 		dirs = dirs[1:]
 	}
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func short(s string) string {
