@@ -76,13 +76,13 @@ func (a *agent) deployStream(w http.ResponseWriter, r *http.Request) {
 	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeploy(cfg, tmpPath, emit) })
 }
 
-// runSSE 建立 SSE 响应头,执行 run(emit) 流水线:每步完成推 `event: step`,结束推 `event: done`。
-// 部署与还原共用同一套流式骨架,差异只在传入的 run 闭包(制品来源不同)。
-func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
+// sseHeader 写好 SSE 响应头并返回一个推送闭包 sse(event, payload);不支持 Flusher 时返回 ok=false。
+// 部署/还原(有限流,末尾推 done)与日志(无限流)共用此骨架。
+func sseHeader(w http.ResponseWriter) (func(event string, payload any), bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "服务端不支持流式响应"})
-		return
+		return nil, false
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -90,13 +90,20 @@ func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
 	w.Header().Set("X-Accel-Buffering", "no") // 反代/nginx 前不缓冲
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-
-	sse := func(event string, payload any) {
+	return func(event string, payload any) {
 		b, _ := json.Marshal(payload)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
-	}
+	}, true
+}
 
+// runSSE 建立 SSE 响应头,执行 run(emit) 流水线:每步完成推 `event: step`,结束推 `event: done`。
+// 部署与还原共用同一套流式骨架,差异只在传入的 run 闭包(制品来源不同)。
+func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
+	sse, ok := sseHeader(w)
+	if !ok {
+		return
+	}
 	res := run(func(s Step) { sse("step", s) })
 	sse("done", res)
 }

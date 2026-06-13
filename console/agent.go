@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"time"
@@ -13,6 +14,7 @@ type agentClient struct {
 	token  string
 	http   *http.Client // 短超时:ping/system/status
 	deploy *http.Client // 长超时:部署(健康检查重试 + 回滚可能耗时数十秒)
+	stream *http.Client // 无超时:应用日志等长连接流,靠请求 context 取消而非超时
 }
 
 func newAgentClient(cfg AgentConfig) *agentClient {
@@ -21,7 +23,18 @@ func newAgentClient(cfg AgentConfig) *agentClient {
 		token:  cfg.Token,
 		http:   &http.Client{Timeout: 5 * time.Second},
 		deploy: &http.Client{Timeout: 180 * time.Second},
+		stream: &http.Client{Timeout: 0},
 	}
+}
+
+// getStream 发起一个无超时的 GET 流式请求,绑定 ctx:前端断开 → ctx 取消 → 上游连接关闭 → Agent 端 journalctl 被杀。
+func (c *agentClient) getStream(ctx context.Context, path string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	return c.stream.Do(req)
 }
 
 func (c *agentClient) get(path string) (int, []byte, error) {
@@ -184,6 +197,17 @@ func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
 	resp, err := a.agent.postStream("/api/apps/"+id+"/restore/stream", r.Header.Get("Content-Type"), r.Body)
+	a.streamAgentResp(w, resp, err)
+}
+
+// agentLogStream 把 Agent 的应用日志 SSE 流透传给前端;用请求 context 绑定上游,前端断开即级联取消。
+func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	path := "/api/apps/" + id + "/logs/stream"
+	if q := r.URL.RawQuery; q != "" {
+		path += "?" + q
+	}
+	resp, err := a.agent.getStream(r.Context(), path)
 	a.streamAgentResp(w, resp, err)
 }
 

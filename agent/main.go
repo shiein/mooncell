@@ -49,6 +49,9 @@ func main() {
 	mux.HandleFunc("POST /api/apps/{id}/restore", a.tokenAuth(a.restore))
 	mux.HandleFunc("POST /api/apps/{id}/restore/stream", a.tokenAuth(a.restoreStream)) // SSE 实时日志流
 
+	// 应用运行时日志:跟随 systemd journal 实时流(SSE)
+	mux.HandleFunc("GET /api/apps/{id}/logs/stream", a.tokenAuth(a.logStream))
+
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Addr, cfg.Server.Port)
 	log.Printf("Mooncell Agent %s 运行于 http://%s", agentVersion, addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
