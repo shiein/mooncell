@@ -38,6 +38,11 @@ func main() {
 	mux.HandleFunc("GET /api/capabilities", a.tokenAuth(a.capabilities))
 	mux.HandleFunc("GET /api/system", a.tokenAuth(a.system))
 
+	// 部署(go-binary / systemd Runner):上传制品 + 配置 → 备份→替换→起停→健康检查→失败回滚
+	mux.HandleFunc("POST /api/apps/{id}/deploy", a.tokenAuth(a.deploy))
+	mux.HandleFunc("GET /api/apps/{id}/status", a.tokenAuth(a.appStatus))
+	mux.HandleFunc("DELETE /api/apps/{id}", a.tokenAuth(a.undeploy))
+
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Addr, cfg.Server.Port)
 	log.Printf("Mooncell Agent %s 运行于 http://%s", agentVersion, addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
