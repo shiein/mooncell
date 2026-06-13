@@ -86,8 +86,26 @@ async function deleteEntity(kind, id) {
   } catch (e) { console.error('[persist] delete', kind, e); }
 }
 
+// 真实部署:multipart 上传 config(JSON)+ artifact(File)到 Agent(经 Console 代理)。
+// 返回 {result, version, steps} 或 {error}。
+async function deployViaAgent(appId, config, file) {
+  try {
+    const fd = new FormData();
+    fd.append('config', JSON.stringify(config));
+    fd.append('artifact', file);
+    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy`, {
+      method: 'POST', body: fd, credentials: 'same-origin',
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return { error: d.error || `部署失败 (${r.status})` };
+    return d;
+  } catch (e) {
+    return { error: 'Agent 不可达: ' + (e.message || e) };
+  }
+}
+
 export {
   login, logout, getSession,
   getAgentCapabilities, getAgentSystem, getAgentPing,
-  hydrateData, putEntity, deleteEntity,
+  hydrateData, putEntity, deleteEntity, deployViaAgent,
 };

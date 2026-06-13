@@ -25,8 +25,8 @@ mooncell/
 | Console↔Agent 协议(代理 + 总览页接真实数据)| ✅ 完成 |
 | Console 业务数据持久化(应用/部署/备份/文件柜/审计落 SQLite)| ✅ 完成(JSON 文档存储,重载不丢)|
 | Agent go-binary Deployer + systemd Runner(部署→健康检查→自动回滚)| ✅ 完成(Ubuntu 真机验证)|
+| Console↔Agent 部署代理 + 前端部署页接真实部署(go-binary)| ✅ 完成(后端真机验证;前端构建态)|
 | Deployer:java-jar(+JRE)/ static-nginx(软链切换)| ⏳ 待开发(systemd Runner 已复用就绪)|
-| Console 部署页接 Agent 部署 API(替换前端流水线模拟)| ⏳ 待开发 |
 
 实施路线见方案文档 §12(P0 → P3)。
 

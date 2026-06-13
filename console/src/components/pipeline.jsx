@@ -2,6 +2,29 @@
 import React from 'react';
 import { useMC, tsDir, DEPLOY_TYPES, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
+import { deployViaAgent } from '../lib/api.js';
+
+// 把 Agent 返回的真实部署结果({result, steps:[{name,ok,logs}]})转成 PipelineView 可渲染的形状,
+// 复用与模拟部署完全一致的视觉。
+function realToPipe(res) {
+  const steps = (res.steps || []).map((s, i) => ({
+    id: "r" + i, label: s.name,
+    status: s.ok ? "success" : "failed",
+    rollback: s.name.indexOf("回滚") >= 0, elapsed: "",
+  }));
+  const t = Date.now();
+  const lines = [];
+  (res.steps || []).forEach((s) => {
+    lines.push({ ts: t, text: "▸ " + s.name, cls: "head" });
+    (s.logs || []).forEach((l) => lines.push({ ts: t, text: "  " + l, cls: s.ok ? "ok" : "err" }));
+  });
+  lines.push({
+    ts: t,
+    text: res.result === "success" ? "═ 部署成功 ═" : res.result === "rolledback" ? "═ 部署失败,已自动回滚 ═" : "═ 部署失败 ═",
+    cls: res.result === "success" ? "ok" : "err",
+  });
+  return { steps, lines };
+}
 
 function basename(p) { return (p || "").split("/").pop(); }
 
@@ -280,6 +303,8 @@ function DeployDialog({ app, open, onClose }) {
   const [simulateFail, setSimulateFail] = React.useState(false);
   const [version, setVersion] = React.useState("");
   const [drag, setDrag] = React.useState(false);
+  const [realFile, setRealFile] = React.useState(null); // 真实上传的 File(go-binary 走真机部署)
+  const [real, setReal] = React.useState(null);         // 真实部署结果:{loading}|{error}|{result,steps}
   const up = useUploadSim();
   const pipe = usePipeline();
   const inputRef = React.useRef(null);
@@ -287,46 +312,70 @@ function DeployDialog({ app, open, onClose }) {
   React.useEffect(() => {
     if (open) {
       setStage("upload"); setSimulateFail(false); up.reset(); pipe.reset();
+      setRealFile(null); setReal(null);
       setVersion(nextVersion(app && app.version));
     }
   }, [open, app && app.id]);
   const sha = React.useMemo(() => randSha(), [open, up.file && up.file.name]);
   if (!app) return null;
 
+  // go-binary 且上传了真实文件 → 走 Agent 真实部署;否则(其它类型 / 示例制品)沿用模拟。
+  const isReal = app.type === "go-binary" && !!realFile;
   const ext = DEPLOY_TYPES[app.type].artifactExt;
   const chunks = up.file ? Math.ceil(up.file.sizeMB / 4) : 0;
 
   const pickExample = () => {
+    setRealFile(null);
     const mb = 8 + Math.random() * 50;
     up.begin({ name: `${app.artifactName}-${version}${ext || ".tar.gz"}`, sizeMB: mb, size: mb.toFixed(1) + " MB" });
   };
   const pickReal = (f) => {
+    setRealFile(f);
     const mb = Math.max(1, f.size / 1048576);
     up.begin({ name: f.name, sizeMB: mb, size: mb < 1024 ? mb.toFixed(1) + " MB" : (mb / 1024).toFixed(2) + " GB" });
   };
 
-  const startDeploy = () => {
+  const startDeploy = async () => {
+    if (isReal) {
+      setStage("pipeline"); setReal({ loading: true });
+      const cfg = {
+        name: app.name, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
+        health: /^https?:\/\//.test(app.health || "") ? app.health : "",
+        version, backupKeep: app.backupKeep || 5,
+      };
+      const res = await deployViaAgent(app.id, cfg, realFile);
+      if (res.error) { setReal({ error: res.error }); return; }
+      setReal(res);
+      store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result === "success" ? "success" : "rolledback" });
+      return;
+    }
     const plan = makeDeployPlan(app, { fileName: up.file.name, size: up.file.size, chunks, sha, simulateFail });
     setStage("pipeline");
     pipe.start(plan, (result) => store.finishDeploy(app, { version, size: up.file.size, result }));
   };
 
-  const running = pipe.state === "running";
-  const doneState = pipe.state === "success" || pipe.state === "rolledback";
+  // 统一两条路径的状态:resultKind ∈ idle|running|success|rolledback|error
+  const resultKind = real
+    ? (real.loading ? "running" : real.error ? "error" : real.result === "success" ? "success" : (real.result || "failed"))
+    : pipe.state;
+  const running = resultKind === "running";
+  const doneState = resultKind === "success" || resultKind === "rolledback";
 
   return (
     <Dialog open={open} onClose={onClose} noClose={running} width={stage === "pipeline" ? 860 : 560}
       title={`部署 · ${app.name}`}
-      desc={stage === "upload" ? "上传制品后将自动执行:备份 → 停止 → 替换 → 启动 → 健康检查" : `Release ${version} · 操作人 ${store.user}`}
+      desc={stage === "upload"
+        ? (isReal ? "go-binary · 将下发到 Agent 真机部署:备份 → 停止 → 替换 → 启动 → 健康检查" : "上传制品后将自动执行:备份 → 停止 → 替换 → 启动 → 健康检查")
+        : `Release ${version} · 操作人 ${store.user}`}
       foot={stage === "upload" ? (
         <React.Fragment>
           <Btn variant="ghost" onClick={onClose}>取消</Btn>
-          <Btn variant="primary" icon="zap" disabled={up.phase !== "ready"} onClick={startDeploy}>开始部署</Btn>
+          <Btn variant="primary" icon="zap" disabled={up.phase !== "ready"} onClick={startDeploy}>{isReal ? "开始部署(真机)" : "开始部署"}</Btn>
         </React.Fragment>
       ) : (
         <React.Fragment>
-          {pipe.state === "success" ? <Btn variant="ghost" onClick={() => { onClose(); store.nav("app-detail", { appId: app.id, tab: "logs" }); }}>查看应用日志</Btn> : null}
-          <Btn variant={doneState ? "primary" : "outline"} disabled={running} onClick={onClose}>{running ? "流水线执行中…" : "关闭"}</Btn>
+          {resultKind === "success" ? <Btn variant="ghost" onClick={() => { onClose(); store.nav("app-detail", { appId: app.id, tab: "logs" }); }}>查看应用日志</Btn> : null}
+          <Btn variant={doneState ? "primary" : "outline"} disabled={running} onClick={onClose}>{running ? "部署执行中…" : "关闭"}</Btn>
         </React.Fragment>
       )}>
 
@@ -387,6 +436,43 @@ function DeployDialog({ app, open, onClose }) {
               <div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>新版本启动后探活不通过 → 触发自动回滚流程</div>
             </div>
           </div>
+        </div>
+      ) : real ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {real.loading ? (
+            <div className="card card-pad" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <Spinner size={16} />
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>正在向 Agent 下发部署 · {version}</div>
+                <div style={{ fontSize: 12, color: "var(--muted-fg)" }}>备份 → 停止 → 原子替换 → 启动 → 健康检查(失败将自动回滚)</div>
+              </div>
+            </div>
+          ) : real.error ? (
+            <div className="card" style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, background: "var(--error-soft)", color: "var(--error)" }}>
+              <Icon name="alert" size={16} /><span style={{ fontSize: 13 }}>部署失败:{real.error}</span>
+            </div>
+          ) : (
+            <React.Fragment>
+              {doneState ? (
+                <div className="fade-up" style={{
+                  borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10,
+                  background: resultKind === "success" ? "var(--success-soft)" : "var(--warn-soft)",
+                  color: resultKind === "success" ? "var(--success)" : "var(--warn)",
+                }}>
+                  <Icon name={resultKind === "success" ? "check" : "rotate"} size={17} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 650, fontSize: 13.5 }}>
+                      {resultKind === "success" ? `部署成功 · ${real.version || version} 已上线` : `部署失败 · 已自动回滚至 ${app.version}`}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: .85 }}>
+                      {resultKind === "success" ? "Agent 已落盘并由 systemd 托管 · 部署前版本已备份" : "旧版本已恢复服务,业务无中断"}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              <PipelineView pipe={realToPipe(real)} />
+            </React.Fragment>
+          )}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
