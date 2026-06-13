@@ -1,0 +1,16 @@
+# Mooncell Agent 配置
+
+[server]
+addr = "0.0.0.0"   # 监听地址,127.0.0.1 仅本机
+port = 9100
+
+[security]
+# Console 添加本 Agent 时录入的共享 token;所有请求须带 Authorization: Bearer <token>。
+# 生产环境务必改成高熵随机值。
+token = "mc_ag_change_me"
+
+[paths]
+# 安全边界:Agent 只允许在以下根目录内落盘 / 读日志,路径规范化后必须落在内(防穿越)。
+deploy_roots = ["/srv/apps", "/data/web"]
+log_roots    = ["/srv/apps", "/var/log"]
+backup_dir   = "/opt/deploy-agent/backups"
