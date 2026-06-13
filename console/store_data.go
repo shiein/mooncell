@@ -1,6 +1,10 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // 业务实体以 JSON 文档形式持久化(kind + id + data),前端对象形态即存储形态。
 // 这一阶段刻意不建强类型表:当前对象多为模拟产物,等真实部署(Agent 驱动)落地再建 schema。
@@ -78,4 +82,17 @@ func (s *Store) putEntity(kind, id string, data json.RawMessage) error {
 func (s *Store) deleteEntity(kind, id string) error {
 	_, err := s.db.Exec("DELETE FROM entities WHERE kind = ? AND id = ?", kind, id)
 	return err
+}
+
+// appendAudit 服务端权威写一条审计实体:真实操作(经 Agent 的部署/还原)由 Console 据会话与
+// Agent 实际结果落库,不依赖前端乐观上报。source=agent 标识其为权威记录(区别于前端模拟操作)。
+func (s *Store) appendAudit(user, action, target, result string) error {
+	id := fmt.Sprintf("a%d", time.Now().UnixNano())
+	rec := map[string]any{
+		"id": id, "time": time.Now().UnixMilli(),
+		"user": user, "action": action, "target": target,
+		"result": result, "ip": "", "source": "agent",
+	}
+	b, _ := json.Marshal(rec)
+	return s.putEntity("audit", id, b)
 }

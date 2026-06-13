@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -134,6 +137,16 @@ func relayAgent(w http.ResponseWriter, status int, body []byte, err error) {
 	w.Write(body)
 }
 
+// sessionUser 从会话 cookie 取已登录用户名(requireAuth 已校验合法性);取不到回 "unknown"。
+func (a *api) sessionUser(r *http.Request) string {
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		if u, ok := a.store.userByToken(c.Value); ok {
+			return u
+		}
+	}
+	return "unknown"
+}
+
 // agentDeploy 透传部署请求(multipart:config + artifact)到 Agent /api/apps/{id}/deploy。
 func (a *api) agentDeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -142,12 +155,97 @@ func (a *api) agentDeploy(w http.ResponseWriter, r *http.Request) {
 	relayAgent(w, status, body, err)
 }
 
-// agentDeployStream 把 Agent 的 SSE 部署流(text/event-stream)边读边 flush 透传给前端。
+// agentDeployStream 把 Agent 的 SSE 部署流透传给前端,并据 done 事件结果服务端权威写审计。
 func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
 	resp, err := a.agent.postStream("/api/apps/"+id+"/deploy/stream", r.Header.Get("Content-Type"), r.Body)
-	a.streamAgentResp(w, resp, err)
+	a.streamAndAudit(w, r, resp, err, "部署", id)
+}
+
+// streamAndAudit 透传 Agent 的 SSE 流(部署/还原),同时旁路捕获末尾 done 事件,
+// 据实际结果与会话操作人服务端写一条权威审计。仅用于有限流(部署/还原),日志等无限流不可用此法。
+func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.Response, err error, action, appID string) {
+	user := a.sessionUser(r)
+	if err != nil {
+		a.store.appendAudit(user, action, appID, "失败·Agent不可达")
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Agent 不可达", "detail": err.Error(), "online": false})
+		return
+	}
+	defer resp.Body.Close()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "不支持流式响应"})
+		return
+	}
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(resp.StatusCode)
+	flusher.Flush()
+
+	// 部署/还原流体量小(数步),旁路全量缓存以解析 done;边透传边捕获,前端断开即止。
+	var capture bytes.Buffer
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			capture.Write(buf[:n])
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				break // 前端断开
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			break
+		}
+	}
+
+	result, version := parseDoneResult(capture.Bytes())
+	target := appID
+	if version != "" {
+		target += " " + version
+	}
+	a.store.appendAudit(user, action, target, auditResultText(result))
+}
+
+// parseDoneResult 从 SSE 字节流中取最后一个 `event: done` 帧的 data,解析出 result 与 version。
+func parseDoneResult(b []byte) (result, version string) {
+	s := string(b)
+	idx := strings.LastIndex(s, "event: done")
+	if idx < 0 {
+		return "", ""
+	}
+	rest := s[idx:]
+	di := strings.Index(rest, "data:")
+	if di < 0 {
+		return "", ""
+	}
+	line := rest[di+len("data:"):]
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	var d struct {
+		Result  string `json:"result"`
+		Version string `json:"version"`
+	}
+	json.Unmarshal([]byte(strings.TrimSpace(line)), &d)
+	return d.Result, d.Version
+}
+
+// auditResultText 把流水线结果映射为审计结果文案;无 done(出错/非 SSE)记为失败。
+func auditResultText(result string) string {
+	switch result {
+	case "success":
+		return "成功"
+	case "rolledback":
+		return "失败·已回滚"
+	case "failed":
+		return "失败"
+	default:
+		return "失败"
+	}
 }
 
 // streamAgentResp 把 Agent 的流式响应边读边 flush 透传给前端;Agent 出错(非 SSE)时原样回传 JSON 便于前端读到 error。
@@ -192,12 +290,12 @@ func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	relayAgent(w, status, body, err)
 }
 
-// agentRestoreStream 把 Agent 的 SSE 还原流透传给前端(请求体为 JSON,无制品上传)。
+// agentRestoreStream 把 Agent 的 SSE 还原流透传给前端(请求体为 JSON,无制品上传),并据结果服务端写审计。
 func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
 	resp, err := a.agent.postStream("/api/apps/"+id+"/restore/stream", r.Header.Get("Content-Type"), r.Body)
-	a.streamAgentResp(w, resp, err)
+	a.streamAndAudit(w, r, resp, err, "还原", id)
 }
 
 // agentLogStream 把 Agent 的应用日志 SSE 流透传给前端;用请求 context 绑定上游,前端断开即级联取消。

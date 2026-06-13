@@ -80,10 +80,11 @@ function App() {
   const persist = (kind, obj) => putEntity(kind, obj);
   const remove = (kind, id) => deleteEntity(kind, id);
 
-  const addAudit = (action, target, result) => {
+  // opts.noPersist:真实操作(部署/还原)的审计由 Console 服务端权威落库,前端仅乐观显示、不重复落库。
+  const addAudit = (action, target, result, opts = {}) => {
     const a = { id: "a" + Date.now() + Math.random(), time: Date.now(), user, action, target, result, ip: "192.168.10.2" };
     setAudit((s) => [a, ...s]);
-    persist("audit", a);
+    if (!opts.noPersist) persist("audit", a);
   };
   const patchApp = (id, patch) => setApps((s) => s.map((a) => {
     if (a.id !== id) return a;
@@ -96,8 +97,10 @@ function App() {
     user, nav, route,
     apps, releases, backups, cabinet, audit,
 
-    finishDeploy(app, { version, size, result }) {
+    // real:经 Agent 的真机部署。其审计由 Console 服务端权威落库,前端仅乐观显示(noPersist),避免重复。
+    finishDeploy(app, { version, size, result, real }) {
       const now = Date.now();
+      const ao = real ? { noPersist: true } : {};
       const backup = { id: "b" + now, appId: app.id, version: app.version, time: now, size: size || "—", auto: true, operator: user, dir: tsDir(now), note: "" };
       const release = { id: "r" + now, appId: app.id, version, status: result === "success" ? "success" : "rolledback", time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" };
       setBackups((s) => [backup, ...s]); persist("backup", backup);
@@ -109,17 +112,22 @@ function App() {
           pid: app.type === "static-nginx" ? null : 20000 + (Math.random() * 9000 | 0),
           uptime: "刚刚", cpu: "1.0%", mem: app.mem === "—" ? "320 MB" : app.mem,
         });
-        addAudit("部署", `${app.name} ${version}`, "成功");
+        addAudit("部署", `${app.name} ${version}`, "成功", ao);
         toast(`${app.name} · ${version} 部署成功`);
       } else {
         patchApp(app.id, { status: app.type === "static-nginx" ? "static" : "running", lastDeploy: now });
-        addAudit("部署", `${app.name} ${version}`, "失败");
-        addAudit("回滚", `${app.name} → ${app.version}(自动)`, "成功");
+        if (real) {
+          // 服务端写的是单条 result=失败·已回滚,前端乐观显示对齐,不再单列"回滚"行。
+          addAudit("部署", `${app.name} ${version}`, "失败·已回滚", ao);
+        } else {
+          addAudit("部署", `${app.name} ${version}`, "失败");
+          addAudit("回滚", `${app.name} → ${app.version}(自动)`, "成功");
+        }
         toast(`部署失败 · 已自动回滚至 ${app.version}`, { tone: "warn", icon: "rotate" });
       }
     },
 
-    finishRestore(app, backup) {
+    finishRestore(app, backup, { real } = {}) {
       const now = Date.now();
       const bak = { id: "b" + now, appId: app.id, version: app.version, time: now, size: backup.size, auto: true, operator: user, dir: tsDir(now), note: "还原前自动备份" };
       setBackups((s) => [bak, ...s]); persist("backup", bak);
@@ -129,7 +137,7 @@ function App() {
         pid: app.type === "static-nginx" ? null : 20000 + (Math.random() * 9000 | 0),
         uptime: "刚刚",
       });
-      addAudit("还原", `${app.name} → 备份 ${backup.dir}(${backup.version})`, "成功");
+      addAudit("还原", `${app.name} → 备份 ${backup.dir}(${backup.version})`, "成功", real ? { noPersist: true } : {});
       toast(`${app.name} 已还原至 ${backup.version}`);
     },
 

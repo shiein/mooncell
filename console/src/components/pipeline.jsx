@@ -355,7 +355,7 @@ function DeployDialog({ app, open, onClose }) {
       });
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
-      store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result === "success" ? "success" : "rolledback" });
+      store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result === "success" ? "success" : "rolledback", real: true });
       return;
     }
     const plan = makeDeployPlan(app, { fileName: up.file.name, size: up.file.size, chunks, sha, simulateFail });
@@ -535,7 +535,7 @@ function RestoreDialog({ app, backup, open, onClose }) {
       });
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
-      if (res.result === "success") store.finishRestore(app, backup);
+      if (res.result === "success") store.finishRestore(app, backup, { real: true });
       return;
     }
     pipe.start(makeRestorePlan(app, backup), () => store.finishRestore(app, backup));
