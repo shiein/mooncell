@@ -2,7 +2,7 @@
 import React from 'react';
 import { useMC, tsDir, DEPLOY_TYPES, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
-import { deployViaAgent } from '../lib/api.js';
+import { deployViaAgentStream } from '../lib/api.js';
 
 // 把 Agent 返回的真实部署结果({result, steps:[{name,ok,logs}]})转成 PipelineView 可渲染的形状,
 // 复用与模拟部署完全一致的视觉。
@@ -18,6 +18,12 @@ function realToPipe(res) {
     lines.push({ ts: t, text: "▸ " + s.name, cls: "head" });
     (s.logs || []).forEach((l) => lines.push({ ts: t, text: "  " + l, cls: s.ok ? "ok" : "err" }));
   });
+  // 流式进行中:末尾补一个"执行中"占位步 + 等待提示,收到 done 后由结果分支替换。
+  if (res.streaming) {
+    steps.push({ id: "live", label: "执行中…", status: "running", rollback: false, elapsed: "" });
+    lines.push({ ts: t, text: "  ⏳ 等待 Agent 推送下一步…", cls: "head" });
+    return { steps, lines };
+  }
   lines.push({
     ts: t,
     text: res.result === "success" ? "═ 部署成功 ═" : res.result === "rolledback" ? "═ 部署失败,已自动回滚 ═" : "═ 部署失败 ═",
@@ -337,13 +343,16 @@ function DeployDialog({ app, open, onClose }) {
 
   const startDeploy = async () => {
     if (isReal) {
-      setStage("pipeline"); setReal({ loading: true });
+      setStage("pipeline"); setReal({ streaming: true, steps: [] });
       const cfg = {
-        name: app.name, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
+        name: app.name, type: app.type, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
         health: /^https?:\/\//.test(app.health || "") ? app.health : "",
         version, backupKeep: app.backupKeep || 5,
       };
-      const res = await deployViaAgent(app.id, cfg, realFile);
+      // SSE:每步完成即追加,实时呈现;done 后用最终结果替换。
+      const res = await deployViaAgentStream(app.id, cfg, realFile, (type, data) => {
+        if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
+      });
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
       store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result === "success" ? "success" : "rolledback" });
@@ -356,7 +365,7 @@ function DeployDialog({ app, open, onClose }) {
 
   // 统一两条路径的状态:resultKind ∈ idle|running|success|rolledback|error
   const resultKind = real
-    ? (real.loading ? "running" : real.error ? "error" : real.result === "success" ? "success" : (real.result || "failed"))
+    ? (real.streaming || real.loading ? "running" : real.error ? "error" : real.result === "success" ? "success" : (real.result || "failed"))
     : pipe.state;
   const running = resultKind === "running";
   const doneState = resultKind === "success" || resultKind === "rolledback";

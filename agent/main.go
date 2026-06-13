@@ -40,6 +40,7 @@ func main() {
 
 	// 部署(go-binary / systemd Runner):上传制品 + 配置 → 备份→替换→起停→健康检查→失败回滚
 	mux.HandleFunc("POST /api/apps/{id}/deploy", a.tokenAuth(a.deploy))
+	mux.HandleFunc("POST /api/apps/{id}/deploy/stream", a.tokenAuth(a.deployStream)) // SSE 实时日志流
 	mux.HandleFunc("GET /api/apps/{id}/status", a.tokenAuth(a.appStatus))
 	mux.HandleFunc("DELETE /api/apps/{id}", a.tokenAuth(a.undeploy))
 

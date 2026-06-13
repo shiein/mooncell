@@ -267,19 +267,25 @@ func healthCheck(url string, logs *[]string) bool {
 // ---------- 部署流水线 ----------
 
 // runDeploy 按应用类型分发:static-nginx 走软链切换,其余(go-binary/java-jar)复用 systemd 进程流水线。
-func (a *agent) runDeploy(cfg DeployConfig, artifact string) DeployResult {
-	if cfg.Type == "static-nginx" {
-		return a.runDeployStatic(cfg, artifact)
+// emit 在每步完成时回调(用于 SSE 实时流);同步 JSON 端点传 nil 即可。
+func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
+	if emit == nil {
+		emit = func(Step) {}
 	}
-	return a.runDeployProcess(cfg, artifact)
+	if cfg.Type == "static-nginx" {
+		return a.runDeployStatic(cfg, artifact, emit)
+	}
+	return a.runDeployProcess(cfg, artifact, emit)
 }
 
 // runDeployProcess 执行已验证的进程类部署闭环:备份 → 停 → 原子替换 → 生成 unit + 启动 → 健康检查;失败自动回滚。
 // go-binary 与 java-jar 共用此流水线,差异只在 execStart 与制品落盘(jar 同样按文件原子替换)。
-func (a *agent) runDeployProcess(cfg DeployConfig, artifact string) DeployResult {
+func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
 	res := DeployResult{Version: cfg.Version}
 	add := func(name string, ok bool, logs ...string) {
-		res.Steps = append(res.Steps, Step{Name: name, OK: ok, Logs: logs})
+		s := Step{Name: name, OK: ok, Logs: logs}
+		res.Steps = append(res.Steps, s)
+		emit(s) // 每步完成即推送,供 SSE 实时呈现
 	}
 
 	// 1. 校验制品
@@ -387,10 +393,12 @@ func switchSymlink(target, link string) error {
 
 // runDeployStatic 静态站点部署:解包到带时间戳的 release 目录,原子切换软链对外暴露,失败回滚到旧 release。
 // cfg.BinPath 是对外 web root 软链路径(如 /srv/apps/site/current);releases 存于 <BinPath>-releases/<ts>/。
-func (a *agent) runDeployStatic(cfg DeployConfig, artifact string) DeployResult {
+func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
 	res := DeployResult{Version: cfg.Version}
 	add := func(name string, ok bool, logs ...string) {
-		res.Steps = append(res.Steps, Step{Name: name, OK: ok, Logs: logs})
+		s := Step{Name: name, OK: ok, Logs: logs}
+		res.Steps = append(res.Steps, s)
+		emit(s)
 	}
 
 	// 1. 校验制品

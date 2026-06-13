@@ -2,57 +2,98 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 )
 
-// deploy 处理 POST /api/apps/{id}/deploy
-// multipart/form-data:字段 config(DeployConfig JSON)+ artifact(制品文件)。
-// 同步执行部署流水线,返回逐步结果与日志。
-func (a *agent) deploy(w http.ResponseWriter, r *http.Request) {
+// prepareDeploy 解析部署请求公共部分:multipart(config + artifact)+ 安全边界校验 + 制品暂存。
+// 成功返回 cfg、暂存路径、清理函数与 ok=true;失败已写好响应,ok=false。
+func (a *agent) prepareDeploy(w http.ResponseWriter, r *http.Request) (DeployConfig, string, func(), bool) {
+	var zero DeployConfig
 	id := r.PathValue("id")
 	if err := r.ParseMultipartForm(128 << 20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
-		return
+		return zero, "", nil, false
 	}
 
 	var cfg DeployConfig
 	if err := json.Unmarshal([]byte(r.FormValue("config")), &cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "config 解析失败"})
-		return
+		return zero, "", nil, false
 	}
 	cfg.ID = id // 以路径为准,避免 body 与路径不一致
 
 	// 安全边界:制品落盘路径必须在白名单根目录内(防穿越)。
 	if !withinRoots(cfg.BinPath, a.cfg.Paths.DeployRoots) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "制品路径不在白名单内: " + cfg.BinPath})
-		return
+		return zero, "", nil, false
 	}
 
 	file, _, err := r.FormFile("artifact")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品"})
-		return
+		return zero, "", nil, false
 	}
 	defer file.Close()
 
 	tmp, err := os.CreateTemp("", "mc-artifact-*")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建暂存失败"})
-		return
+		return zero, "", nil, false
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
 	if _, err := io.Copy(tmp, file); err != nil {
 		tmp.Close()
+		os.Remove(tmpPath)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "接收制品失败"})
-		return
+		return zero, "", nil, false
 	}
 	tmp.Close()
+	return cfg, tmpPath, func() { os.Remove(tmpPath) }, true
+}
 
-	res := a.runDeploy(cfg, tmpPath)
+// deploy 处理 POST /api/apps/{id}/deploy(同步):执行流水线后一次性返回逐步结果与日志。
+func (a *agent) deploy(w http.ResponseWriter, r *http.Request) {
+	cfg, tmpPath, cleanup, ok := a.prepareDeploy(w, r)
+	if !ok {
+		return
+	}
+	defer cleanup()
+	res := a.runDeploy(cfg, tmpPath, nil)
 	writeJSON(w, http.StatusOK, res)
+}
+
+// deployStream 处理 POST /api/apps/{id}/deploy/stream(SSE):
+// 每完成一步推送 `event: step`,结束推送 `event: done`(含整体结果),供前端实时呈现日志。
+func (a *agent) deployStream(w http.ResponseWriter, r *http.Request) {
+	cfg, tmpPath, cleanup, ok := a.prepareDeploy(w, r)
+	if !ok {
+		return
+	}
+	defer cleanup()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "服务端不支持流式响应"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // 反代/nginx 前不缓冲
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	sse := func(event string, payload any) {
+		b, _ := json.Marshal(payload)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+		flusher.Flush()
+	}
+
+	res := a.runDeploy(cfg, tmpPath, func(s Step) { sse("step", s) })
+	sse("done", res)
 }
 
 // appStatus 处理 GET /api/apps/{id}/status:返回 systemd 托管状态。

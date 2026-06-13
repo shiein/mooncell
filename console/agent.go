@@ -56,6 +56,18 @@ func (c *agentClient) post(path, contentType string, body io.Reader) (int, []byt
 	return resp.StatusCode, rb, err
 }
 
+// postStream 透传 multipart 到 Agent 并返回未关闭的响应,供调用方边读边 flush 转发(SSE)。
+// 调用方负责 resp.Body.Close()。
+func (c *agentClient) postStream(path, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, c.base+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	return c.deploy.Do(req)
+}
+
 func (c *agentClient) del(path string) (int, []byte, error) {
 	req, err := http.NewRequest(http.MethodDelete, c.base+path, nil)
 	if err != nil {
@@ -115,6 +127,45 @@ func (a *api) agentDeploy(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	status, body, err := a.agent.post("/api/apps/"+id+"/deploy", r.Header.Get("Content-Type"), r.Body)
 	relayAgent(w, status, body, err)
+}
+
+// agentDeployStream 把 Agent 的 SSE 部署流(text/event-stream)边读边 flush 透传给前端。
+func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	defer r.Body.Close()
+	resp, err := a.agent.postStream("/api/apps/"+id+"/deploy/stream", r.Header.Get("Content-Type"), r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Agent 不可达", "detail": err.Error(), "online": false})
+		return
+	}
+	defer resp.Body.Close()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "不支持流式响应"})
+		return
+	}
+	// Agent 出错(非 SSE)时原样回传 JSON,便于前端读到 error。
+	ct := resp.Header.Get("Content-Type")
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(resp.StatusCode)
+	flusher.Flush()
+
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return // 前端断开
+			}
+			flusher.Flush()
+		}
+		if rerr != nil {
+			return
+		}
+	}
 }
 
 func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {

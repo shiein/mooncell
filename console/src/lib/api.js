@@ -104,8 +104,53 @@ async function deployViaAgent(appId, config, file) {
   }
 }
 
+// 真实部署(SSE 实时流):multipart 上传后,Agent 每完成一步推送 step 事件,结束推送 done。
+// onEvent(type, data) 在每个事件到达时回调(type ∈ "step"|"done");返回最终结果 {result,version,steps} 或 {error}。
+async function deployViaAgentStream(appId, config, file, onEvent) {
+  try {
+    const fd = new FormData();
+    fd.append('config', JSON.stringify(config));
+    fd.append('artifact', file);
+    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, {
+      method: 'POST', body: fd, credentials: 'same-origin',
+    });
+    // 非 SSE(出错)→ 当作 JSON 错误处理
+    if (!r.ok || !(r.headers.get('Content-Type') || '').includes('text/event-stream')) {
+      const d = await r.json().catch(() => ({}));
+      return { error: d.error || `部署失败 (${r.status})` };
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let done = null;
+    for (;;) {
+      const { value, done: finished } = await reader.read();
+      if (finished) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let ev = 'message', data = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) ev = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        let parsed;
+        try { parsed = JSON.parse(data); } catch { continue; }
+        onEvent && onEvent(ev, parsed);
+        if (ev === 'done') done = parsed;
+      }
+    }
+    return done || { error: '部署流中断,未收到结果' };
+  } catch (e) {
+    return { error: 'Agent 不可达: ' + (e.message || e) };
+  }
+}
+
 export {
   login, logout, getSession,
   getAgentCapabilities, getAgentSystem, getAgentPing,
-  hydrateData, putEntity, deleteEntity, deployViaAgent,
+  hydrateData, putEntity, deleteEntity, deployViaAgent, deployViaAgentStream,
 };
