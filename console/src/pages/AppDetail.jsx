@@ -3,7 +3,7 @@ import React from 'react';
 import { useMC, DEPLOY_TYPES, isProcessType, isRealType, REL_STATUS, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
 import { Icon, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Tabs, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { Console, DeployDialog, RestoreDialog } from '../components/pipeline.jsx';
-import { listAgentBackups, streamAppLogs } from '../lib/api.js';
+import { listAgentBackups, streamAppLogs, getAppStatus } from '../lib/api.js';
 
 function InfoRow({ label, children, mono }) {
   return (
@@ -17,14 +17,30 @@ function InfoRow({ label, children, mono }) {
 function OverviewTab({ app, releases }) {
   const recent = releases.filter((r) => r.appId === app.id).slice(0, 3);
   const grid = { display: "grid", gridTemplateColumns: "auto 1fr", gap: "9px 18px", alignItems: "baseline" };
+  // 真实进程类应用:向 Agent 拉取实时托管状态(systemd/pm2),每 10s 刷新一次。
+  // 非真实/静态类沿用 mock 字段。live=null 表示尚未拉到或 Agent 离线。
+  const real = isRealType(app.type) && isProcessType(app.type);
+  const [live, setLive] = React.useState(null);
+  React.useEffect(() => {
+    if (!real) { setLive(null); return; }
+    let alive = true;
+    const tick = () => getAppStatus(app.id).then((s) => { if (alive) setLive(s); });
+    tick();
+    const iv = setInterval(tick, 10000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [app.id, real]);
+  // 真实应用的进程行优先用 live;未拉到时显式标注,不再回退到 mock 的 pid/uptime。
+  const procRow = real
+    ? (live ? (live.active ? `pid ${live.pid || "?"} · ${live.state}` : `未运行 · ${live.state || "inactive"}`) : "查询中…")
+    : (app.pid ? `pid ${app.pid} · 运行 ${app.uptime}` : "未运行");
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
       <div className="card card-pad">
-        <h4 style={{ fontSize: 13.5, marginBottom: 14, display: "flex", alignItems: "center", gap: 7 }}><Icon name="zap" size={14} style={{ color: "var(--primary)" }} />运行状态</h4>
+        <h4 style={{ fontSize: 13.5, marginBottom: 14, display: "flex", alignItems: "center", gap: 7 }}><Icon name="zap" size={14} style={{ color: "var(--primary)" }} />运行状态{real ? <Badge tone="info" style={{ marginLeft: 4 }}>实时</Badge> : null}</h4>
         <div style={grid}>
-          <InfoRow label="状态"><StatusBadge status={app.status} /></InfoRow>
-          <InfoRow label="进程" mono>{app.pid ? `pid ${app.pid} · 运行 ${app.uptime}` : "未运行"}</InfoRow>
-          <InfoRow label="资源" mono>{app.pid ? `CPU ${app.cpu} · 内存 ${app.mem}` : "—"}</InfoRow>
+          <InfoRow label="状态">{real && live ? <StatusBadge status={live.active ? "running" : "stopped"} /> : <StatusBadge status={app.status} />}</InfoRow>
+          <InfoRow label="进程" mono>{procRow}</InfoRow>
+          <InfoRow label="资源" mono>{real ? "—(Agent 未采集资源指标)" : (app.pid ? `CPU ${app.cpu} · 内存 ${app.mem}` : "—")}</InfoRow>
           <InfoRow label="Runner"><span className="code-chip">{app.runner}</span></InfoRow>
         </div>
         {app.status === "failed" ? (

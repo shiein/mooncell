@@ -126,6 +126,15 @@ async function agentGet(path) {
   }
 }
 
+// 查应用真实运行态(systemd/pm2):{active,state,pid};失败返回 null。
+async function getAppStatus(appId) {
+  try {
+    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/status`, { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
 // 新建应用前真实预检(路径可写/端口空闲/运行时可用);失败返回 null。
 async function precheckApp(query) {
   try {
@@ -309,7 +318,7 @@ export {
   listUsers, createUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   uploadCabinetFile, removeCabinetFile,
-  getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp,
+  getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus,
   hydrateData, putEntity, deleteEntity, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };
