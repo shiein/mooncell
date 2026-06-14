@@ -50,6 +50,7 @@ func main() {
 	mux.HandleFunc("GET /api/agent/precheck", a.requireAuth(a.agentPrecheck))
 	mux.HandleFunc("POST /api/agent/apps/{id}/deploy/stream", writeRoles(a.agentDeployStream))
 	mux.HandleFunc("GET /api/agent/apps/{id}/status", a.requireAuth(a.agentAppStatus))
+	mux.HandleFunc("POST /api/agent/apps/{id}/lifecycle", writeRoles(a.agentLifecycle))
 	mux.HandleFunc("DELETE /api/agent/apps/{id}", writeRoles(a.agentUndeploy))
 	mux.HandleFunc("GET /api/agent/apps/{id}/backups", a.requireAuth(a.agentListBackups))
 	mux.HandleFunc("POST /api/agent/apps/{id}/restore/stream", writeRoles(a.agentRestoreStream))

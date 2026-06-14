@@ -150,9 +150,9 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
 
-	// 幂等:同 releaseId 已成功部署则直接返回缓存结果,不重复执行。
+	// 幂等:同(部署 + 本 app + releaseId)已成功则直接返回缓存结果,不重复执行。
 	if releaseID != "" {
-		if res, ok := a.store.getDeploy(releaseID); ok && res == "success" {
+		if res, ok := a.store.getDeploy("deploy", id, releaseID); ok && res == "success" {
 			a.sseIdempotent(w, "部署", res, version)
 			return
 		}
@@ -205,7 +205,7 @@ func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if releaseID := req.ReleaseID; releaseID != "" {
-		if res, ok := a.store.getDeploy(releaseID); ok && res == "success" {
+		if res, ok := a.store.getDeploy("restore", id, releaseID); ok && res == "success" {
 			a.sseIdempotent(w, "还原", res, req.Version)
 			return
 		}

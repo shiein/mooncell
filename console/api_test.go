@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -126,5 +127,61 @@ func TestCabinetExpiryCleanup(t *testing.T) {
 	}
 	if _, ok := s.getEntity("cabinet", "cf_old"); ok {
 		t.Error("过期条目元数据应被删除")
+	}
+}
+
+// 幂等键按 (op, app_id, release_id) 隔离:同 releaseId 跨操作/跨 app 不得互相误命中。
+func TestDeployIdempotencyIsolation(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	s.putDeploy("deploy", "app-a", "rid-1", "success")
+
+	// 同 op+app+rid:命中
+	if res, ok := s.getDeploy("deploy", "app-a", "rid-1"); !ok || res != "success" {
+		t.Fatalf("同键应命中 success,got %q ok=%v", res, ok)
+	}
+	// 同 rid 不同 op(还原):不得命中
+	if _, ok := s.getDeploy("restore", "app-a", "rid-1"); ok {
+		t.Error("还原复用部署 releaseId 不应命中(op 隔离)")
+	}
+	// 同 rid 不同 app:不得命中
+	if _, ok := s.getDeploy("deploy", "app-b", "rid-1"); ok {
+		t.Error("不同 app 复用 releaseId 不应命中(app 隔离)")
+	}
+	// 同键再写不同结果:覆盖(ON CONFLICT)
+	s.putDeploy("deploy", "app-a", "rid-1", "failed")
+	if res, _ := s.getDeploy("deploy", "app-a", "rid-1"); res != "failed" {
+		t.Errorf("同键重写应覆盖为 failed,got %q", res)
+	}
+}
+
+// 旧库(单列 release_id 主键)迁移:启动时清空旧表,以复合主键重建,迁移后可正常隔离写入。
+func TestMigrateLegacyDeploys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+
+	// 手造旧 schema 并塞一条遗留记录
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.Exec(`CREATE TABLE deploys (release_id TEXT PRIMARY KEY, app_id TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL)`)
+	legacy.Exec(`INSERT INTO deploys (release_id, app_id, result, created_at) VALUES ('old','x','success',1)`)
+	legacy.Close()
+
+	// openDB 触发迁移
+	cfg := &Config{Database: DatabaseConfig{Path: path}, Session: SessionConfig{TTLHours: 1}}
+	s := openDB(cfg)
+	defer s.Close()
+
+	// 旧记录已随旧表清空(迁移丢弃去重记录,可接受)
+	if _, ok := s.getDeploy("deploy", "x", "old"); ok {
+		t.Error("迁移后旧单列记录应被清空")
+	}
+	// 新复合主键正常工作
+	s.putDeploy("deploy", "x", "new", "success")
+	if res, ok := s.getDeploy("deploy", "x", "new"); !ok || res != "success" {
+		t.Errorf("迁移后复合主键写入应可用,got %q ok=%v", res, ok)
 	}
 }

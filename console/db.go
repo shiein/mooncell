@@ -22,6 +22,8 @@ func openDB(cfg *Config) *Store {
 	// sqlite 写串行,限制连接数避免 "database is locked"
 	db.SetMaxOpenConns(1)
 
+	migrateDeploys(db) // 旧库 deploys(单列 release_id 主键)→ 复合主键前的一次性迁移
+
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,10 +54,12 @@ func openDB(cfg *Config) *Store {
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS deploys (
-			release_id TEXT    PRIMARY KEY,
+			op         TEXT    NOT NULL,
 			app_id     TEXT    NOT NULL,
+			release_id TEXT    NOT NULL,
 			result     TEXT    NOT NULL,
-			created_at INTEGER NOT NULL
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (op, app_id, release_id)
 		);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
@@ -114,20 +118,52 @@ func (s *Store) deleteAgent(id string) error {
 	return err
 }
 
-// getDeploy 返回某 releaseId 已记录的结果(用于幂等:同 releaseId 已成功则不重复部署)。
-func (s *Store) getDeploy(releaseID string) (string, bool) {
+// migrateDeploys 把旧的「单列 release_id 主键」deploys 表迁移到复合主键前清理:
+// 旧表无 op 列时直接 DROP(幂等去重记录非持久业务数据,丢弃可接受),由后续 CREATE 重建新结构。
+func migrateDeploys(db *sql.DB) {
+	rows, err := db.Query(`PRAGMA table_info(deploys)`)
+	if err != nil {
+		return // 表尚不存在(全新库):无需迁移
+	}
+	defer rows.Close()
+	hasOp, hasAny := false, false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return
+		}
+		hasAny = true
+		if name == "op" {
+			hasOp = true
+		}
+	}
+	if hasAny && !hasOp {
+		db.Exec(`DROP TABLE deploys`)
+		log.Printf("[db] 迁移 deploys → 复合主键(op,app_id,release_id),旧去重记录已清空")
+	}
+}
+
+// getDeploy 返回某 (op,appId,releaseId) 已记录的结果(幂等:同操作+同 app+同 release 已成功则不重复)。
+// 按操作与应用隔离——部署/还原、不同 app 复用同一 releaseId 不会互相误命中。
+func (s *Store) getDeploy(op, appID, releaseID string) (string, bool) {
 	var result string
-	if err := s.db.QueryRow("SELECT result FROM deploys WHERE release_id = ?", releaseID).Scan(&result); err != nil {
+	if err := s.db.QueryRow(
+		"SELECT result FROM deploys WHERE op = ? AND app_id = ? AND release_id = ?",
+		op, appID, releaseID,
+	).Scan(&result); err != nil {
 		return "", false
 	}
 	return result, true
 }
 
-func (s *Store) putDeploy(releaseID, appID, result string) {
+func (s *Store) putDeploy(op, appID, releaseID, result string) {
 	s.db.Exec(
-		`INSERT INTO deploys (release_id, app_id, result, created_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(release_id) DO UPDATE SET result = excluded.result, created_at = excluded.created_at`,
-		releaseID, appID, result, time.Now().UnixMilli(),
+		`INSERT INTO deploys (op, app_id, release_id, result, created_at) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(op, app_id, release_id) DO UPDATE SET result = excluded.result, created_at = excluded.created_at`,
+		op, appID, releaseID, result, time.Now().UnixMilli(),
 	)
 }
 

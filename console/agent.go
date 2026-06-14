@@ -213,7 +213,11 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.
 		a.store.appendRelease(appID, version, result, user) // 服务端权威发布记录(真实结果,前端不再伪造)
 	}
 	if releaseID != "" {
-		a.store.putDeploy(releaseID, appID, result) // 幂等:记录该 release 的最终结果
+		op := "deploy"
+		if action == "还原" {
+			op = "restore"
+		}
+		a.store.putDeploy(op, appID, releaseID, result) // 幂等:按 操作+app+release 记录最终结果
 	}
 }
 
@@ -408,6 +412,34 @@ func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 		path += "?runner=pm2"
 	}
 	status, body, err := cl.get(path)
+	relayAgent(w, status, body, err)
+}
+
+// agentLifecycle 服务端启停:按已存应用配置路由 Agent + runner,真机 start/stop 并落审计。
+// action 由前端传(start|stop),runner 服务端权威派生,不信任前端。
+func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	action := r.URL.Query().Get("action")
+	if action != "start" && action != "stop" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
+		return
+	}
+	cl, runner := a.appRouting(id)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	path := "/api/apps/" + id + "/lifecycle?action=" + action
+	if runner == "pm2" {
+		path += "&runner=pm2"
+	}
+	status, body, err := cl.post(path, "application/json", nil)
+	user := a.sessionUser(r)
+	verb := map[string]string{"start": "启动服务", "stop": "停止服务"}[action]
+	if err != nil || status >= 400 {
+		a.store.appendAudit(user, verb, id, "失败")
+	} else {
+		a.store.appendAudit(user, verb, id, "成功")
+	}
 	relayAgent(w, status, body, err)
 }
 
