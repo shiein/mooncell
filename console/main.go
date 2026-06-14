@@ -42,6 +42,8 @@ func main() {
 	mux.HandleFunc("GET /api/agent/apps/{id}/backups", a.requireAuth(a.agentListBackups))
 	mux.HandleFunc("POST /api/agent/apps/{id}/restore/stream", writeRoles(a.agentRestoreStream))
 	mux.HandleFunc("GET /api/agent/apps/{id}/logs/stream", a.requireAuth(a.agentLogStream))
+	mux.HandleFunc("GET /api/agent/apps/{id}/logs/download", a.requireAuth(a.agentLogDownload))
+	mux.HandleFunc("GET /api/agent/apps/{id}/logs/file/stream", a.requireAuth(a.agentLogFileStream))
 
 	// 业务数据持久化:读(hydrate)任意角色;写限 admin/operator。
 	mux.HandleFunc("POST /api/data", a.requireAuth(a.hydrate))

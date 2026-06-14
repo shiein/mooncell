@@ -250,7 +250,14 @@ function LogViewer({ app }) {
             : genActive ? (follow ? "tail -F 实时跟随(演示)" : "已暂停") : "进程未运行 · 历史日志"}
         </Badge>
         <Btn size="sm" icon={follow ? "pause" : "play"} onClick={() => setFollow(!follow)}>{follow ? "暂停" : "继续"}</Btn>
-        <Btn size="sm" icon="download" onClick={() => toast(`已按时间范围打包 ${app.id}-logs-${tsDir(Date.now())}.tar.gz(模拟下载)`)}>下载</Btn>
+        <Btn size="sm" icon="download" title="导出最近 7 天日志(gzip)" onClick={() => {
+          if (!useReal) { toast("演示应用无真实日志可导出", { tone: "warn" }); return; }
+          const since = Math.floor((Date.now() - 7 * 24 * 3600 * 1000) / 1000);
+          const a = document.createElement("a");
+          a.href = `/api/agent/apps/${encodeURIComponent(app.id)}/logs/download?since=${since}`;
+          document.body.appendChild(a); a.click(); a.remove();
+          toast("开始导出日志(gzip)");
+        }}>下载</Btn>
       </div>
       <Console lines={shown} filter={filter} height={460} />
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>

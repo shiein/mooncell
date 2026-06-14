@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -316,6 +317,54 @@ func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 	path += "?tail=" + tail
 	if runner == "pm2" {
 		path += "&runner=pm2"
+	}
+	resp, err := cl.getStream(r.Context(), path)
+	a.streamAgentResp(w, resp, err)
+}
+
+// agentLogDownload 按时间范围导出应用日志(gzip),Agent 与 runner 服务端派生;转发 Content-Disposition。
+func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	cl, runner := a.appRouting(id)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	q := url.Values{}
+	if s := r.URL.Query().Get("since"); s != "" {
+		q.Set("since", s)
+	}
+	if u := r.URL.Query().Get("until"); u != "" {
+		q.Set("until", u)
+	}
+	if runner == "pm2" {
+		q.Set("runner", "pm2")
+	}
+	resp, err := cl.getStream(r.Context(), "/api/apps/"+id+"/logs/download?"+q.Encode())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Agent 不可达", "detail": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		w.Header().Set("Content-Disposition", cd)
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// agentLogFileStream tail 声明的日志文件(Agent 端 log_roots 白名单校验);Agent 据应用 agentId 服务端路由。
+func (a *api) agentLogFileStream(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	cl, _ := a.appRouting(id)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	path := "/api/apps/" + id + "/logs/file/stream?path=" + url.QueryEscape(r.URL.Query().Get("path"))
+	if t := r.URL.Query().Get("tail"); t != "" {
+		path += "&tail=" + url.QueryEscape(t)
 	}
 	resp, err := cl.getStream(r.Context(), path)
 	a.streamAgentResp(w, resp, err)

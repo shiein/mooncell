@@ -51,6 +51,8 @@ func main() {
 
 	// 应用运行时日志:跟随 systemd journal 实时流(SSE)
 	mux.HandleFunc("GET /api/apps/{id}/logs/stream", a.tokenAuth(a.logStream))
+	mux.HandleFunc("GET /api/apps/{id}/logs/download", a.tokenAuth(a.logDownload))        // 时间范围导出 gzip
+	mux.HandleFunc("GET /api/apps/{id}/logs/file/stream", a.tokenAuth(a.logFileStream)) // 文件日志 tail(log_roots 白名单)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Addr, cfg.Server.Port)
 	log.Printf("Mooncell Agent %s 运行于 http://%s", agentVersion, addr)

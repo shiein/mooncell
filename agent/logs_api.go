@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -71,15 +72,92 @@ func parseJournalLine(raw string) map[string]any {
 			ts = us / 1000
 		}
 	}
-	level := priorityLevel(j.Priority)
-	// 应用经 stdout 的日志常被 journald 统一标为 info,关键字更贴近用户语义,优先级更高。
+	return map[string]any{"ts": ts, "level": lineLevel(text, priorityLevel(j.Priority)), "text": text}
+}
+
+// lineLevel 据消息关键字判定日志级别(应用经 stdout 的日志常被统一标为 info,关键字更贴近用户语义)。
+// base 为已知的基础级别(如 syslog PRIORITY 推断),无则传 "info"。
+func lineLevel(text, base string) string {
+	if base == "" {
+		base = "info"
+	}
 	switch up := strings.ToUpper(text); {
 	case strings.Contains(up, "ERROR"), strings.Contains(up, "FATAL"), strings.Contains(up, "PANIC"):
-		level = "error"
+		return "error"
 	case strings.Contains(up, "WARN"):
-		level = "warn"
+		return "warn"
 	}
-	return map[string]any{"ts": ts, "level": level, "text": text}
+	return base
+}
+
+// logDownload 处理 GET /api/apps/{id}/logs/download?since=&until=&runner= :
+// 按时间范围导出该应用日志(systemd journal / pm2),gzip 打包为 attachment 下载。
+func (a *agent) logDownload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	q := r.URL.Query()
+	fname := unitName(id) + "-logs-" + time.Now().Format("20060102_150405") + ".log.gz"
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", "attachment; filename="+fname)
+	gz := gzip.NewWriter(w)
+	defer gz.Close()
+
+	var cmd *exec.Cmd
+	if q.Get("runner") == "pm2" {
+		cmd = exec.CommandContext(r.Context(), "pm2", "logs", unitName(id), "--lines", "20000", "--nostream", "--raw")
+	} else {
+		args := []string{"-u", unitName(id), "-o", "short-iso", "--no-pager"}
+		// since/until 必须是纯数字 unix 秒,防注入。
+		if s := q.Get("since"); isUnixSec(s) {
+			args = append(args, "--since", "@"+s)
+		}
+		if u := q.Get("until"); isUnixSec(u) {
+			args = append(args, "--until", "@"+u)
+		}
+		cmd = exec.CommandContext(r.Context(), "journalctl", args...)
+	}
+	cmd.Stdout = gz
+	cmd.Run()
+}
+
+func isUnixSec(s string) bool {
+	if s == "" {
+		return false
+	}
+	_, err := strconv.ParseInt(s, 10, 64)
+	return err == nil
+}
+
+// logFileStream 处理 GET /api/apps/{id}/logs/file/stream?path=&tail= :
+// tail -F 跟随声明的日志文件。path 必须在 log_roots 白名单内(防穿越/越权读任意文件)。
+func (a *agent) logFileStream(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if !withinRoots(path, a.cfg.Paths.LogRoots) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "日志路径不在 log_roots 白名单内: " + path})
+		return
+	}
+	tail := r.URL.Query().Get("tail")
+	if _, err := strconv.Atoi(tail); err != nil || tail == "" {
+		tail = "200"
+	}
+	sse, ok := sseHeader(w)
+	if !ok {
+		return
+	}
+	cmd := exec.CommandContext(r.Context(), "tail", "-n", tail, "-F", path)
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		sse("line", map[string]any{"ts": time.Now().UnixMilli(), "level": "error", "text": "tail 启动失败: " + err.Error()})
+		return
+	}
+	go func() { cmd.Wait(); pw.Close() }()
+	scn := bufio.NewScanner(pr)
+	scn.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scn.Scan() {
+		line := scn.Text()
+		sse("line", map[string]any{"ts": time.Now().UnixMilli(), "level": lineLevel(line, "info"), "text": line})
+	}
 }
 
 // priorityLevel 把 syslog 优先级(0~7)归并到三档:0-3 错误、4 告警、其余信息。
