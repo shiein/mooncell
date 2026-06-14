@@ -119,7 +119,12 @@ func (a *api) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // Agent 不可达时返回 502 + online:false,前端据此把 Agent 状态显示为离线。
 func (a *api) agentProxy(agentPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		status, body, err := a.agent.get(agentPath)
+		cl := a.resolveAgent(r)
+		if cl == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "目标 Agent 不存在", "online": false})
+			return
+		}
+		status, body, err := cl.get(agentPath)
 		relayAgent(w, status, body, err)
 	}
 }
@@ -147,11 +152,24 @@ func (a *api) sessionUser(r *http.Request) string {
 	return "unknown"
 }
 
+// unknownAgent 在目标 Agent 解析失败时回 404 并返回 false。
+func (a *api) unknownAgent(w http.ResponseWriter, cl *agentClient) bool {
+	if cl == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "目标 Agent 不存在", "online": false})
+		return true
+	}
+	return false
+}
+
 // agentDeploy 透传部署请求(multipart:config + artifact)到 Agent /api/apps/{id}/deploy。
 func (a *api) agentDeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
-	status, body, err := a.agent.post("/api/apps/"+id+"/deploy", r.Header.Get("Content-Type"), r.Body)
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	status, body, err := cl.post("/api/apps/"+id+"/deploy", r.Header.Get("Content-Type"), r.Body)
 	relayAgent(w, status, body, err)
 }
 
@@ -159,7 +177,11 @@ func (a *api) agentDeploy(w http.ResponseWriter, r *http.Request) {
 func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
-	resp, err := a.agent.postStream("/api/apps/"+id+"/deploy/stream", r.Header.Get("Content-Type"), r.Body)
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	resp, err := cl.postStream("/api/apps/"+id+"/deploy/stream", r.Header.Get("Content-Type"), r.Body)
 	a.streamAndAudit(w, r, resp, err, "部署", id)
 }
 
@@ -286,7 +308,11 @@ func (a *api) streamAgentResp(w http.ResponseWriter, resp *http.Response, err er
 // agentListBackups 透传 GET 历史备份列表。
 func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	status, body, err := a.agent.get("/api/apps/" + id + "/backups")
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	status, body, err := cl.get("/api/apps/" + id + "/backups")
 	relayAgent(w, status, body, err)
 }
 
@@ -294,29 +320,45 @@ func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
-	resp, err := a.agent.postStream("/api/apps/"+id+"/restore/stream", r.Header.Get("Content-Type"), r.Body)
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	resp, err := cl.postStream("/api/apps/"+id+"/restore/stream", r.Header.Get("Content-Type"), r.Body)
 	a.streamAndAudit(w, r, resp, err, "还原", id)
 }
 
 // agentLogStream 把 Agent 的应用日志 SSE 流透传给前端;用请求 context 绑定上游,前端断开即级联取消。
 func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	path := "/api/apps/" + id + "/logs/stream"
-	if q := r.URL.RawQuery; q != "" {
-		path += "?" + q
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
 	}
-	resp, err := a.agent.getStream(r.Context(), path)
+	path := "/api/apps/" + id + "/logs/stream"
+	if t := r.URL.Query().Get("tail"); t != "" {
+		path += "?tail=" + t
+	}
+	resp, err := cl.getStream(r.Context(), path)
 	a.streamAgentResp(w, resp, err)
 }
 
 func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	status, body, err := a.agent.get("/api/apps/" + id + "/status")
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	status, body, err := cl.get("/api/apps/" + id + "/status")
 	relayAgent(w, status, body, err)
 }
 
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	status, body, err := a.agent.del("/api/apps/" + id)
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	status, body, err := cl.del("/api/apps/" + id)
 	relayAgent(w, status, body, err)
 }

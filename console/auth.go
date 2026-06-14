@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,7 +15,9 @@ const sessionCookie = "mc_sid"
 // api 持有依赖,挂载各 HTTP handler。
 type api struct {
 	store      *Store
-	agent      *agentClient
+	agent      *agentClient            // 配置内的默认 Agent(id="default"/空)
+	clients    map[string]*agentClient // 注册的远端 Agent 客户端缓存(按 id)
+	clientsMu  sync.Mutex
 	cabinetDir string
 }
 

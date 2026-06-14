@@ -44,6 +44,13 @@ func openDB(cfg *Config) *Store {
 			data TEXT NOT NULL,
 			UNIQUE(kind, id)
 		);
+		CREATE TABLE IF NOT EXISTS agents (
+			id         TEXT    PRIMARY KEY,
+			name       TEXT    NOT NULL,
+			addr       TEXT    NOT NULL,
+			token      TEXT    NOT NULL,
+			created_at INTEGER NOT NULL
+		);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
 	}
@@ -52,6 +59,54 @@ func openDB(cfg *Config) *Store {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// AgentRow 是注册的远端 Agent(token 仅服务端用,列表对外时置空)。
+type AgentRow struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Addr      string `json:"addr"`
+	Token     string `json:"token,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *Store) listAgents() ([]AgentRow, error) {
+	rows, err := s.db.Query("SELECT id, name, addr, created_at FROM agents ORDER BY created_at")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AgentRow{}
+	for rows.Next() {
+		var a AgentRow
+		if err := rows.Scan(&a.ID, &a.Name, &a.Addr, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a) // 不含 token
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) getAgent(id string) (AgentRow, bool) {
+	var a AgentRow
+	if err := s.db.QueryRow("SELECT id, name, addr, token, created_at FROM agents WHERE id = ?", id).
+		Scan(&a.ID, &a.Name, &a.Addr, &a.Token, &a.CreatedAt); err != nil {
+		return AgentRow{}, false
+	}
+	return a, true
+}
+
+func (s *Store) addAgent(id, name, addr, token string) error {
+	_, err := s.db.Exec(
+		"INSERT INTO agents (id, name, addr, token, created_at) VALUES (?, ?, ?, ?, ?)",
+		id, name, addr, token, time.Now().UnixMilli(),
+	)
+	return err
+}
+
+func (s *Store) deleteAgent(id string) error {
+	_, err := s.db.Exec("DELETE FROM agents WHERE id = ?", id)
+	return err
+}
 
 // seedAdmin 仅在用户表为空时种入默认管理员(bcrypt)。
 func (s *Store) seedAdmin(username, password string) {

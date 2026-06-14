@@ -21,7 +21,7 @@ func main() {
 	defer store.Close()
 	store.seedAdmin(cfg.Admin.Username, cfg.Admin.Password)
 
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), cabinetDir: cfg.Cabinet.Dir}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
@@ -53,6 +53,12 @@ func main() {
 	mux.HandleFunc("GET /api/users", a.requireRole("admin")(a.listUsers))
 	mux.HandleFunc("POST /api/users", a.requireRole("admin")(a.createUser))
 	mux.HandleFunc("DELETE /api/users/{username}", a.requireRole("admin")(a.deleteUser))
+
+	// 多 Agent 管理:列表任意登录可见;增删限 admin;ping 任意登录可测。
+	mux.HandleFunc("GET /api/agents", a.requireAuth(a.listAgents))
+	mux.HandleFunc("POST /api/agents", a.requireRole("admin")(a.addAgent))
+	mux.HandleFunc("DELETE /api/agents/{id}", a.requireRole("admin")(a.deleteAgent))
+	mux.HandleFunc("GET /api/agents/{id}/ping", a.requireAuth(a.pingAgent))
 
 	// 文件柜:上传/删除限 write;按 id 下载需登录;公开文件凭码免登录下载。
 	mux.HandleFunc("POST /api/cabinet", writeRoles(a.uploadCabinet))
