@@ -39,6 +39,7 @@ mooncell/
 | 角色权限 RBAC(admin/operator/viewer)+ 用户管理| ✅ 完成(后端按角色强制鉴权 curl 验证;前端门控构建态)|
 | 文件柜真实化(二进制落盘 + 提取码 + 公开直链 + 强制 attachment 下载)| ✅ 完成(上传/下载/凭码/删除/权限 curl 验证;前端构建态)|
 | 多 Agent(注册表 + 代理按 ?agent= 路由 + 应用选目标机)| ✅ 完成(双实例真机验证路由;前端 Agent 管理页 + 新建应用选 Agent,构建态)|
+| pm2 Runner(systemd 之外的进程托管,ecosystem 配置 + 回滚配置还原)| ✅ 完成(真机 stand-in 验证:部署→回滚还原 ecosystem 闭环)|
 
 实施路线见方案文档 §12(P0 → P3)。
 

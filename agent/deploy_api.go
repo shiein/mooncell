@@ -128,5 +128,6 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	os.Remove(unitPath(id))
 	sysctl("daemon-reload")
 	sysctl("reset-failed", unitName(id))
+	pm2("delete", unitName(id)) // 若该应用由 pm2 托管也一并清理(无 pm2/无此进程则忽略)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

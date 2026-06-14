@@ -345,7 +345,7 @@ function DeployDialog({ app, open, onClose }) {
     if (isReal) {
       setStage("pipeline"); setReal({ streaming: true, steps: [] });
       const cfg = {
-        name: app.name, type: app.type, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
+        name: app.name, type: app.type, runner: app.runner, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
         health: /^https?:\/\//.test(app.health || "") ? app.health : "",
         version, backupKeep: app.backupKeep || 5,
       };
@@ -526,7 +526,7 @@ function RestoreDialog({ app, backup, open, onClose }) {
     if (isReal) {
       setReal({ streaming: true, steps: [] });
       const cfg = {
-        name: app.name, type: app.type, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
+        name: app.name, type: app.type, runner: app.runner, binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
         health: /^https?:\/\//.test(app.health || "") ? app.health : "",
         version: backup.version, backupKeep: app.backupKeep || 5,
       };

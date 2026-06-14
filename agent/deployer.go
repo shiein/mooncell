@@ -22,6 +22,7 @@ type DeployConfig struct {
 	Type       string            `json:"type"`    // go-binary | java-jar | static-nginx;空默认 go-binary
 	BinPath    string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
 	Workdir    string            `json:"workdir"`
+	Runner     string            `json:"runner"`  // systemd(默认)| pm2;决定进程托管方式
 	Args       string            `json:"args"`    // 启动参数
 	JvmArgs    string            `json:"jvmArgs"` // java-jar:JVM 参数
 	Env        map[string]string `json:"env"`
@@ -231,10 +232,13 @@ func (a *agent) backupCurrent(cfg DeployConfig) (string, error) {
 	if err := copyFile(cfg.BinPath, filepath.Join(dir, "app"), 0755); err != nil {
 		return "", err
 	}
-	// 一并备份当前 unit(env/args/ExecStart 等运行期配置):回滚要连配置一起还原,
-	// 否则旧制品会跑在新部署改过的 unit 下(如 env 变更),回滚后行为仍是错的。
+	// 一并备份当前运行期配置(systemd unit 或 pm2 ecosystem):回滚要连配置一起还原,
+	// 否则旧制品会跑在新部署改过的配置下(如 env 变更),回滚后行为仍是错的。
 	if up := unitPath(cfg.ID); fileExists(up) {
 		copyFile(up, filepath.Join(dir, "unit.service"), 0644)
+	}
+	if eco := pm2EcoPath(cfg.BinPath); fileExists(eco) {
+		copyFile(eco, filepath.Join(dir, "ecosystem.json"), 0644)
 	}
 	meta := fmt.Sprintf(`{"version":%q,"sha256":%q,"time":%d,"operator":"console"}`,
 		currentVersion(cfg.BinPath), sha256File(cfg.BinPath), time.Now().UnixMilli())
@@ -311,6 +315,9 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 	case "tomcat-war":
 		return a.runDeployTomcat(cfg, artifact, emit)
 	default:
+		if cfg.Runner == "pm2" {
+			return a.runDeployPm2(cfg, artifact, emit)
+		}
 		return a.runDeployProcess(cfg, artifact, emit)
 	}
 }
