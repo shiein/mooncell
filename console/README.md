@@ -46,14 +46,23 @@ ttl_hours = 168         # 会话有效期(小时),168 = 7 天
 [admin]
 username = "admin"
 password = "jch@9388"
+
+[agent]                  # Console 主动连接的默认 Agent(单机版指向本机)
+addr  = "127.0.0.1:9100"
+token = "mc_ag_change_me"   # 须与 Agent 端 token 一致
+
+[cabinet]
+dir         = "cabinet"  # 文件柜二进制落盘目录
+anon_upload = false      # 是否允许免登录匿名上传(POST /api/pub/cabinet)
 ```
 
 配置文件缺失或字段缺省时使用内置默认值(同上),可只覆盖部分字段。
+多 Agent 在运行时由「Agent 管理」页注册(存 SQLite),应用按 `agentId` 路由。
 
 ## 设计说明
 
 - **1:1 还原**:原型的视觉完全由一套自定义 CSS 设计令牌(CSS 变量 + 语义类 `.btn`/`.card`/`.console` …)决定,**不是 Tailwind**。迁移时这套样式 `src/index.css` 原样保留;Tailwind 按技术栈要求接入,但关闭 `preflight`(避免全局 reset 改写既有排版),工具类可按需使用。字体(IBM Plex Mono + Instrument Sans 共 19 个 woff2)本地打包,保证离线一致。
-- **静态迁移**:除登录外只做页面迁移。原型的领域数据为前端 mock(`src/lib/data.js`),行为(部署流水线、日志、备份还原等)均为前端模拟,迁移时一字未改,仅由 `window` 全局改写为 ES 模块的 `import/export`。
+- **真实后端能力(已超原型)**:登录/RBAC(admin/operator/viewer,服务端强制鉴权)、Agent 代理(部署/还原/日志/备份,据已存类型化配置服务端生成请求 + releaseId 幂等)、多 Agent 注册与路由、文件柜(二进制落盘 + 提取码 + 匿名上传 + 过期清理)、审计与发布记录服务端权威落库,均为真实后端。`src/lib/data.js` 的 seed 仅作首启演示数据;进程类/static/tomcat 应用经 UI 走真机部署。完成度见 [../README.md](../README.md)。
 - **登录为真实后端**:`POST /api/login` 校验 SQLite 中的 bcrypt 口令,签发随机 token 写入 `sessions` 表,并以 **httpOnly cookie**(`mc_sid`)维持会话;`GET /api/session` 查询登录态,`POST /api/logout` 注销。前端挂载时查询会话决定进入登录页或控制台。
 - **单二进制部署**:后端用 Go,前端构建产物经 `//go:embed all:dist` 编译进二进制,运行时从内存映像直接服务静态资源(无磁盘 IO)。sqlite 用纯 Go 驱动 `modernc.org/sqlite`(无 CGO),保证交叉编译与单文件部署的纯粹性。
 - **Chrome 92+ 兼容**:Vite `build.target` / `esbuild.target` 设为 `chrome92`,现代语法降级到该目标可运行的形态。
