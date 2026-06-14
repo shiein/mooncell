@@ -117,7 +117,8 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	plog, err := a.placeArtifact(cfg, artifact)
 	if err != nil {
 		add("替换制品", false, err.Error())
-		res.Result = "failed"
+		rlog, ok := a.rollbackPm2(cfg, bkDir)
+		res.Result = rollbackResult(rlog, ok, add)
 		return res
 	}
 	add("替换制品", true, plog)
@@ -125,7 +126,8 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	eco, err := writePm2Eco(cfg)
 	if err != nil {
 		add("启动服务", false, "写 ecosystem 失败: "+err.Error())
-		res.Result = "failed"
+		rlog, ok := a.rollbackPm2(cfg, bkDir)
+		res.Result = rollbackResult(rlog, ok, add)
 		return res
 	}
 	pid, err := pm2Start(cfg, eco)
@@ -153,17 +155,27 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 		res.Result = "failed"
 		return res
 	}
+	rlog, ok := a.rollbackPm2(cfg, bkDir)
+	res.Result = rollbackResult(rlog, ok, add)
+	return res
+}
+
+// rollbackPm2 在 pm2 服务已停止或部署失败后恢复旧制品与旧 ecosystem,并尝试拉起旧服务。
+func (a *agent) rollbackPm2(cfg DeployConfig, bkDir string) ([]string, bool) {
+	if bkDir == "" {
+		pm2("stop", unitName(cfg.ID))
+		return []string{"首次部署无备份可回滚,已停止服务"}, false
+	}
 	rlog := []string{"读取 " + bkDir, "还原备份制品"}
 	pm2("stop", unitName(cfg.ID))
 	if err := a.restoreArtifactFrom(cfg, bkDir); err != nil {
-		rlog = append(rlog, "还原失败: "+err.Error())
-		add("回滚 · 还原备份", false, rlog...)
-		res.Result = "failed"
-		return res
+		return append(rlog, "还原失败: "+err.Error()), false
 	}
 	ecoBak := filepath.Join(bkDir, "ecosystem.json")
 	if fileExists(ecoBak) {
-		copyFile(ecoBak, pm2EcoPath(cfg.BinPath), 0644)
+		if err := copyFile(ecoBak, pm2EcoPath(cfg.BinPath), 0644); err != nil {
+			return append(rlog, "还原 ecosystem 失败: "+err.Error()), false
+		}
 		rlog = append(rlog, "还原 ecosystem 配置")
 	}
 	pm2("delete", unitName(cfg.ID))
@@ -172,11 +184,5 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	var rh []string
 	ok := processHealthy(cfg.Health, pm2Online(cfg.ID), &rh) // 回滚同样确认 pm2 进程真起来
 	rlog = append(rlog, rh...)
-	add("回滚 · 还原备份", ok, rlog...)
-	if ok {
-		res.Result = "rolledback"
-	} else {
-		res.Result = "failed"
-	}
-	return res
+	return rlog, ok
 }

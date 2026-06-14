@@ -781,7 +781,8 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	plog, err := a.placeArtifact(cfg, artifact)
 	if err != nil {
 		add("替换制品", false, err.Error())
-		res.Result = "failed"
+		rlog, ok := a.rollbackSystemd(cfg, bkDir)
+		res.Result = rollbackResult(rlog, ok, add)
 		return res
 	}
 	add("替换制品", true, plog)
@@ -789,7 +790,8 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	// 5. 生成 unit + 启动
 	if err := writeUnit(cfg); err != nil {
 		add("启动服务", false, "写 unit 失败: "+err.Error())
-		res.Result = "failed"
+		rlog, ok := a.rollbackSystemd(cfg, bkDir)
+		res.Result = rollbackResult(rlog, ok, add)
 		return res
 	}
 	sysctl("daemon-reload")
@@ -819,33 +821,44 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 		res.Result = "failed"
 		return res
 	}
+	rlog, ok := a.rollbackSystemd(cfg, bkDir)
+	res.Result = rollbackResult(rlog, ok, add)
+	return res
+}
+
+func rollbackResult(logs []string, ok bool, add func(string, bool, ...string)) string {
+	add("回滚 · 还原备份", ok, logs...)
+	if ok {
+		return "rolledback"
+	}
+	return "failed"
+}
+
+// rollbackSystemd 在服务已停止或部署失败后恢复旧制品与旧 unit,并尝试拉起旧服务。
+func (a *agent) rollbackSystemd(cfg DeployConfig, bkDir string) ([]string, bool) {
+	if bkDir == "" {
+		sysctl("stop", unitName(cfg.ID))
+		return []string{"首次部署无备份可回滚,已停止服务"}, false
+	}
 	rlog := []string{"读取 " + bkDir, "还原备份制品"}
 	sysctl("stop", unitName(cfg.ID))
 	if err := a.restoreArtifactFrom(cfg, bkDir); err != nil {
-		rlog = append(rlog, "还原失败: "+err.Error())
-		add("回滚 · 还原备份", false, rlog...)
-		res.Result = "failed"
-		return res
+		return append(rlog, "还原失败: "+err.Error()), false
 	}
 	// 连同 unit 一起还原(env/args 等),否则旧制品会跑在本次失败部署改过的配置下。
 	if bu := filepath.Join(bkDir, "unit.service"); fileExists(bu) {
-		if err := copyFile(bu, unitPath(cfg.ID), 0644); err == nil {
-			sysctl("daemon-reload")
-			rlog = append(rlog, "还原 unit + daemon-reload")
+		if err := copyFile(bu, unitPath(cfg.ID), 0644); err != nil {
+			return append(rlog, "还原 unit 失败: "+err.Error()), false
 		}
+		sysctl("daemon-reload")
+		rlog = append(rlog, "还原 unit + daemon-reload")
 	}
 	sysctl("start", unitName(cfg.ID))
 	time.Sleep(time.Second)
 	var rh []string
 	ok := processHealthy(cfg.Health, isActive(cfg.ID), &rh) // 回滚同样要确认进程真的起来,不能空健康检查直接判成功
 	rlog = append(rlog, rh...)
-	add("回滚 · 还原备份", ok, rlog...)
-	if ok {
-		res.Result = "rolledback"
-	} else {
-		res.Result = "failed"
-	}
-	return res
+	return rlog, ok
 }
 
 // ---------- 静态站点(软链切换)----------
