@@ -8,6 +8,9 @@ dist/
 /console/mooncell
 /agent/agent
 
+# 发布打包产物(由 deploy/build-release.sh 生成)
+/deploy/release/
+
 # SQLite 运行期文件
 *.db
 *.db-shm

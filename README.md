@@ -35,7 +35,23 @@ mooncell/
 | 应用运行时日志实时流(Agent 跟随 systemd journal → SSE → Console 代理 → 前端 tail+跟随)| ✅ 完成(go-binary 真机验证:直连/经代理双路、断开级联取消;前端构建态,失败回退模拟)|
 | 真实操作审计落库(Console 代理部署/还原时据会话操作人 + Agent 实际结果服务端权威写审计)| ✅ 完成(真机验证:成功/回滚/还原三态正确入 SQLite,source=agent;前端真实操作改乐观显示不重复落库)|
 
+| 离线安装(install.sh:两端装为 systemd 服务 + 自动生成共享 token 打通)| ✅ 完成(真机验证:装→登录→Console↔Agent 连通→升级/卸载)|
+
 实施路线见方案文档 §12(P0 → P3)。
+
+## 离线部署
+
+```bash
+# 构建机(联网):产出离线 bundle
+ARCH=amd64 deploy/build-release.sh        # 或 ARCH=arm64(麒麟/UOS)
+# → deploy/release/mooncell-amd64/{mooncell-agent, mooncell-console, install.sh}
+
+# 目标机(内网/离线,root):拷入 bundle 目录后
+./install.sh install      # 装为 systemd 服务,自动生成共享 token 打通两端
+./install.sh upgrade      # 仅换二进制并重启,保留配置与数据
+./install.sh status       # 服务状态与访问信息
+./install.sh uninstall    # 卸载(默认留数据;--purge 连数据一并删)
+```
 
 > 前端可视化验证:部署弹窗已用无头 Chrome 截图核对真实渲染(含 go-binary 真机部署态),布局/类型自适应/上传校验态均正常。
 >
