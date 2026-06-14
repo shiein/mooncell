@@ -81,6 +81,8 @@ function CreateAppDialog({ open, onClose }) {
     setChecks(res.checks.map((c) => ({ label: c.label, st: c.ok ? "ok" : "fail", note: c.detail || "" })));
   };
   const checksDone = checks.length > 0 && checks.every((c) => c.st !== "pending");
+  // 预检有 fail(白名单外/端口占用/运行时缺失)禁止创建;warn(Agent 不可达)允许降级创建。
+  const checksBlocked = checks.some((c) => c.st === "fail");
 
   const create = () => {
     const id = (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
@@ -119,7 +121,7 @@ function CreateAppDialog({ open, onClose }) {
           {step > 0 ? <Btn variant="ghost" icon="chevronL" onClick={() => setStep(step - 1)}>上一步</Btn> : <Btn variant="ghost" onClick={onClose}>取消</Btn>}
           {step === 0 ? <Btn variant="primary" disabled={!type} onClick={() => setStep(1)}>下一步</Btn> : null}
           {step === 1 ? <Btn variant="primary" disabled={!form.name} onClick={runPrecheck}>执行预检</Btn> : null}
-          {step === 2 ? <Btn variant="primary" icon="check" disabled={!checksDone} onClick={create}>创建应用</Btn> : null}
+          {step === 2 ? <Btn variant="primary" icon="check" disabled={!checksDone || checksBlocked} onClick={create}>创建应用</Btn> : null}
         </React.Fragment>
       }>
       {step === 0 ? (
@@ -193,7 +195,8 @@ function CreateAppDialog({ open, onClose }) {
               {c.note ? <span style={{ fontSize: 11.5, color: "var(--warn)" }}>{c.note}</span> : null}
             </div>
           ))}
-          {checksDone ? <div className="fade-up" style={{ fontSize: 12.5, color: "var(--success)", display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}><Icon name="check" size={14} />预检通过,可以创建</div> : null}
+          {checksDone && checksBlocked ? <div className="fade-up" style={{ fontSize: 12.5, color: "var(--error)", display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}><Icon name="alert" size={14} />预检未通过,请修正后重试(白名单/端口/运行时)</div> : null}
+          {checksDone && !checksBlocked ? <div className="fade-up" style={{ fontSize: 12.5, color: "var(--success)", display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}><Icon name="check" size={14} />预检通过,可以创建</div> : null}
         </div>
       ) : null}
     </Dialog>

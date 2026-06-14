@@ -3,7 +3,7 @@ import React from 'react';
 import { useTweaks } from './lib/tweaks.js';
 import {
   MCStore, INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
-  tsDir, MC_DAY, fmtBytes,
+  tsDir, MC_DAY, fmtBytes, isProcessType,
 } from './lib/data.js';
 import { ToastHost, toast } from './components/primitives.jsx';
 import { Shell } from './components/Shell.jsx';
@@ -13,7 +13,7 @@ import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
 import { UsersPage } from './pages/Users.jsx';
 import { AgentsPage } from './pages/Agents.jsx';
-import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity, removeCabinetFile } from './lib/api.js';
+import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity, removeCabinetFile, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -71,7 +71,8 @@ function App() {
     }).then((data) => {
       if (!data) return; // 后端不可达:保留 mock,页面照常 1:1
       const byTimeDesc = (arr) => [...(arr || [])].sort((a, b) => (b.time || 0) - (a.time || 0));
-      if (data.apps && data.apps.length) setApps(data.apps); // apps 保持插入顺序
+      // 后端可达即以库为准(即便为空):空库必须清空 mock,否则生产环境会一直显示演示应用。
+      setApps(data.apps || []); // apps 保持插入顺序
       setReleases(byTimeDesc(data.releases));
       setBackups(byTimeDesc(data.backups));
       setCabinet(byTimeDesc(data.cabinet));
@@ -156,12 +157,29 @@ function App() {
       toast(`${app.name} 已还原至 ${backup.version}`);
     },
 
-    toggleApp(app, on) {
+    async toggleApp(app, on) {
+      const verb = on ? "启动" : "停止";
+      // 真实进程类:打 Agent 真机启停(systemd/pm2),用返回的真实状态刷新——不再前端伪造 pid/cpu/mem。
+      // Agent 不可达或无托管单元(演示应用)时返回 null,回退到可视化模拟。
+      if (isProcessType(app.type)) {
+        const st = await setAppLifecycle(app.id, on ? "start" : "stop");
+        if (st) {
+          patchApp(app.id, {
+            status: st.active ? "running" : "stopped",
+            pid: st.active && st.pid && st.pid !== "0" ? (Number(st.pid) || st.pid) : null,
+            uptime: st.active ? "刚刚" : "—", cpu: "—", mem: "—",
+          });
+          addAudit(on ? "启动服务" : "停止服务", app.name, "成功"); // 服务端 lifecycle 已权威落审计,这里仅乐观显示
+          toast(`${app.name} 已${verb}`);
+          return;
+        }
+      }
+      // 回退:演示/模拟应用(无真机单元)——保留可视化模拟。
       patchApp(app.id, on
         ? { status: "running", pid: 20000 + (Math.random() * 9000 | 0), uptime: "刚刚", cpu: "0.8%", mem: app.mem === "—" ? "280 MB" : app.mem }
         : { status: "stopped", pid: null, uptime: "—", cpu: "—", mem: "—" });
       addAudit(on ? "启动服务" : "停止服务", app.name, "成功");
-      toast(`${app.name} 已${on ? "启动" : "停止"}`);
+      toast(`${app.name} 已${verb}`);
     },
 
     addApp(app) {
