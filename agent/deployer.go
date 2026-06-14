@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -223,6 +224,41 @@ func mainPID(id string) string {
 func isActive(id string) bool {
 	out, _ := sysctl("is-active", unitName(id))
 	return out == "active"
+}
+
+// procStats 据 pid 用 ps 读取进程的 CPU% 与常驻内存(RSS),格式化为展示字符串。
+// pid 空/0(未运行)返回 "—"。CPU% 为 ps 给出的进程生命周期平均占用,作展示近似足够。
+func procStats(pid string) (cpu, mem string) {
+	pid = strings.TrimSpace(pid)
+	if pid == "" || pid == "0" {
+		return "—", "—"
+	}
+	out, err := exec.Command("ps", "-o", "%cpu=,rss=", "-p", pid).Output()
+	if err != nil {
+		return "—", "—"
+	}
+	f := strings.Fields(string(out))
+	if len(f) < 2 {
+		return "—", "—"
+	}
+	cpu = f[0] + "%"
+	if kb, err := strconv.ParseFloat(f[1], 64); err == nil {
+		mem = fmtKB(kb)
+	} else {
+		mem = "—"
+	}
+	return cpu, mem
+}
+
+// fmtKB 把 KB 数格式化为人类可读(MB/GB)。
+func fmtKB(kb float64) string {
+	if kb < 1024 {
+		return fmt.Sprintf("%.0f KB", kb)
+	}
+	if kb < 1024*1024 {
+		return fmt.Sprintf("%.0f MB", kb/1024)
+	}
+	return fmt.Sprintf("%.1f GB", kb/1024/1024)
 }
 
 // ---------- 文件与校验 ----------

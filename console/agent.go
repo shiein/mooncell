@@ -293,6 +293,13 @@ func boolStr(b bool, t, f string) string {
 	return f
 }
 
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
 // fetchReleaseRecord 向 Agent 查询某 (op,app,releaseId) 的权威幂等记录(仅成功才记录)。
 // 用 cl 自带的短超时客户端(不绑浏览器请求 context),浏览器断开不影响本次对账查询。
 func (a *api) fetchReleaseRecord(cl *agentClient, op, appID, releaseID string) (result, version string, ok bool) {
@@ -562,6 +569,8 @@ func (a *api) applyLifecycleState(appID string, body []byte) {
 	var st struct {
 		Active bool   `json:"active"`
 		Pid    string `json:"pid"`
+		Cpu    string `json:"cpu"`
+		Mem    string `json:"mem"`
 	}
 	if json.Unmarshal(body, &st) != nil {
 		return
@@ -583,8 +592,8 @@ func (a *api) applyLifecycleState(appID string, body []byte) {
 		m["status"] = "stopped"
 		m["pid"] = nil
 	}
-	m["cpu"] = "—"
-	m["mem"] = "—"
+	m["cpu"] = orDash(st.Cpu)
+	m["mem"] = orDash(st.Mem)
 	if b, err := json.Marshal(m); err == nil {
 		a.store.putEntity("app", appID, b)
 	}

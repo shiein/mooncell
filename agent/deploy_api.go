@@ -141,19 +141,25 @@ func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("runner") == "pm2" {
 		online := pm2Online(id)
 		pid, _ := pm2("pid", unitName(id))
+		pid = strings.TrimSpace(pid)
 		state := "stopped"
 		if online {
 			state = "online"
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": strings.TrimSpace(pid)})
+		cpu, mem := procStats(pid)
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": pid, "cpu": cpu, "mem": mem})
 		return
 	}
 	state, _ := sysctl("is-active", unitName(id))
+	pid := mainPID(id)
+	cpu, mem := procStats(pid)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":     id,
 		"active": isActive(id),
 		"state":  state,
-		"pid":    mainPID(id),
+		"pid":    pid,
+		"cpu":    cpu,
+		"mem":    mem,
 	})
 }
 
@@ -185,15 +191,19 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	if pm {
 		online := pm2Online(id)
 		pid, _ := pm2("pid", unitName(id))
+		pid = strings.TrimSpace(pid)
 		state := "stopped"
 		if online {
 			state = "online"
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": strings.TrimSpace(pid)})
+		cpu, mem := procStats(pid)
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": pid, "cpu": cpu, "mem": mem})
 		return
 	}
 	state, _ := sysctl("is-active", unitName(id))
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": isActive(id), "state": state, "pid": mainPID(id)})
+	pid := mainPID(id)
+	cpu, mem := procStats(pid)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": isActive(id), "state": state, "pid": pid, "cpu": cpu, "mem": mem})
 }
 
 // undeploy 处理 DELETE /api/apps/{id}:停止并移除 systemd unit(保留制品与备份)。

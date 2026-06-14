@@ -40,7 +40,9 @@ function OverviewTab({ app, releases }) {
         <div style={grid}>
           <InfoRow label="状态">{real && live ? <StatusBadge status={live.active ? "running" : "stopped"} /> : <StatusBadge status={app.status} />}</InfoRow>
           <InfoRow label="进程" mono>{procRow}</InfoRow>
-          <InfoRow label="资源" mono>{real ? "—(Agent 未采集资源指标)" : (app.pid ? `CPU ${app.cpu} · 内存 ${app.mem}` : "—")}</InfoRow>
+          <InfoRow label="资源" mono>{real
+            ? (live && live.active ? `CPU ${live.cpu || "—"} · 内存 ${live.mem || "—"}` : "—")
+            : (app.pid ? `CPU ${app.cpu} · 内存 ${app.mem}` : "—")}</InfoRow>
           <InfoRow label="Runner"><span className="code-chip">{app.runner}</span></InfoRow>
         </div>
         {app.status === "failed" ? (
