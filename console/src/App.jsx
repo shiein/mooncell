@@ -11,6 +11,7 @@ import { LoginPage, SetupWizard } from './pages/Login.jsx';
 import { OverviewPage, CabinetPage, AuditPage } from './pages/Overview.jsx';
 import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
+import { UsersPage } from './pages/Users.jsx';
 import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
@@ -28,13 +29,14 @@ function App() {
   // ---- session & view ----
   // 会话由后端 httpOnly cookie 维持;挂载时向 /api/session 查询当前登录态。
   const [session, setSession] = React.useState(null);
+  const [role, setRole] = React.useState("admin");
   const [view, setView] = React.useState("login");
   const user = session || "admin";
 
   React.useEffect(() => {
     let alive = true;
-    getSession().then((u) => {
-      if (alive && u) { setSession(u); setView("console"); }
+    getSession().then((s) => {
+      if (alive && s) { setSession(s.user); setRole(s.role || "viewer"); setView("console"); }
     });
     return () => { alive = false; };
   }, []);
@@ -94,8 +96,10 @@ function App() {
   }));
 
   const store = {
-    user, nav, route,
+    user, role, nav, route,
     apps, releases, backups, cabinet, audit,
+    // 角色权限:write = operator/admin 可改;admin = 仅管理员(用户管理)。viewer 只读。
+    can: (perm) => (perm === "admin" ? role === "admin" : role !== "viewer"),
 
     // real:经 Agent 的真机部署。其审计由 Console 服务端权威落库,前端仅乐观显示(noPersist),避免重复。
     finishDeploy(app, { version, size, result, real }) {
@@ -204,8 +208,11 @@ function App() {
 
   // ---- auth handlers ----
   // cookie 已由 /api/login 在登录成功时种下,这里只更新前端状态。
-  const login = (u) => {
-    setSession(u); setView("console");
+  // 兼容传字符串(向导)或 {user, role}(登录)。
+  const login = (res) => {
+    const u = typeof res === "string" ? res : res.user;
+    const rl = typeof res === "string" ? "admin" : (res.role || "viewer");
+    setSession(u); setRole(rl); setView("console");
     toast(`欢迎回来,${u}`);
   };
   const logout = async () => {
@@ -220,12 +227,13 @@ function App() {
     route.page === "apps" ? [{ label: "应用" }] :
     route.page === "app-detail" ? [{ label: "应用", onClick: () => nav("apps") }, { label: detailApp ? detailApp.name : "详情" }] :
     route.page === "cabinet" ? [{ label: "文件柜" }] :
+    route.page === "users" ? [{ label: "用户管理" }] :
     [{ label: "审计日志" }];
 
   const screenLabel =
     view !== "console" ? (view === "login" ? "登录" : "初始化向导") :
     route.page === "app-detail" ? `应用详情 · ${detailApp ? detailApp.name : ""}` :
-    ({ overview: "总览", apps: "应用列表", cabinet: "文件柜", audit: "审计日志" })[route.page] || route.page;
+    ({ overview: "总览", apps: "应用列表", cabinet: "文件柜", audit: "审计日志", users: "用户管理" })[route.page] || route.page;
 
   return (
     <MCStore.Provider value={store}>
@@ -235,7 +243,7 @@ function App() {
         {view === "console" ? (
           <Shell page={route.page} onNav={(p) => nav(p)} crumbs={crumbs}
             theme={t.dark ? "dark" : "light"} onTheme={() => setTweak("dark", !t.dark)}
-            user={user} onLogout={logout}>
+            user={user} role={role} onLogout={logout}>
             {route.page === "overview" ? <OverviewPage /> : null}
             {route.page === "apps" ? <AppsPage /> : null}
             {route.page === "app-detail" ? (
@@ -244,6 +252,7 @@ function App() {
             ) : null}
             {route.page === "cabinet" ? <CabinetPage /> : null}
             {route.page === "audit" ? <AuditPage /> : null}
+            {route.page === "users" ? <UsersPage /> : null}
           </Shell>
         ) : null}
       </div>

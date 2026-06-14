@@ -20,16 +20,44 @@ async function logout() {
   } catch (e) { /* 忽略网络错误,前端无论如何清空会话 */ }
 }
 
-// 返回当前登录用户名,未登录返回 null
+// 返回 { user, role },未登录返回 null
 async function getSession() {
   try {
     const r = await fetch('/api/session', { credentials: 'same-origin' });
     if (!r.ok) return null;
     const d = await r.json();
-    return d.user || null;
+    return d.user ? { user: d.user, role: d.role || 'viewer' } : null;
   } catch (e) {
     return null;
   }
+}
+
+// ---------- 用户管理(仅 admin)----------
+async function listUsers() {
+  try {
+    const r = await fetch('/api/users', { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return (await r.json()).users || [];
+  } catch (e) { return null; }
+}
+
+async function createUser(payload) {
+  const r = await fetch('/api/users', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload), credentials: 'same-origin',
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '创建失败');
+  return d;
+}
+
+async function deleteUser(username) {
+  const r = await fetch(`/api/users/${encodeURIComponent(username)}`, {
+    method: 'DELETE', credentials: 'same-origin',
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '删除失败');
+  return d;
 }
 
 // ---------- Agent(经 Console 代理)----------
@@ -228,6 +256,7 @@ async function streamAppLogs(appId, { tail = 200, signal, onLine }) {
 
 export {
   login, logout, getSession,
+  listUsers, createUser, deleteUser,
   getAgentCapabilities, getAgentSystem, getAgentPing,
   hydrateData, putEntity, deleteEntity, deployViaAgent, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,

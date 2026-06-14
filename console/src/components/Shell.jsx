@@ -8,7 +8,10 @@ const NAV_ITEMS = [
   { id: "apps", label: "应用", en: "Applications", icon: "box" },
   { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder" },
   { id: "audit", label: "审计日志", en: "Audit", icon: "shield" },
+  { id: "users", label: "用户管理", en: "Users", icon: "user", adminOnly: true },
 ];
+
+const ROLE_LABEL = { admin: "管理员", operator: "运维", viewer: "只读" };
 
 function MoonLogo({ size = 26 }) {
   return (
@@ -28,7 +31,8 @@ function MoonLogo({ size = 26 }) {
   );
 }
 
-function Sidebar({ page, onNav, user, onLogout }) {
+function Sidebar({ page, onNav, user, role, onLogout }) {
+  const navItems = NAV_ITEMS.filter((n) => !n.adminOnly || role === "admin");
   return (
     <aside className="sidebar">
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 8px 14px" }}>
@@ -40,7 +44,7 @@ function Sidebar({ page, onNav, user, onLogout }) {
       </div>
 
       <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        {NAV_ITEMS.map((n) => (
+        {navItems.map((n) => (
           <button key={n.id} className="nav-item" data-active={String(page === n.id || (n.id === "apps" && page === "app-detail"))}
             onClick={() => onNav(n.id)}>
             <Icon name={n.icon} size={16} />
@@ -74,7 +78,7 @@ function Sidebar({ page, onNav, user, onLogout }) {
         }}>{(user || "A")[0].toUpperCase()}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 12.5, fontWeight: 600 }}>{user}</div>
-          <div style={{ fontSize: 10.5, color: "var(--muted-fg)" }}>admin · 管理员</div>
+          <div style={{ fontSize: 10.5, color: "var(--muted-fg)" }}>{role || "viewer"} · {ROLE_LABEL[role] || "只读"}</div>
         </div>
         <Btn variant="ghost" size="sm" icon="logout" onClick={onLogout} title="退出登录"></Btn>
       </div>
@@ -103,10 +107,10 @@ function Topbar({ crumbs, theme, onTheme, right }) {
   );
 }
 
-function Shell({ page, onNav, crumbs, theme, onTheme, user, onLogout, children, topRight }) {
+function Shell({ page, onNav, crumbs, theme, onTheme, user, role, onLogout, children, topRight }) {
   return (
     <div className="shell">
-      <Sidebar page={page} onNav={onNav} user={user} onLogout={onLogout} />
+      <Sidebar page={page} onNav={onNav} user={user} role={role} onLogout={onLogout} />
       <div className="main">
         <Topbar crumbs={crumbs} theme={theme} onTheme={onTheme} right={topRight} />
         <div className="content"><div className="content-inner">{children}</div></div>

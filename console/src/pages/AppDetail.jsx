@@ -147,9 +147,11 @@ function BackupsTab({ app, onRestore }) {
         <div style={{ fontSize: 12.5, color: "var(--muted-fg)", flex: 1 }}>
           每次部署/还原前自动备份至 <span className="code-chip">backups/{app.id}/</span> · 滚动保留 {app.backupKeep} 份{realBaks !== null ? " · 来自 Agent 真实备份" : " · 当前占用 " + (list.length > 0 ? "约 " + list.length * 30 + " MB" : "0")}
         </div>
-        <Btn size="sm" icon={backing ? undefined : "archive"} disabled={backing || realBaks !== null} title={realBaks !== null ? "真实备份在部署/还原时自动生成" : undefined} onClick={manualBackup}>
-          {backing ? <React.Fragment><Spinner size={12} /> 备份中…</React.Fragment> : "手动备份"}
-        </Btn>
+        {store.can("write") ? (
+          <Btn size="sm" icon={backing ? undefined : "archive"} disabled={backing || realBaks !== null} title={realBaks !== null ? "真实备份在部署/还原时自动生成" : undefined} onClick={manualBackup}>
+            {backing ? <React.Fragment><Spinner size={12} /> 备份中…</React.Fragment> : "手动备份"}
+          </Btn>
+        ) : null}
       </div>
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
@@ -165,8 +167,8 @@ function BackupsTab({ app, onRestore }) {
                 <td style={{ fontSize: 12.5 }}>{b.operator}</td>
                 <td>
                   <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                    <Btn size="sm" variant="primary" icon="rotate" onClick={() => onRestore(b)}>还原</Btn>
-                    {b.real ? null : <Btn size="sm" variant="ghost" icon="trash" title="删除备份" onClick={() => store.deleteBackup(app, b)}></Btn>}
+                    {store.can("write") ? <Btn size="sm" variant="primary" icon="rotate" onClick={() => onRestore(b)}>还原</Btn> : <span style={{ fontSize: 12, color: "var(--muted-fg)" }}>只读</span>}
+                    {store.can("write") && !b.real ? <Btn size="sm" variant="ghost" icon="trash" title="删除备份" onClick={() => store.deleteBackup(app, b)}></Btn> : null}
                   </div>
                 </td>
               </tr>
@@ -284,7 +286,7 @@ function ConfigTab({ app }) {
             <Btn size="sm" variant="ghost" onClick={() => { setDraft(app); setEdit(false); }}>取消</Btn>
             <Btn size="sm" variant="primary" icon="check" onClick={save}>保存配置</Btn>
           </div>
-        ) : <Btn size="sm" icon="settings" onClick={() => setEdit(true)}>编辑</Btn>}
+        ) : (store.can("write") ? <Btn size="sm" icon="settings" onClick={() => setEdit(true)}>编辑</Btn> : null)}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
         <div style={sec}>基本</div>
@@ -342,7 +344,8 @@ function AppDetailPage({ appId, tab, onTab }) {
 
   const relCount = store.releases.filter((r) => r.appId === app.id).length;
   const bakCount = store.backups.filter((b) => b.appId === app.id).length;
-  const canRun = app.type !== "static-nginx";
+  const canRun = app.type !== "static-nginx" && store.can("write");
+  const canWrite = store.can("write");
 
   return (
     <div>
@@ -353,7 +356,7 @@ function AppDetailPage({ appId, tab, onTab }) {
         <div style={{ flex: 1 }}></div>
         {canRun && (app.status === "running") ? <Btn icon="stop" onClick={() => store.toggleApp(app, false)}>停止</Btn> : null}
         {canRun && (app.status === "stopped" || app.status === "failed") ? <Btn icon="play" onClick={() => store.toggleApp(app, true)}>启动</Btn> : null}
-        <Btn variant="primary" icon="upload" onClick={() => setDeploying(true)}>部署新版本</Btn>
+        {canWrite ? <Btn variant="primary" icon="upload" onClick={() => setDeploying(true)}>部署新版本</Btn> : null}
       </div>
       <div className="mono" style={{ fontSize: 12, color: "var(--muted-fg)", marginBottom: 16 }}>
         {app.id} · {app.path}
