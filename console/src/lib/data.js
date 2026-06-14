@@ -17,9 +17,9 @@ const DEPLOY_TYPES = {
   "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["无进程"], artifactExt: ".tar.gz" },
 };
 
-// 进程类应用:走 systemd 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。
-// static-nginx 走软链切换、node 暂未接真机,故不在内。
-const PROCESS_TYPES = ["go-binary", "java-jar", "python"];
+// 进程类应用:走 systemd / pm2 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。
+// static-nginx 走软链切换、tomcat-war 走容器,不在内。
+const PROCESS_TYPES = ["go-binary", "java-jar", "python", "node"];
 const isProcessType = (t) => PROCESS_TYPES.includes(t);
 
 // fmtBytes 把字节数格式化为人类可读;非数字原样返回(兼容旧的字符串 size)。

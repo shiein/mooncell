@@ -20,6 +20,11 @@ func TestExecStart(t *testing.T) {
 	if err != nil || got != "/srv/apps/x/venv/bin/python /srv/apps/x/app.py" {
 		t.Fatalf("python venv execStart = %q, err=%v", got, err)
 	}
+	// node:指定 node 路径时用之
+	got, err = execStart(DeployConfig{Type: "node", Interpreter: "/usr/local/bin/node", BinPath: "/srv/apps/x/server.js"})
+	if err != nil || got != "/usr/local/bin/node /srv/apps/x/server.js" {
+		t.Fatalf("node execStart = %q, err=%v", got, err)
+	}
 }
 
 // writePm2Eco:各类型 interpreter 正确(python 吃 venv)。
@@ -33,6 +38,8 @@ func TestWritePm2Eco(t *testing.T) {
 		{DeployConfig{Type: "python", BinPath: filepath.Join(dir, "b"), Interpreter: "/venv/bin/python"}, "/venv/bin/python"},
 		{DeployConfig{Type: "python", BinPath: filepath.Join(dir, "c")}, "python3"},
 		{DeployConfig{Type: "java-jar", BinPath: filepath.Join(dir, "d")}, "java"},
+		{DeployConfig{Type: "node", BinPath: filepath.Join(dir, "e"), Interpreter: "/usr/local/bin/node"}, "/usr/local/bin/node"},
+		{DeployConfig{Type: "node", BinPath: filepath.Join(dir, "f")}, "node"},
 	}
 	for _, c := range cases {
 		path, err := writePm2Eco(c.cfg)

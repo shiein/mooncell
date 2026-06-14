@@ -78,13 +78,13 @@ func execStart(cfg DeployConfig) (string, error) {
 			parts = append(parts, a)
 		}
 		return strings.Join(parts, " "), nil
-	case "python":
-		// 入口脚本经解释器运行。Interpreter 指定时用之(支持 venv 的 python),否则 system python3。
-		py, err := pythonInterp(cfg)
+	case "python", "node":
+		// 入口脚本经运行时执行(python3 / node)。Interpreter 指定时用之(venv / 自定义 node 路径)。
+		rt, err := runtimeBin(cfg, map[string]string{"python": "python3", "node": "node"}[cfg.Type])
 		if err != nil {
 			return "", err
 		}
-		parts := []string{py, cfg.BinPath}
+		parts := []string{rt, cfg.BinPath}
 		if a := strings.TrimSpace(cfg.Args); a != "" {
 			parts = append(parts, a)
 		}
@@ -98,16 +98,17 @@ func execStart(cfg DeployConfig) (string, error) {
 	}
 }
 
-// pythonInterp 解析 python 解释器:Interpreter 指定则用之(venv 支持),否则 system python3。
-func pythonInterp(cfg DeployConfig) (string, error) {
+// runtimeBin 解析运行时可执行(解释器):Interpreter 显式指定则用之(支持 venv / 自定义 node 路径),
+// 否则在 PATH 查找 defaultName。python / node 共用。
+func runtimeBin(cfg DeployConfig, defaultName string) (string, error) {
 	if ip := strings.TrimSpace(cfg.Interpreter); ip != "" {
 		return ip, nil
 	}
-	py, err := exec.LookPath("python3")
+	bin, err := exec.LookPath(defaultName)
 	if err != nil {
-		return "", fmt.Errorf("未找到 python3(或在配置里指定解释器路径): %w", err)
+		return "", fmt.Errorf("未找到 %s(或在配置里指定运行时路径): %w", defaultName, err)
 	}
-	return py, nil
+	return bin, nil
 }
 
 func writeUnit(cfg DeployConfig) error {

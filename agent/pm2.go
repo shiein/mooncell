@@ -32,11 +32,12 @@ func writePm2Eco(cfg DeployConfig) (string, error) {
 		app["cwd"] = filepath.Dir(cfg.BinPath)
 	}
 	switch cfg.Type {
-	case "python":
+	case "python", "node":
+		// 运行时解释器:Interpreter 指定则用之(venv python / 自定义 node),否则默认 python3 / node。
 		if ip := strings.TrimSpace(cfg.Interpreter); ip != "" {
-			app["interpreter"] = ip // venv 解释器
+			app["interpreter"] = ip
 		} else {
-			app["interpreter"] = "python3"
+			app["interpreter"] = map[string]string{"python": "python3", "node": "node"}[cfg.Type]
 		}
 	case "java-jar":
 		app["interpreter"] = "java"
