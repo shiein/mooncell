@@ -60,14 +60,21 @@ function CreateAppDialog({ open, onClose }) {
     return () => timers.current.forEach(clearTimeout);
   }, [open]);
 
+  const appId = () => (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
+  // 落盘路径:预检与创建共用同一计算,避免"预检校验 A 路径、实际部署落盘 B 路径"不一致。
+  // python/node → 入口脚本;static → web root 目录(软链);go/java → 制品文件(不能是目录)。
+  const binPathOf = (id) => {
+    if (type === "python" || type === "node")
+      return `/srv/apps/${id}/${form.entry || (type === "node" ? "server.js" : "app.py")}`;
+    if (type === "static-nginx") return form.path || `/srv/apps/${id}`;
+    return form.path || `/srv/apps/${id}/app`;
+  };
+
   const runPrecheck = async () => {
     setStep(2);
     setChecks([{ label: "正在向 Agent 预检…", st: "pending" }]);
-    const id = (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
-    const isScript = type === "python" || type === "node";
-    const binPath = isScript
-      ? `/srv/apps/${id}/${form.entry || (type === "node" ? "server.js" : "app.py")}`
-      : (form.path || `/srv/apps/${id}/app`);
+    const id = appId();
+    const binPath = binPathOf(id);
     const params = new URLSearchParams({
       binPath, port: form.port || "", type,
       runner: form.runner || (DEPLOY_TYPES[type].runners[0] || "systemd"),
@@ -85,12 +92,9 @@ function CreateAppDialog({ open, onClose }) {
   const checksBlocked = checks.some((c) => c.st === "fail");
 
   const create = () => {
-    const id = (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
-    // python/node:path 是入口脚本,interp 是运行时(python 支持 venv、node 自定义路径);其余类型 path 即制品路径。
-    const isScript = type === "python" || type === "node";
-    const path = isScript
-      ? `/srv/apps/${id}/${form.entry || (type === "node" ? "server.js" : "app.py")}`
-      : (form.path || `/srv/apps/${id}/`);
+    const id = appId();
+    // path 即落盘路径,与预检完全一致(binPathOf);interp 是运行时(python 支持 venv、node 自定义路径)。
+    const path = binPathOf(id);
     const interp = type === "python" ? (form.interp || "") : type === "node" ? (form.nodePath || "") : "";
     store.addApp({
       id: id + "-" + Math.random().toString(36).slice(2, 5),
