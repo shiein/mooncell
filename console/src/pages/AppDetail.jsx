@@ -3,7 +3,7 @@ import React from 'react';
 import { useMC, DEPLOY_TYPES, isProcessType, isRealType, REL_STATUS, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
 import { Icon, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Tabs, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { Console, DeployDialog, RestoreDialog } from '../components/pipeline.jsx';
-import { listAgentBackups, streamAppLogs, getAppStatus } from '../lib/api.js';
+import { listAgentBackups, streamAppLogs, getAppStatus, getAgentCapabilities, precheckApp } from '../lib/api.js';
 
 function InfoRow({ label, children, mono }) {
   return (
@@ -348,25 +348,59 @@ function ConfigTab({ app }) {
   const store = useMC();
   const [edit, setEdit] = React.useState(false);
   const [draft, setDraft] = React.useState(app);
+  const [caps, setCaps] = React.useState(null);
+  const [saving, setSaving] = React.useState(false);
   React.useEffect(() => setDraft(app), [app.id]);
+  // 拉所选 Agent 真实能力清单(Runner 过滤与新建向导一致,缺 key fail-closed)。
+  React.useEffect(() => {
+    setCaps(null);
+    getAgentCapabilities(app.agentId).then((c) => setCaps(c && c.capabilities ? c.capabilities : null));
+  }, [app.agentId]);
+  const capOk = (r) => {
+    if (r === "无进程" || r === "软链") return true;
+    if (!caps) return true;
+    const c = caps.find((x) => x.key === r);
+    return c ? c.ok : false;
+  };
+  const realType = isRealType(app.type);
+  const runners = DEPLOY_TYPES[app.type].runners;
   const set = (k, v) => setDraft({ ...draft, [k]: v });
   const ipt = (k, mono = true) => (
     <input className={"input" + (mono ? " mono" : "")} style={mono ? { fontSize: 12.5 } : undefined}
       disabled={!edit} value={draft[k] || ""} onChange={(e) => set(k, e.target.value)} />
   );
-  const save = () => { store.updateApp(app.id, draft); setEdit(false); };
+  // 保存前真实预检:真实应用据草稿向所选 Agent 预检(路径白名单/可写、端口、Runner 能力);
+  // 失败则不落库、据实报错——不再谎称"校验通过"。Agent 不可达时降级允许保存并提示。
+  const save = async () => {
+    if (realType) {
+      if (!runners.some(capOk)) { toast("所选 Agent 不支持该类型任何 Runner,无法保存", { tone: "error", icon: "alert" }); return; }
+      setSaving(true);
+      const binPath = (String(draft.path || "").split(/\s+/)[0]) || "";
+      const params = new URLSearchParams({ binPath, port: String(draft.port || ""), type: app.type, runner: draft.runner || runners[0], agent: app.agentId || "default" });
+      const res = await precheckApp(params.toString());
+      setSaving(false);
+      if (res && res.checks) {
+        const fails = res.checks.filter((c) => !c.ok);
+        if (fails.length) { toast("预检未通过:" + fails.map((c) => c.label).join("、") + ",未保存", { tone: "error", icon: "alert" }); return; }
+      } else {
+        toast("Agent 不可达,跳过预检直接保存(部署时再校验)", { tone: "warn" });
+      }
+    }
+    store.updateApp(app.id, draft); setEdit(false);
+    if (realType) toast("配置已保存 · Agent 预检通过");
+  };
 
   const sec = { fontSize: 13, fontWeight: 600, margin: "4px 0 0", color: "var(--fg-secondary)" };
   return (
     <div className="card card-pad" style={{ maxWidth: 760 }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 16 }}>
         <div style={{ flex: 1, fontSize: 12.5, color: "var(--muted-fg)" }}>
-          配置由 <span className="code-chip">{app.type}</span> 类型的 JSON Schema 约束 · 保存前 Agent 端预检
+          配置由 <span className="code-chip">{app.type}</span> 类型约束{realType ? " · 保存前向所选 Agent 真实预检" : ""}
         </div>
         {edit ? (
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn size="sm" variant="ghost" onClick={() => { setDraft(app); setEdit(false); }}>取消</Btn>
-            <Btn size="sm" variant="primary" icon="check" onClick={save}>保存配置</Btn>
+            <Btn size="sm" variant="ghost" disabled={saving} onClick={() => { setDraft(app); setEdit(false); }}>取消</Btn>
+            <Btn size="sm" variant="primary" icon={saving ? undefined : "check"} disabled={saving} onClick={save}>{saving ? "预检中…" : "保存配置"}</Btn>
           </div>
         ) : (store.can("write") ? <Btn size="sm" icon="settings" onClick={() => setEdit(true)}>编辑</Btn> : null)}
       </div>
@@ -374,9 +408,9 @@ function ConfigTab({ app }) {
         <div style={sec}>基本</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Field label="应用名"><input className="input" disabled={!edit} value={draft.name || ""} onChange={(e) => set("name", e.target.value)} /></Field>
-          <Field label="Runner">
+          <Field label="Runner" hint={realType ? "按所选 Agent 能力过滤,不可用项置灰" : undefined}>
             <Select value={draft.runner} onChange={(v) => set("runner", v)} disabled={!edit}
-              options={DEPLOY_TYPES[app.type].runners} />
+              options={runners.map((r) => ({ value: r, label: capOk(r) ? r : r + "(Agent 未检测到)", disabled: !capOk(r) }))} />
           </Field>
           <Field label="启动用户">{ipt("user", false)}</Field>
           <Field label="端口"><input className="input mono" disabled={!edit} value={draft.port || ""} onChange={(e) => set("port", e.target.value)} /></Field>
@@ -403,10 +437,14 @@ function ConfigTab({ app }) {
               value={(draft.extraFiles || []).join(", ")} onChange={(e) => set("extraFiles", e.target.value.split(/,\s*/).filter(Boolean))} />
           </Field>
         </div>
-        <Field label="部署后钩子(仅白名单内置动作)">
-          <Select disabled={!edit} value={app.type === "static-nginx" ? "nginx -s reload" : "无"} onChange={() => {}}
-            options={["无", "nginx -s reload", "清理缓存目录", "预热请求"]} />
-        </Field>
+        {app.type === "static-nginx" || app.type === "tomcat-war" ? (
+          <Field label="部署后 reload 钩子(白名单动作,服务端按类型映射)">
+            <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
+              <Switch on={!!draft.reload} onChange={(v) => set("reload", v)} />
+              {app.type === "static-nginx" ? "部署后 nginx -s reload" : "部署后 systemctl restart tomcat"}
+            </label>
+          </Field>
+        ) : null}
         <Field label="日志文件路径(每行一条,在线 tail 需具体文件,不支持通配/~)">
           <textarea className="textarea mono" style={{ fontSize: 12.5 }} rows={2} disabled={!edit}
             value={(draft.logPaths || []).join("\n")} onChange={(e) => set("logPaths", e.target.value.split("\n").filter(Boolean))}></textarea>

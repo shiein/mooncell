@@ -112,6 +112,32 @@ test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ p
   await expect(staticSel).toHaveValue('软链');
 });
 
+test('真实应用部署弹窗无"示例制品演示"入口(必须真实文件)', async ({ page }) => {
+  await login(page);
+  await page.request.put('/api/data/app/e2e-dep', {
+    data: { id: 'e2e-dep', name: 'E2E 部署测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-dep/app', backupKeep: 5, logPaths: [] },
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByText('E2E 部署测试').click();
+  await page.getByRole('button', { name: /部署新版本/ }).click();
+  await expect(page.getByText(/拖拽制品到此处/)).toBeVisible();
+  await expect(page.getByRole('button', { name: '使用示例制品演示' })).toHaveCount(0);
+});
+
+test('配置页 Runner 按 Agent 能力置灰(pm2 不可用)', async ({ page }) => {
+  await login(page);
+  await page.request.put('/api/data/app/e2e-cfg', {
+    data: { id: 'e2e-cfg', name: 'E2E 配置测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-cfg/app', backupKeep: 5, logPaths: [] },
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByText('E2E 配置测试').click();
+  await page.locator('button.tab').filter({ hasText: '配置' }).click();
+  await page.getByRole('button', { name: /编辑/ }).click();
+  await expect(page.locator('option[value="pm2"]')).toBeDisabled();
+});
+
 test('真实应用日志流失败显示错误态(不伪造模拟日志)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/data/app/e2e-log', {

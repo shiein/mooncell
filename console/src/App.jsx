@@ -193,7 +193,7 @@ function App() {
       patchApp(id, patch); // patchApp 内部落库合并后的整应用
       const a = apps.find((x) => x.id === id);
       addAudit("修改配置", (a ? a.name : id), "成功");
-      toast("配置已保存 · Agent 端校验通过");
+      toast("配置已保存"); // 是否预检由调用方(配置页)负责并据实提示,这里不谎称"校验通过"
     },
 
     addManualBackup(app) {

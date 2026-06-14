@@ -333,8 +333,9 @@ function DeployDialog({ app, open, onClose }) {
   const sha = React.useMemo(() => randSha(), [open, up.file && up.file.name]);
   if (!app) return null;
 
-  // 进程类(go-binary/java-jar/python)且上传了真实文件 → 走 Agent 真实部署;否则(其它类型 / 示例制品)沿用模拟。
-  const isReal = isRealType(app.type) && !!realFile;
+  // 真实类型应用:必须上传真实文件并走 Agent;禁用示例制品 / 模拟失败,且不持久化假状态。
+  const realTypeApp = isRealType(app.type);
+  const isReal = realTypeApp && !!realFile;
   const ext = DEPLOY_TYPES[app.type].artifactExt;
 
   const pickExample = () => {
@@ -349,6 +350,7 @@ function DeployDialog({ app, open, onClose }) {
   };
 
   const startDeploy = async () => {
+    if (realTypeApp && !realFile) return; // 真实应用必须有真实文件,绝不走模拟持久化假状态
     if (isReal) {
       setStage("pipeline"); setReal({ streaming: true, steps: [] });
       // 前端只提交 制品 + version + releaseId;Agent 配置由 Console 据已存应用配置服务端生成。
@@ -382,7 +384,7 @@ function DeployDialog({ app, open, onClose }) {
       foot={stage === "upload" ? (
         <React.Fragment>
           <Btn variant="ghost" onClick={onClose}>取消</Btn>
-          <Btn variant="primary" icon="zap" disabled={up.phase !== "ready"} onClick={startDeploy}>{isReal ? "开始部署(真机)" : "开始部署"}</Btn>
+          <Btn variant="primary" icon="zap" disabled={up.phase !== "ready" || (realTypeApp && !realFile)} onClick={startDeploy}>{isReal ? "开始部署(真机)" : "开始部署"}</Btn>
         </React.Fragment>
       ) : (
         <React.Fragment>
@@ -405,9 +407,12 @@ function DeployDialog({ app, open, onClose }) {
                 {DEPLOY_TYPES[app.type].label} · 单次上传 + sha256 校验 · 默认上限 1GB(max_upload_mb 可配)
               </div>
               <input type="file" ref={inputRef} style={{ display: "none" }} onChange={(e) => { if (e.target.files[0]) pickReal(e.target.files[0]); }} />
-              <div style={{ marginTop: 12 }}>
-                <Btn size="sm" onClick={(e) => { e.stopPropagation(); pickExample(); }}>使用示例制品演示</Btn>
-              </div>
+              {/* 示例制品仅用于非真实类型的演示;真实应用必须上传真实文件走 Agent。 */}
+              {!realTypeApp ? (
+                <div style={{ marginTop: 12 }}>
+                  <Btn size="sm" onClick={(e) => { e.stopPropagation(); pickExample(); }}>使用示例制品演示</Btn>
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="card" style={{ padding: 14 }}>
@@ -441,7 +446,7 @@ function DeployDialog({ app, open, onClose }) {
             </Field>
           </div>
 
-          <div className="card" style={{ padding: "11px 14px", display: "flex", alignItems: "center", gap: 11, background: "var(--bg)" }}>
+          <div className="card" style={{ padding: "11px 14px", display: realTypeApp ? "none" : "flex", alignItems: "center", gap: 11, background: "var(--bg)" }}>
             <Switch on={simulateFail} onChange={setSimulateFail} />
             <div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>模拟健康检查失败<span style={{ color: "var(--muted-fg)", fontWeight: 400 }}>(原型演示)</span></div>
