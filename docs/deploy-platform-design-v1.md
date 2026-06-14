@@ -98,13 +98,17 @@ type Runner interface {
 }
 ```
 
-已实现的 Runner:
+三种托管模式(术语区分,避免混用「Runner」):
 
-1. **systemd**(默认):Agent 按模板生成 unit 文件(`/etc/systemd/system/deploy-<app>.service`)→ `daemon-reload` → `systemctl start`。崩溃自动拉起、开机自启、journald 兜底日志;启停经 `systemctl start/stop`,状态查 `is-active` / 主 pid。
-2. **pm2**:落 ecosystem.json + `pm2 start/stop`,以 `pm2 pid/jlist` 解析状态。Agent 启动时探测 pm2 是否可用,不可用则该 Runner 在 UI 置灰。
-3. **tomcat 容器**:容器由运维长驻,平台只原子替换 webapps 下 WAR + 清展开目录 + 可选 `systemctl restart tomcat`,不直接起停容器进程。
+**A. 进程 Runner**(go-binary / java-jar / python / node):平台直接托管应用进程。
+1. **systemd**(默认):按模板生成 unit(`/etc/systemd/system/deploy-<app>.service`)→ `daemon-reload` → `systemctl start`。崩溃自动拉起、开机自启、journald 日志;启停 `systemctl start/stop`,状态查 `is-active` / 主 pid。
+2. **pm2**:落 ecosystem.json + `pm2 start/stop`,`pm2 pid/jlist` 解析状态。Agent 启动探测 pm2 是否可用,不可用则该 Runner 在 UI 置灰。
 
-> 早期设想的 **nohup + pidfile** Runner 未实现:pidfile 自管理不如交给 systemd/pm2 可靠,故收敛到这两种。
+> 进程 Runner 仅 systemd / pm2;早期设想的 **nohup + pidfile** 未实现(pidfile 自管理不如交给 systemd/pm2 可靠),不暴露。
+
+**B. Tomcat 容器托管**(tomcat-war):**不是进程 Runner**——容器(Tomcat)由运维长驻,平台只原子替换 webapps 下 WAR + 清展开目录 + 可选 `systemctl restart tomcat`,**不直接起停容器进程**。能力上依赖目标机已装 Tomcat(`tomcat` capability;预检/UI 据此过滤)。
+
+**C. Static 软链托管**(static-nginx):**无进程**——解包到带时间戳的 release 目录,**原子切换软链**对外暴露(回滚=切回旧软链),可选 `nginx -s reload` 钩子。由 nginx 等 Web 服务器直接 serve,平台不托管任何进程。
 
 ### 3.3 部署流水线(状态机)
 

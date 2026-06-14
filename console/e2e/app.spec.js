@@ -112,6 +112,20 @@ test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ p
   await expect(staticSel).toHaveValue('软链');
 });
 
+test('真实应用日志流失败显示错误态(不伪造模拟日志)', async ({ page }) => {
+  await login(page);
+  await page.request.put('/api/data/app/e2e-log', {
+    data: { id: 'e2e-log', name: 'E2E 日志测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-log/app', backupKeep: 5, logPaths: [] },
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByText('E2E 日志测试').click();
+  await page.locator('button.tab').filter({ hasText: '实时日志' }).click();
+  // 假 Agent 无 logs/stream 端点 → 流失败 → 错误态 + 重试,不出现模拟日志
+  await expect(page.getByText('无法读取实时日志')).toBeVisible({ timeout: 8000 });
+  await expect(page.getByRole('button', { name: /重试/ })).toBeVisible();
+});
+
 test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ page }) => {
   await login(page);
   // 经 API 建一个真实类型应用(假 Agent 的 backups 端点会 500)

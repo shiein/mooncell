@@ -1,8 +1,16 @@
 // Mooncell — 部署流水线:计划构建 + 模拟引擎 + 视图 + 部署/还原对话框
 import React from 'react';
-import { useMC, tsDir, DEPLOY_TYPES, isProcessType, isRealType, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
+import { useMC, tsDir, DEPLOY_TYPES, isProcessType, isRealType, nextVersion, randSha, fmtClock, fmtTime } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
 import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
+
+// hostingDesc:据应用类型/Runner 描述托管方式(部署成功文案用),避免硬编码 systemd 误导
+// 多 Agent / pm2 / tomcat / static 场景。
+function hostingDesc(app) {
+  if (app.type === "static-nginx") return "已原子切换软链对外暴露";
+  if (app.type === "tomcat-war") return "WAR 已替换,Tomcat 容器自动展开新版本";
+  return `Agent 已落盘并由 ${app.runner === "pm2" ? "pm2" : "systemd"} 托管`;
+}
 
 // 把 Agent 返回的真实部署/还原结果({result, steps:[{name,ok,logs}]})转成 PipelineView 可渲染的形状,
 // 复用与模拟完全一致的视觉。verb 仅用于收尾汇总行文案("部署"/"还原")。
@@ -428,7 +436,7 @@ function DeployDialog({ app, open, onClose }) {
             </Field>
             <Field label="部署目标">
               <div className="input mono" style={{ display: "flex", alignItems: "center", fontSize: 12, color: "var(--fg-secondary)", background: "var(--muted)" }}>
-                {AGENT.name} · {AGENT.host.split(":")[0]}
+                {(app.agentId && app.agentId !== "default") ? app.agentId : "本机 Agent"} · {(DEPLOY_TYPES[app.type] || {}).label || app.type} / {app.runner}
               </div>
             </Field>
           </div>
@@ -469,7 +477,7 @@ function DeployDialog({ app, open, onClose }) {
                       {resultKind === "success" ? `部署成功 · ${real.version || version} 已上线` : `部署失败 · 已自动回滚至 ${app.version}`}
                     </div>
                     <div style={{ fontSize: 12, opacity: .85 }}>
-                      {resultKind === "success" ? "Agent 已落盘并由 systemd 托管 · 部署前版本已备份" : "旧版本已恢复服务,业务无中断"}
+                      {resultKind === "success" ? `${hostingDesc(app)} · 部署前版本已备份` : "旧版本已恢复服务,业务无中断"}
                     </div>
                   </div>
                 </div>

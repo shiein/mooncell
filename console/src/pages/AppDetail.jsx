@@ -225,6 +225,7 @@ const isConcreteLogPath = (p) => p && !/[*?[]/.test(p) && !p.startsWith("~");
 // ---------- 实时日志 ----------
 function LogViewer({ app }) {
   const genActive = app.status === "running" || app.status === "static" || app.status === "failed";
+  const isReal = isRealType(app.type); // 生产应用类型:日志只走真实 Agent,失败不伪造
   const [realFailed, setRealFailed] = React.useState(false);
 
   const [lines, setLines] = React.useState([]);
@@ -263,9 +264,12 @@ function LogViewer({ app }) {
     return () => { cancelled = true; ac.abort(); };
   }, [useReal, follow, app.id, logSrc]);
 
-  // 模拟日志:非进程类应用或真实流回退时使用。
+  // 真实应用日志流失败:显示错误态 + 重试,绝不伪造模拟行(日志是排障核心,假日志会误导)。
+  const realStreamFailed = isReal && realFailed;
+
+  // 模拟日志:仅非真实类型(演示数据)使用;真实应用永不模拟。
   React.useEffect(() => {
-    if (useReal) return;
+    if (useReal || isReal) return;
     setLines(() => {
       const arr = []; let t = Date.now() - 1000 * 60 * 3;
       const n = app.status === "stopped" ? 14 : 28;
@@ -302,8 +306,9 @@ function LogViewer({ app }) {
           <Switch on={onlyMatch} onChange={setOnlyMatch} />仅匹配行
         </label>
         <div style={{ flex: 1 }}></div>
-        <Badge tone={follow ? "success" : "default"} dot={follow}>
-          {useReal ? (follow ? (followingFile ? "文件 tail -F 实时" : "Agent journal 实时") : "已暂停")
+        <Badge tone={realStreamFailed ? "error" : follow ? "success" : "default"} dot={follow && !realStreamFailed}>
+          {realStreamFailed ? "Agent 日志流不可用"
+            : useReal ? (follow ? (followingFile ? "文件 tail -F 实时" : "Agent journal 实时") : "已暂停")
             : genActive ? (follow ? "tail -F 实时跟随(演示)" : "已暂停") : "进程未运行 · 历史日志"}
         </Badge>
         <Btn size="sm" icon={follow ? "pause" : "play"} onClick={() => setFollow(!follow)}>{follow ? "暂停" : "继续"}</Btn>
@@ -317,7 +322,10 @@ function LogViewer({ app }) {
           toast("开始导出日志(gzip)");
         }}>下载</Btn>
       </div>
-      <Console lines={shown} filter={filter} height={460} />
+      {realStreamFailed
+        ? <EmptyState icon="alert" title="无法读取实时日志" desc="Agent 不可达或日志流中断。真实应用不展示模拟日志,请确认 Agent 在线后重试。"
+            action={<Btn icon="rotate" onClick={() => { setRealFailed(false); setLines([]); }}>重试</Btn>} />
+        : <Console lines={shown} filter={filter} height={460} />}
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>
         <span className="mono">{useReal ? (followingFile ? `tail -F ${logSrc}` : (app.runner === "pm2" ? `pm2 logs deploy-${app.id}` : `journalctl -u deploy-${app.id}`)) : (app.logPaths && app.logPaths[0]) || "—"}</span>
         <span>缓冲 {lines.length} / 400 行 · {useReal ? (followingFile ? "tail -F 跟随(轮转安全)" : "journald 跟随(轮转安全)") : "轮转安全(fsnotify 重开文件)"}</span>

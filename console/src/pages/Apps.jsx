@@ -133,6 +133,8 @@ function CreateAppDialog({ open, onClose }) {
   // selectedRunner:UI 显示值、预检、创建保存共用同一个 Runner——用户手选则用之,
   // 否则取首个能力可用的 Runner(没有则首个)。杜绝「UI 显示 systemd 却提交 pm2」。
   const selectedRunner = () => form.runner || runnersOf.find(capOk) || runnersOf[0] || "systemd";
+  // 该类型在选中 Agent 上无任何可用 Runner:禁止预检/创建(否则只会在预检/部署阶段失败)。
+  const noAvailableRunner = runnersOf.length > 0 && !runnersOf.some(capOk);
   // Runner 旧选择纠正:能力加载/切类型/换 Agent 后,若已手选的 form.runner 不再属于当前类型
   // 或能力不可用,清空它 → selectedRunner 自动回落首个可用 Runner(避免提交陈旧的不可用值)。
   React.useEffect(() => {
@@ -155,7 +157,7 @@ function CreateAppDialog({ open, onClose }) {
         <React.Fragment>
           {step > 0 ? <Btn variant="ghost" icon="chevronL" onClick={() => setStep(step - 1)}>上一步</Btn> : <Btn variant="ghost" onClick={onClose}>取消</Btn>}
           {step === 0 ? <Btn variant="primary" disabled={!type} onClick={() => setStep(1)}>下一步</Btn> : null}
-          {step === 1 ? <Btn variant="primary" disabled={!form.name} onClick={runPrecheck}>执行预检</Btn> : null}
+          {step === 1 ? <Btn variant="primary" disabled={!form.name || noAvailableRunner} onClick={runPrecheck}>执行预检</Btn> : null}
           {step === 2 ? <Btn variant="primary" icon="check" disabled={!checksDone || checksBlocked} onClick={create}>创建应用</Btn> : null}
         </React.Fragment>
       }>
@@ -190,6 +192,11 @@ function CreateAppDialog({ open, onClose }) {
                 options={runnersOf.map((r) => ({ value: r, label: capOk(r) ? r : r + "(Agent 未检测到)", disabled: !capOk(r) }))} />
             </Field>
           </div>
+          {noAvailableRunner ? (
+            <div style={{ fontSize: 12, color: "var(--error)", display: "flex", alignItems: "center", gap: 6, background: "var(--error-soft)", borderRadius: 8, padding: "8px 12px" }}>
+              <Icon name="alert" size={14} />所选 Agent 不支持该类型所需的任何 Runner,请换一台具备能力的 Agent 或安装对应运行时后再创建。
+            </div>
+          ) : null}
           {schema.map((f) => f.type === "switch" ? (
             <div key={f.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <Switch on={form[f.key] != null ? form[f.key] : f.def} onChange={(v) => setForm({ ...form, [f.key]: v })} />
