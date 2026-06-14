@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,7 @@ type DeployConfig struct {
 	User           string            `json:"user"`
 	Health         string            `json:"health"` // HTTP 健康检查 URL,空则跳过
 	Version        string            `json:"version"`
+	ReleaseID      string            `json:"releaseId"`      // 幂等键:Agent 本地记录已成功的 releaseId,重复请求直接返回缓存结果
 	ExpectedSha256 string            `json:"expectedSha256"` // 非空则部署前强校验制品 sha256,不匹配直接失败
 	BackupKeep     int               `json:"backupKeep"`
 	ReloadCmd      string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
@@ -398,6 +400,49 @@ func copyToTemp(src string) (string, func(), error) {
 }
 
 // ---------- 部署流水线 ----------
+
+// releaseRecPath 是某 releaseId 的本地成功记录路径(filepath.Base 防穿越)。
+func (a *agent) releaseRecPath(rid string) string {
+	return filepath.Join(a.cfg.Paths.BackupDir, "_deploys", filepath.Base(rid))
+}
+
+// releaseDone 读取 releaseId 的已成功记录(仅 success 才算幂等命中)。
+func (a *agent) releaseDone(rid string) (DeployResult, bool) {
+	b, err := os.ReadFile(a.releaseRecPath(rid))
+	if err != nil {
+		return DeployResult{}, false
+	}
+	var res DeployResult
+	if json.Unmarshal(b, &res) != nil || res.Result != "success" {
+		return DeployResult{}, false
+	}
+	return res, true
+}
+
+func (a *agent) recordRelease(rid string, res DeployResult) {
+	os.MkdirAll(filepath.Join(a.cfg.Paths.BackupDir, "_deploys"), 0755)
+	b, _ := json.Marshal(res)
+	os.WriteFile(a.releaseRecPath(rid), b, 0644)
+}
+
+// runDeployIdempotent 包裹 runDeploy 做 Agent 侧幂等:releaseId 已成功则直接返回缓存结果,
+// 不重复执行(防 Console 重试 / Agent 直连导致重复部署);成功后记录。
+func (a *agent) runDeployIdempotent(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
+	if emit == nil {
+		emit = func(Step) {}
+	}
+	if cfg.ReleaseID != "" {
+		if cached, ok := a.releaseDone(cfg.ReleaseID); ok {
+			emit(Step{Name: "幂等跳过", OK: true, Logs: []string{"releaseId 已成功部署,跳过重复执行"}})
+			return cached
+		}
+	}
+	res := a.runDeploy(cfg, artifact, emit)
+	if cfg.ReleaseID != "" && res.Result == "success" {
+		a.recordRelease(cfg.ReleaseID, res)
+	}
+	return res
+}
 
 // runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
 // 其余(go-binary/java-jar/python)复用 systemd 进程流水线。

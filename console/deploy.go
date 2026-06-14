@@ -32,7 +32,7 @@ type appConfig struct {
 
 // buildAgentConfig 据已存应用配置 + 本次 version + 制品 sha256 生成下发给 Agent 的部署配置 JSON。
 // 返回 (配置 JSON, 目标 agentId)。binPath 取 path 首段(static 的 path 可能含 " → release")。
-func buildAgentConfig(raw json.RawMessage, version, expectedSha256 string) ([]byte, string, error) {
+func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID string) ([]byte, string, error) {
 	var app appConfig
 	if err := json.Unmarshal(raw, &app); err != nil {
 		return nil, "", err
@@ -51,6 +51,7 @@ func buildAgentConfig(raw json.RawMessage, version, expectedSha256 string) ([]by
 		"binPath":     binPath, "workdir": app.Workdir, "user": app.User,
 		"health":         httpHealthURL(app.Health),
 		"version":        version,
+		"releaseId":      releaseID,
 		"expectedSha256": expectedSha256,
 		"backupKeep":     keep,
 	}
@@ -134,7 +135,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法部署"})
 		return
 	}
-	cfgJSON, agentID, err := buildAgentConfig(appRaw, version, sha)
+	cfgJSON, agentID, err := buildAgentConfig(appRaw, version, sha, releaseID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "生成部署配置失败"})
 		return
@@ -179,7 +180,7 @@ func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法还原"})
 		return
 	}
-	cfgJSON, agentID, err := buildAgentConfig(appRaw, req.Version, "") // 还原用 Agent 本地备份制品,无需上传 sha 校验
+	cfgJSON, agentID, err := buildAgentConfig(appRaw, req.Version, "", req.ReleaseID) // 还原用 Agent 本地备份制品,无需上传 sha 校验
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "生成还原配置失败"})
 		return

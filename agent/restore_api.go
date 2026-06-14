@@ -83,7 +83,7 @@ func (a *agent) restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanup()
-	res := a.runDeploy(cfg, tmp, nil)
+	res := a.runDeployIdempotent(cfg, tmp, nil)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -99,7 +99,7 @@ func (a *agent) restoreStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanup()
-	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeploy(cfg, tmp, emit) })
+	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeployIdempotent(cfg, tmp, emit) })
 }
 
 // listBackups 处理 GET /api/apps/{id}/backups:列出该应用 BackupDir 下的真实备份(新→旧)。

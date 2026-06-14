@@ -128,6 +128,24 @@ func TestValidateUnitFields(t *testing.T) {
 
 // processHealthy + rollback:验证空健康检查 + 进程未存活判失败的逻辑(回滚路径同样适用)。
 
+// Agent 侧 releaseId 幂等:记录成功后,同 releaseId 命中缓存;失败不记录。
+func TestReleaseIdempotency(t *testing.T) {
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: t.TempDir()}}}
+	if _, ok := a.releaseDone("R1"); ok {
+		t.Fatal("未记录前不应命中")
+	}
+	a.recordRelease("R1", DeployResult{Result: "success", Version: "v1"})
+	cached, ok := a.releaseDone("R1")
+	if !ok || cached.Version != "v1" {
+		t.Fatalf("记录后应命中并返回缓存: ok=%v ver=%q", ok, cached.Version)
+	}
+	// 失败结果不算幂等命中(允许重试)
+	a.recordRelease("R2", DeployResult{Result: "failed"})
+	if _, ok := a.releaseDone("R2"); ok {
+		t.Fatal("失败结果不应被当作幂等命中")
+	}
+}
+
 // withinRoots:路径穿越防护。
 func TestWithinRoots(t *testing.T) {
 	roots := []string{"/srv/apps"}
