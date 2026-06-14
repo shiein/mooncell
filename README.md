@@ -47,13 +47,26 @@ mooncell/
 
 实施路线见方案文档 §12(P0 → P3)。
 
+## 第二轮 review 修复(已落地 + 验证)
+
+- **pm2 日志/状态服务端派生**:Console 据已存应用 runner/agentId 转发 `runner=pm2`、路由目标机,不再信任前端参数(真机验证:不带 runner 参数也走 pm2 logs)。
+- **回滚也用 processHealthy**:systemd/pm2 回滚路径不再用空健康检查直接判成功,改查进程态(单测 + 逻辑同前向)。
+- **systemd unit 注入防护**:Name/User/Workdir/BinPath/Args/Env 等含换行/控制字符直接拒绝写 unit(单测覆盖)。
+- **制品 sha256 强校验**:前端 Web Crypto 算 sha256 → Console 透传 expectedSha256 → Agent 部署前校验,不匹配直接失败(真机验证:错误 sha 被拦截)。
+- **部署三态不坍缩**:success / rolledback / failed 三态如实落库与展示,failed 不再被写成"已回滚"。
+- **node 单文件模型对齐**:artifactExt 改 `.js`(与 python 单文件一致),UI/Agent 不再期望/落盘错位。
+
 ## 已知边界 / 待办(诚实声明)
 
 - **配置保真**:✅ 已重构——真机部署/还原的 Agent 配置由 Console 据已保存的类型化应用配置在服务端生成,前端只提交制品 + version + releaseId,配置注入面关闭。env 已贯通(应用实体含 env 时透传)。
-- **demo/真实混用**:非进程类(static/tomcat)在前端仍走模拟并写本地 release/backup 状态;新建应用预检为定时器模拟。生产模式应禁用模拟写库或明确标记演示。**待切分。**
-- **业务实体写入**:release/backup/app 仍可经通用 `PUT /api/data/{kind}` 前端直写(审计已锁服务端只追加、部署结果走服务端 deploys 表幂等)。release/backup 应进一步拆为服务端权威 API。**待收口。**
-- **stand-in 验证**:tomcat-war / pm2 用替身验证了平台职责(文件替换/编排/回滚),未验容器/pm2 运行时本身;node-pm2 为单测 + 与已验 python-pm2 同机制。
-- 前端多为构建态 + 关键页无头浏览器回归,未做全量 E2E。
+- **mock 写真实状态**:真实部署/还原后前端仍乐观写 release/backup/app 到本地 store(persist)。审计已锁服务端只追加、部署结果走服务端 deploys 表幂等,但 release/backup/app 仍应拆为**服务端权威 API**(部署完成后后端落库、前端刷新读取),让通用 `PUT /api/data` 只剩纯展示实体。**待收口(最大剩余架构债)。**
+- **Agent 侧幂等**:releaseId 幂等目前在 Console(唯一调用方)。Agent 直连/断连重试的边界尚未在 Agent 本地去重。**待补。**
+- **日志能力**:目前 journald / pm2 logs 跟随;尚无 log_roots 白名单、声明式日志路径、时间范围下载打包。**待补。**
+- **demo/真实混用**:非进程类(static/tomcat)前端仍走模拟;新建应用预检为定时器模拟。生产模式应禁用模拟写库或明确标记演示。**待切分。**
+- **Deployer 完整度**:static-nginx 还原、tomcat UI 真机接入、python/node 多文件包(tar.gz + entry + requirements)未做;node 当前为单文件模型。
+- **文件柜**:匿名上传、凭码下载、过期清理按方案待补。
+- **stand-in 验证**:tomcat-war / pm2 用替身验证了平台职责(文件替换/编排/回滚),未验容器/pm2 运行时本身。
+- 前端多为构建态 + 关键页无头浏览器回归,未做全量 E2E;docs/各 README 待与代码同步标注完成度。
 
 ## 离线部署
 

@@ -17,21 +17,22 @@ import (
 // DeployConfig 是 Console 随每次部署下发的应用配置。
 // Agent 无状态:Console 持有期望状态,每次部署带全量配置,Agent 只负责执行。
 type DeployConfig struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	Type       string            `json:"type"`    // go-binary | java-jar | static-nginx;空默认 go-binary
-	BinPath    string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
-	Workdir     string            `json:"workdir"`
-	Runner      string            `json:"runner"`      // systemd(默认)| pm2;决定进程托管方式
-	Interpreter string            `json:"interpreter"` // python:解释器路径(支持 venv,如 .../venv/bin/python);空则 python3
-	Args        string            `json:"args"`        // 启动参数
-	JvmArgs     string            `json:"jvmArgs"`     // java-jar:JVM 参数
-	Env        map[string]string `json:"env"`
-	User       string            `json:"user"`
-	Health     string            `json:"health"` // HTTP 健康检查 URL,空则跳过
-	Version    string            `json:"version"`
-	BackupKeep int               `json:"backupKeep"`
-	ReloadCmd  string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`    // go-binary | java-jar | static-nginx;空默认 go-binary
+	BinPath        string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
+	Workdir        string            `json:"workdir"`
+	Runner         string            `json:"runner"`      // systemd(默认)| pm2;决定进程托管方式
+	Interpreter    string            `json:"interpreter"` // python:解释器路径(支持 venv,如 .../venv/bin/python);空则 python3
+	Args           string            `json:"args"`        // 启动参数
+	JvmArgs        string            `json:"jvmArgs"`     // java-jar:JVM 参数
+	Env            map[string]string `json:"env"`
+	User           string            `json:"user"`
+	Health         string            `json:"health"` // HTTP 健康检查 URL,空则跳过
+	Version        string            `json:"version"`
+	ExpectedSha256 string            `json:"expectedSha256"` // 非空则部署前强校验制品 sha256,不匹配直接失败
+	BackupKeep     int               `json:"backupKeep"`
+	ReloadCmd      string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
 }
 
 // Step 是流水线一步的执行记录;Result 为整体结果。
@@ -111,7 +112,38 @@ func runtimeBin(cfg DeployConfig, defaultName string) (string, error) {
 	return bin, nil
 }
 
+// validateUnitFields 拒绝会破坏 systemd unit 格式 / 注入额外指令的值(换行、回车、控制字符)。
+// 配置虽已由 Console 据已存应用生成,但 unit 渲染仍做硬校验,纵深防御。
+func validateUnitFields(cfg DeployConfig) error {
+	bad := func(name, v string) error {
+		if strings.ContainsAny(v, "\n\r\x00") {
+			return fmt.Errorf("配置字段 %s 含非法字符(换行/控制字符),拒绝写入 unit", name)
+		}
+		return nil
+	}
+	for _, f := range []struct{ name, v string }{
+		{"name", cfg.Name}, {"user", cfg.User}, {"workdir", cfg.Workdir},
+		{"binPath", cfg.BinPath}, {"args", cfg.Args}, {"jvmArgs", cfg.JvmArgs}, {"interpreter", cfg.Interpreter},
+	} {
+		if err := bad(f.name, f.v); err != nil {
+			return err
+		}
+	}
+	for k, v := range cfg.Env {
+		if err := bad("env key", k); err != nil {
+			return err
+		}
+		if err := bad("env["+k+"]", v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func writeUnit(cfg DeployConfig) error {
+	if err := validateUnitFields(cfg); err != nil {
+		return err
+	}
 	var env strings.Builder
 	for k, v := range cfg.Env {
 		fmt.Fprintf(&env, "Environment=%s=%s\n", k, v)
@@ -374,6 +406,14 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 	if emit == nil {
 		emit = func(Step) {}
 	}
+	// 制品完整性:期望 sha256 不匹配则直接失败,不进任何部署路径(防传输损坏 / 制品被替换)。
+	if exp := strings.TrimSpace(cfg.ExpectedSha256); exp != "" {
+		if actual := sha256File(artifact); !strings.EqualFold(exp, actual) {
+			s := Step{Name: "校验制品", OK: false, Logs: []string{"sha256 不匹配 · 期望 " + short(exp) + " 实得 " + short(actual)}}
+			emit(s)
+			return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
+		}
+	}
 	switch cfg.Type {
 	case "static-nginx":
 		return a.runDeployStatic(cfg, artifact, emit)
@@ -477,7 +517,7 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	sysctl("start", unitName(cfg.ID))
 	time.Sleep(time.Second)
 	var rh []string
-	ok := healthCheck(cfg.Health, &rh)
+	ok := processHealthy(cfg.Health, isActive(cfg.ID), &rh) // 回滚同样要确认进程真的起来,不能空健康检查直接判成功
 	rlog = append(rlog, rh...)
 	add("回滚 · 还原备份", ok, rlog...)
 	if ok {

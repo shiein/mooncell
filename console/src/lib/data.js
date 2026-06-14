@@ -13,7 +13,7 @@ const DEPLOY_TYPES = {
   "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war" },
   "go-binary":    { label: "Go Binary",    tone: "cyan",    runners: ["systemd", "nohup"], artifactExt: "" },
   "python":       { label: "Python",       tone: "info",    runners: ["systemd", "nohup", "pm2"], artifactExt: ".py" },
-  "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".tar.gz" },
+  "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".js" },
   "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["无进程"], artifactExt: ".tar.gz" },
 };
 

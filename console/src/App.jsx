@@ -103,10 +103,11 @@ function App() {
     can: (perm) => (perm === "admin" ? role === "admin" : role !== "viewer"),
 
     // real:经 Agent 的真机部署。其审计由 Console 服务端权威落库;前端 addAudit 只乐观显示不落库。
+    // 三态:success / rolledback(失败已回滚到旧版本)/ failed(失败且未能回滚)——不坍缩。
     finishDeploy(app, { version, size, result, real }) {
       const now = Date.now();
       const backup = { id: "b" + now, appId: app.id, version: app.version, time: now, size: size || "—", auto: true, operator: user, dir: tsDir(now), note: "" };
-      const release = { id: "r" + now, appId: app.id, version, status: result === "success" ? "success" : "rolledback", time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" };
+      const release = { id: "r" + now, appId: app.id, version, status: result, time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" };
       setBackups((s) => [backup, ...s]); persist("backup", backup);
       setReleases((s) => [release, ...s]); persist("release", release);
       if (result === "success") {
@@ -118,16 +119,20 @@ function App() {
         });
         addAudit("部署", `${app.name} ${version}`, "成功");
         toast(`${app.name} · ${version} 部署成功`);
-      } else {
+      } else if (result === "rolledback") {
         patchApp(app.id, { status: app.type === "static-nginx" ? "static" : "running", lastDeploy: now });
         if (real) {
-          // 服务端写的是单条 result=失败·已回滚,前端乐观显示对齐,不再单列"回滚"行。
           addAudit("部署", `${app.name} ${version}`, "失败·已回滚");
         } else {
           addAudit("部署", `${app.name} ${version}`, "失败");
           addAudit("回滚", `${app.name} → ${app.version}(自动)`, "成功");
         }
         toast(`部署失败 · 已自动回滚至 ${app.version}`, { tone: "warn", icon: "rotate" });
+      } else {
+        // failed:既没成功也没能回滚(如首次部署失败),应用进入异常态。
+        patchApp(app.id, { status: "failed", lastDeploy: now, pid: null });
+        addAudit("部署", `${app.name} ${version}`, "失败");
+        toast(`${app.name} · ${version} 部署失败,未能回滚`, { tone: "error", icon: "alert" });
       }
     },
 

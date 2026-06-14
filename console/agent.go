@@ -286,10 +286,10 @@ func (a *api) streamAgentResp(w http.ResponseWriter, resp *http.Response, err er
 	}
 }
 
-// agentListBackups 透传 GET 历史备份列表。
+// agentListBackups 透传 GET 历史备份列表(Agent 据已存应用配置服务端派生)。
 func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl := a.resolveAgent(r)
+	cl, _ := a.appRouting(id)
 	if a.unknownAgent(w, cl) {
 		return
 	}
@@ -297,16 +297,22 @@ func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	relayAgent(w, status, body, err)
 }
 
-// agentLogStream 把 Agent 的应用日志 SSE 流透传给前端;用请求 context 绑定上游,前端断开即级联取消。
+// agentLogStream 把 Agent 的应用日志 SSE 流透传给前端;Agent 与 runner 据已存应用配置服务端派生,
+// pm2 应用自动转发 runner=pm2(走 pm2 logs)。用请求 context 绑定上游,前端断开即级联取消。
 func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl := a.resolveAgent(r)
+	cl, runner := a.appRouting(id)
 	if a.unknownAgent(w, cl) {
 		return
 	}
 	path := "/api/apps/" + id + "/logs/stream"
-	if t := r.URL.Query().Get("tail"); t != "" {
-		path += "?tail=" + t
+	tail := r.URL.Query().Get("tail")
+	if tail == "" {
+		tail = "200"
+	}
+	path += "?tail=" + tail
+	if runner == "pm2" {
+		path += "&runner=pm2"
 	}
 	resp, err := cl.getStream(r.Context(), path)
 	a.streamAgentResp(w, resp, err)
@@ -314,17 +320,21 @@ func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl := a.resolveAgent(r)
+	cl, runner := a.appRouting(id)
 	if a.unknownAgent(w, cl) {
 		return
 	}
-	status, body, err := cl.get("/api/apps/" + id + "/status")
+	path := "/api/apps/" + id + "/status"
+	if runner == "pm2" {
+		path += "?runner=pm2"
+	}
+	status, body, err := cl.get(path)
 	relayAgent(w, status, body, err)
 }
 
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl := a.resolveAgent(r)
+	cl, _ := a.appRouting(id)
 	if a.unknownAgent(w, cl) {
 		return
 	}

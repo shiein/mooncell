@@ -205,11 +205,23 @@ async function consumeSSE(r, onEvent, errLabel) {
 // 真实部署(SSE 实时流):前端只提交 制品 + version + releaseId;Agent 配置由 Console 据已存应用配置
 // 服务端生成(前端不再组装,杜绝配置注入),目标 Agent 也据应用 agentId 服务端路由。
 // releaseId 提供幂等(同 id 已成功不重复部署)。onEvent(type,data) 回调;返回 {result,version,steps} 或 {error}。
+// sha256Hex 用 Web Crypto 计算文件 sha256(供 Agent 端强校验制品完整性)。
+// 非安全上下文(http 非 localhost)下 crypto.subtle 不可用时返回空,Agent 端跳过校验。
+async function sha256Hex(file) {
+  try {
+    if (!(window.crypto && crypto.subtle)) return '';
+    const buf = await file.arrayBuffer();
+    const hash = await crypto.subtle.digest('SHA-256', buf);
+    return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) { return ''; }
+}
+
 async function deployViaAgentStream(appId, version, releaseId, file, onEvent) {
   try {
     const fd = new FormData();
     fd.append('version', version || '');
     fd.append('releaseId', releaseId || '');
+    fd.append('sha256', await sha256Hex(file));
     fd.append('artifact', file);
     const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, {
       method: 'POST', body: fd, credentials: 'same-origin',

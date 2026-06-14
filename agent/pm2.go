@@ -163,7 +163,7 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	pm2("start", pm2EcoPath(cfg.BinPath), "--update-env")
 	time.Sleep(time.Second)
 	var rh []string
-	ok := healthCheck(cfg.Health, &rh)
+	ok := processHealthy(cfg.Health, pm2Online(cfg.ID), &rh) // 回滚同样确认 pm2 进程真起来
 	rlog = append(rlog, rh...)
 	add("回滚 · 还原备份", ok, rlog...)
 	if ok {

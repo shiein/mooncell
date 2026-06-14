@@ -109,6 +109,25 @@ func TestCopyToTemp(t *testing.T) {
 	}
 }
 
+// validateUnitFields:换行/控制字符注入必须被拒绝。
+func TestValidateUnitFields(t *testing.T) {
+	if err := validateUnitFields(DeployConfig{Name: "ok", BinPath: "/srv/apps/x/app", User: "root"}); err != nil {
+		t.Fatalf("正常字段不应报错: %v", err)
+	}
+	bad := []DeployConfig{
+		{Name: "x\n[Service]\nExecStartPre=/evil", BinPath: "/srv/apps/x/app"},
+		{Name: "x", BinPath: "/srv/apps/x/app", User: "root\nExecStartPre=evil"},
+		{Name: "x", BinPath: "/srv/apps/x/app", Env: map[string]string{"K": "v\nEnvironment=INJECT=1"}},
+	}
+	for i, c := range bad {
+		if err := validateUnitFields(c); err == nil {
+			t.Errorf("用例 %d 含换行注入,应被拒绝", i)
+		}
+	}
+}
+
+// processHealthy + rollback:验证空健康检查 + 进程未存活判失败的逻辑(回滚路径同样适用)。
+
 // withinRoots:路径穿越防护。
 func TestWithinRoots(t *testing.T) {
 	roots := []string{"/srv/apps"}

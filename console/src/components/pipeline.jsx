@@ -351,7 +351,7 @@ function DeployDialog({ app, open, onClose }) {
       });
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
-      store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result === "success" ? "success" : "rolledback", real: true });
+      store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result || "failed", real: true });
       return;
     }
     const plan = makeDeployPlan(app, { fileName: up.file.name, size: up.file.size, chunks, sha, simulateFail });

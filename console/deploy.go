@@ -30,9 +30,9 @@ type appConfig struct {
 	Env        map[string]string `json:"env"`
 }
 
-// buildAgentConfig 据已存应用配置 + 本次 version 生成下发给 Agent 的部署配置 JSON。
+// buildAgentConfig 据已存应用配置 + 本次 version + 制品 sha256 生成下发给 Agent 的部署配置 JSON。
 // 返回 (配置 JSON, 目标 agentId)。binPath 取 path 首段(static 的 path 可能含 " → release")。
-func buildAgentConfig(raw json.RawMessage, version string) ([]byte, string, error) {
+func buildAgentConfig(raw json.RawMessage, version, expectedSha256 string) ([]byte, string, error) {
 	var app appConfig
 	if err := json.Unmarshal(raw, &app); err != nil {
 		return nil, "", err
@@ -49,9 +49,10 @@ func buildAgentConfig(raw json.RawMessage, version string) ([]byte, string, erro
 		"name": app.Name, "type": app.Type, "runner": app.Runner,
 		"interpreter": app.Interp,
 		"binPath":     binPath, "workdir": app.Workdir, "user": app.User,
-		"health":     httpHealthURL(app.Health),
-		"version":    version,
-		"backupKeep": keep,
+		"health":         httpHealthURL(app.Health),
+		"version":        version,
+		"expectedSha256": expectedSha256,
+		"backupKeep":     keep,
 	}
 	// jvm 字段按类型映射:java 是 JVM 参数,其余是启动参数。
 	if app.Type == "java-jar" {
@@ -64,6 +65,19 @@ func buildAgentConfig(raw json.RawMessage, version string) ([]byte, string, erro
 	}
 	b, err := json.Marshal(cfg)
 	return b, app.AgentID, err
+}
+
+// appRouting 据已存应用配置(authoritative)解析目标 Agent 客户端与 runner,
+// 供日志/状态等接口服务端派生路由与 runner,不再信任前端传的 ?agent / ?runner。
+// 应用未落库时退回配置内置 Agent(兼容尚未真机化的演示应用)。
+func (a *api) appRouting(id string) (*agentClient, string) {
+	raw, ok := a.store.getEntity("app", id)
+	if !ok {
+		return a.agent, ""
+	}
+	var app appConfig
+	json.Unmarshal(raw, &app)
+	return a.resolveAgentByID(app.AgentID), app.Runner
 }
 
 // httpHealthURL 仅放行 http(s) 健康检查 URL;其它(如「端口探活 :8080」)视为未配置。
@@ -105,6 +119,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	}
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
+	sha := r.FormValue("sha256")
 
 	// 幂等:同 releaseId 已成功部署则直接返回缓存结果,不重复执行。
 	if releaseID != "" {
@@ -119,7 +134,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法部署"})
 		return
 	}
-	cfgJSON, agentID, err := buildAgentConfig(appRaw, version)
+	cfgJSON, agentID, err := buildAgentConfig(appRaw, version, sha)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "生成部署配置失败"})
 		return
@@ -164,7 +179,7 @@ func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法还原"})
 		return
 	}
-	cfgJSON, agentID, err := buildAgentConfig(appRaw, req.Version)
+	cfgJSON, agentID, err := buildAgentConfig(appRaw, req.Version, "") // 还原用 Agent 本地备份制品,无需上传 sha 校验
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "生成还原配置失败"})
 		return
