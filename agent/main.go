@@ -51,6 +51,7 @@ func main() {
 	// 一键还原:列出历史备份,用指定备份制品重跑部署流水线(还原前自动备份当前版本,失败自动回滚)
 	mux.HandleFunc("GET /api/apps/{id}/backups", a.tokenAuth(a.listBackups))
 	mux.HandleFunc("GET /api/apps/{id}/releases", a.tokenAuth(a.listReleases)) // static 历史 release
+	mux.HandleFunc("GET /api/apps/{id}/release", a.tokenAuth(a.releaseStatus)) // 权威幂等记录(SSE 断流对账)
 	mux.HandleFunc("POST /api/apps/{id}/restore", a.tokenAuth(a.restore))
 	mux.HandleFunc("POST /api/apps/{id}/restore/stream", a.tokenAuth(a.restoreStream)) // SSE 实时日志流
 

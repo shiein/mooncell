@@ -164,10 +164,19 @@ func (a *api) unknownAgent(w http.ResponseWriter, cl *agentClient) bool {
 
 
 // streamAndAudit 透传 Agent 的 SSE 流(部署/还原),同时旁路捕获末尾 done 事件,
-// 据实际结果与会话操作人服务端写一条权威审计;releaseID 非空时记录部署结果用于幂等。
+// 据实际结果与会话操作人服务端写一条权威审计;releaseID 非空时记录结果用于幂等。
 // 仅用于有限流(部署/还原),日志等无限流不可用此法。
-func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.Response, err error, action, appID, releaseID, fingerprint string) {
+//
+// 关键:结果记账不再绑定在"浏览器→Console"这条瞬时流上。
+//  1. 浏览器中途断开时,继续读尽 Agent 流(只停止向浏览器写),确保仍能拿到权威 done;
+//  2. 即便 Console↔Agent 也断流没拿到 done,再向 Agent 查询权威幂等记录对账——
+//     Agent 真机已完成的部署绝不会被误记为失败,也不会漏记幂等导致重试时重复部署。
+func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentClient, resp *http.Response, err error, action, appID, releaseID, fingerprint string) {
 	user := a.sessionUser(r)
+	op := "deploy"
+	if action == "还原" {
+		op = "restore"
+	}
 	if err != nil {
 		a.store.appendAudit(user, action, appID, "失败·Agent不可达")
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Agent 不可达", "detail": err.Error(), "online": false})
@@ -186,17 +195,23 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.
 	w.WriteHeader(resp.StatusCode)
 	flusher.Flush()
 
-	// 部署/还原流体量小(数步),旁路全量缓存以解析 done;边透传边捕获,前端断开即止。
+	// 部署/还原流体量小(数步),旁路全量缓存以解析 done。浏览器断开后不再向其写,
+	// 但继续读尽 Agent 流——Agent→Console 是 LAN 服务端连接,远比浏览器可靠,
+	// 且不绑 r.Context(postStream 未绑),浏览器取消不会掐断它。
 	var capture bytes.Buffer
 	buf := make([]byte, 4096)
+	clientGone := false
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
 			capture.Write(buf[:n])
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				break // 前端断开
+			if !clientGone {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					clientGone = true // 浏览器断开:停止写,但继续读尽 Agent 流以拿到权威 done
+				} else {
+					flusher.Flush()
+				}
 			}
-			flusher.Flush()
 		}
 		if rerr != nil {
 			break
@@ -204,6 +219,16 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.
 	}
 
 	result, version := parseDoneResult(capture.Bytes())
+	// 对账:未从流里拿到 success(可能 Console↔Agent 断流),查 Agent 权威幂等记录兜底。
+	if result != "success" && releaseID != "" {
+		if ares, aver, ok := a.fetchReleaseRecord(cl, op, appID, releaseID); ok && ares == "success" {
+			result = ares
+			if version == "" {
+				version = aver
+			}
+		}
+	}
+
 	target := appID
 	if version != "" {
 		target += " " + version
@@ -213,12 +238,29 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.
 		a.store.appendRelease(appID, version, result, user) // 服务端权威发布记录(真实结果,前端不再伪造)
 	}
 	if releaseID != "" {
-		op := "deploy"
-		if action == "还原" {
-			op = "restore"
-		}
 		a.store.putDeploy(op, appID, releaseID, result, fingerprint) // 幂等:按 操作+app+release 记录结果与指纹
 	}
+}
+
+// fetchReleaseRecord 向 Agent 查询某 (op,app,releaseId) 的权威幂等记录(仅成功才记录)。
+// 用 cl 自带的短超时客户端(不绑浏览器请求 context),浏览器断开不影响本次对账查询。
+func (a *api) fetchReleaseRecord(cl *agentClient, op, appID, releaseID string) (result, version string, ok bool) {
+	if cl == nil || releaseID == "" {
+		return "", "", false
+	}
+	status, body, err := cl.get("/api/apps/" + appID + "/release?op=" + op + "&releaseId=" + url.QueryEscape(releaseID))
+	if err != nil || status != http.StatusOK {
+		return "", "", false
+	}
+	var d struct {
+		Recorded bool   `json:"recorded"`
+		Result   string `json:"result"`
+		Version  string `json:"version"`
+	}
+	if json.Unmarshal(body, &d) != nil || !d.Recorded {
+		return "", "", false
+	}
+	return d.Result, d.Version, true
 }
 
 // parseDoneResult 从 SSE 字节流中取最后一个 `event: done` 帧的 data,解析出 result 与 version。

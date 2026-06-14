@@ -237,7 +237,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 
 	body, ct := buildDeployBody(cfgJSON, file)
 	resp, perr := cl.postStream("/api/apps/"+id+"/deploy/stream", ct, body)
-	a.streamAndAudit(w, r, resp, perr, "部署", id, releaseID, fp)
+	a.streamAndAudit(w, r, cl, resp, perr, "部署", id, releaseID, fp)
 }
 
 // agentRestoreStream 服务端还原:读已存应用配置生成 Agent 请求(前端只提交 backup + version + releaseId)。
@@ -280,7 +280,7 @@ func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 	}
 	agentBody, _ := json.Marshal(map[string]any{"config": json.RawMessage(cfgJSON), "backup": req.Backup})
 	resp, perr := cl.postStream("/api/apps/"+id+"/restore/stream", "application/json", bytes.NewReader(agentBody))
-	a.streamAndAudit(w, r, resp, perr, "还原", id, req.ReleaseID, fp)
+	a.streamAndAudit(w, r, cl, resp, perr, "还原", id, req.ReleaseID, fp)
 }
 
 // sseIdempotent 对已成功的 releaseId 直接回一个 SSE done(幂等跳过,不重复部署)。

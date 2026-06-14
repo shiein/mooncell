@@ -188,6 +188,31 @@ func (a *agent) restoreStream(w http.ResponseWriter, r *http.Request) {
 	runSSE(w, func(emit func(Step)) DeployResult { return a.runRestore(cfg, backup, emit) })
 }
 
+// releaseStatus 处理 GET /api/apps/{id}/release?op=deploy|restore&releaseId= :
+// 返回该 (op,app,releaseId) 的权威幂等记录(仅成功才记录)。Console 在 SSE 断流时据此对账,
+// 避免把 Agent 实际已完成的部署/还原误记为失败、并漏记幂等导致重试重复执行。
+func (a *agent) releaseStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
+	op := r.URL.Query().Get("op")
+	if op != "deploy" && op != "restore" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "op 仅支持 deploy|restore"})
+		return
+	}
+	rid := r.URL.Query().Get("releaseId")
+	if rid == "" || !validName(rid) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法 releaseId"})
+		return
+	}
+	if res, _, ok := a.releaseDone(op, id, rid); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"recorded": true, "result": res.Result, "version": res.Version})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recorded": false})
+}
+
 // listReleases 处理 GET /api/apps/{id}/releases?binPath= :列出静态站点历史 release(<binPath>-releases/,新→旧)。
 // binPath 经白名单校验;复用 BackupInfo 形态,Dir 为 release 时间戳(还原时回传)。
 func (a *agent) listReleases(w http.ResponseWriter, r *http.Request) {

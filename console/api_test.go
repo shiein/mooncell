@@ -74,6 +74,50 @@ func TestAppendAuditAndRelease(t *testing.T) {
 	}
 }
 
+// T5 对账:SSE 没拿到 success 时,向 Agent 查权威幂等记录,recorded=success 则据此记账。
+func TestFetchReleaseRecordReconcile(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s}
+
+	var gotOp, gotRid string
+	recorded := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOp, gotRid = r.URL.Query().Get("op"), r.URL.Query().Get("releaseId")
+		w.Header().Set("Content-Type", "application/json")
+		if recorded {
+			w.Write([]byte(`{"recorded":true,"result":"success","version":"v9"}`))
+		} else {
+			w.Write([]byte(`{"recorded":false}`))
+		}
+	}))
+	defer srv.Close()
+	cl := newAgentClient(AgentConfig{Addr: strings.TrimPrefix(srv.URL, "http://"), Token: "t"})
+
+	// 命中权威成功记录
+	res, ver, ok := a.fetchReleaseRecord(cl, "deploy", "app1", "R1")
+	if !ok || res != "success" || ver != "v9" {
+		t.Fatalf("应对账到 success/v9: ok=%v res=%q ver=%q", ok, res, ver)
+	}
+	if gotOp != "deploy" || gotRid != "R1" {
+		t.Errorf("查询参数透传错误: op=%q rid=%q", gotOp, gotRid)
+	}
+
+	// 未记录(如失败/未完成)→ ok=false,不伪造结果
+	recorded = false
+	if _, _, ok := a.fetchReleaseRecord(cl, "deploy", "app1", "R2"); ok {
+		t.Error("未记录时应返回 ok=false")
+	}
+
+	// releaseID 为空 / cl 为 nil → 直接 false,不发请求
+	if _, _, ok := a.fetchReleaseRecord(cl, "deploy", "app1", ""); ok {
+		t.Error("空 releaseID 应返回 false")
+	}
+	if _, _, ok := a.fetchReleaseRecord(nil, "deploy", "app1", "R1"); ok {
+		t.Error("nil cl 应返回 false")
+	}
+}
+
 // RBAC:operator 不能访问 admin-only;可访问 write 路由;viewer 被 write 路由拦截。
 func TestRequireRole(t *testing.T) {
 	s := testStore(t)
