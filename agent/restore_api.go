@@ -32,11 +32,15 @@ func (a *agent) backupArtifact(id, backup string) (string, error) {
 	if backup == "" || backup != filepath.Base(backup) || strings.Contains(backup, "..") {
 		return "", fmt.Errorf("非法备份名: %q", backup)
 	}
-	artifact := filepath.Join(a.cfg.Paths.BackupDir, id, backup, "app")
-	if _, err := os.Stat(artifact); err != nil {
-		return "", fmt.Errorf("备份制品不存在: %s", artifact)
+	dir := filepath.Join(a.cfg.Paths.BackupDir, id, backup)
+	// 单文件备份为 app,多文件备份为 app.tar.gz;还原时按内容(魔数)自动判断解包与否。
+	for _, name := range []string{"app", "app.tar.gz"} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
 	}
-	return artifact, nil
+	return "", fmt.Errorf("备份制品不存在: %s", dir)
 }
 
 // prepareRestore 解析还原请求、定位备份制品并做安全校验;失败已写好响应,ok=false。
@@ -118,8 +122,11 @@ func (a *agent) listBackups(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		bi := BackupInfo{Dir: e.Name()}
-		if fi, err := os.Stat(filepath.Join(dir, e.Name(), "app")); err == nil {
-			bi.Size = fi.Size()
+		for _, name := range []string{"app", "app.tar.gz"} { // 单文件 / 多文件备份
+			if fi, err := os.Stat(filepath.Join(dir, e.Name(), name)); err == nil {
+				bi.Size = fi.Size()
+				break
+			}
 		}
 		if mb, err := os.ReadFile(filepath.Join(dir, e.Name(), "meta.json")); err == nil {
 			var m struct {

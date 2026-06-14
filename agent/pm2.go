@@ -90,9 +90,10 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 		emit(s)
 	}
 
+	archived := scriptArchived(cfg, artifact) // python/node 多文件压缩包 → 解包到目录
 	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "目标 "+cfg.BinPath, "Runner pm2")
 
-	bkDir, err := a.backupCurrent(cfg)
+	bkDir, err := a.backupCurrent(cfg, archived)
 	if err != nil {
 		add("备份当前版本", false, err.Error())
 		res.Result = "failed"
@@ -107,13 +108,13 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	pm2("stop", unitName(cfg.ID))
 	add("停止服务", true, "pm2 stop "+unitName(cfg.ID))
 
-	os.MkdirAll(filepath.Dir(cfg.BinPath), 0755)
-	if err := atomicReplace(artifact, cfg.BinPath); err != nil {
+	plog, err := placeArtifact(cfg, artifact)
+	if err != nil {
 		add("替换制品", false, err.Error())
 		res.Result = "failed"
 		return res
 	}
-	add("替换制品", true, "tmp 落盘 → rename 原子替换 "+cfg.BinPath)
+	add("替换制品", true, plog)
 
 	eco, err := writePm2Eco(cfg)
 	if err != nil {
@@ -146,9 +147,9 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 		res.Result = "failed"
 		return res
 	}
-	rlog := []string{"读取 " + bkDir, "还原备份制品(原子替换)"}
+	rlog := []string{"读取 " + bkDir, "还原备份制品"}
 	pm2("stop", unitName(cfg.ID))
-	if err := atomicReplace(filepath.Join(bkDir, "app"), cfg.BinPath); err != nil {
+	if err := restoreArtifactFrom(cfg, bkDir); err != nil {
 		rlog = append(rlog, "还原失败: "+err.Error())
 		add("回滚 · 还原备份", false, rlog...)
 		res.Result = "failed"

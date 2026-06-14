@@ -264,9 +264,76 @@ func currentVersion(binPath string) string {
 	return strings.TrimSpace(string(b))
 }
 
+// scriptArchived 判断本次 python/node 部署是否为多文件压缩包(决定解包到目录还是单文件替换)。
+func scriptArchived(cfg DeployConfig, artifact string) bool {
+	return (cfg.Type == "python" || cfg.Type == "node") && sniffArchive(artifact) != ""
+}
+
+// clearDir 清空目录内容但保留目录本身(多文件解包前清旧版本)。
+func clearDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.MkdirAll(dir, 0755)
+		}
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tarDir 把目录打成 tar.gz(用系统 tar)。
+func tarDir(src, dest string) error {
+	out, err := exec.Command("tar", "-czf", dest, "-C", src, ".").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("打包失败: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// placeArtifact 落盘制品:python/node 压缩包 → 清空应用目录后智能解包(多文件);否则单文件原子替换。
+func placeArtifact(cfg DeployConfig, artifact string) (string, error) {
+	if scriptArchived(cfg, artifact) {
+		appDir := filepath.Dir(cfg.BinPath)
+		format := sniffArchive(artifact)
+		if err := clearDir(appDir); err != nil {
+			return "", err
+		}
+		if err := extractArchiveSmart(artifact, appDir, format); err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(cfg.BinPath); err != nil {
+			return "", fmt.Errorf("解包后未找到入口脚本 %s(检查包内路径)", filepath.Base(cfg.BinPath))
+		}
+		return "多文件包(" + format + ")智能解包 → " + appDir, nil
+	}
+	os.MkdirAll(filepath.Dir(cfg.BinPath), 0755)
+	if err := atomicReplace(artifact, cfg.BinPath); err != nil {
+		return "", err
+	}
+	return "tmp 落盘 → rename 原子替换 " + cfg.BinPath, nil
+}
+
+// restoreArtifactFrom 从备份还原制品:含 app.tar.gz → 清目录后解包(多文件);否则单文件原子替换。
+func restoreArtifactFrom(cfg DeployConfig, bkDir string) error {
+	if tarPath := filepath.Join(bkDir, "app.tar.gz"); fileExists(tarPath) {
+		appDir := filepath.Dir(cfg.BinPath)
+		if err := clearDir(appDir); err != nil {
+			return err
+		}
+		return extractArchiveSmart(tarPath, appDir, "gzip")
+	}
+	return atomicReplace(filepath.Join(bkDir, "app"), cfg.BinPath)
+}
+
 // backupCurrent 把当前制品复制到 backups/<id>/<ts>/,附 meta.json;首次部署(无当前制品)返回空。
+// archived=true 时整应用目录打包为 app.tar.gz(多文件),否则单文件存为 app。
 // meta.version 取旧制品旁车记录的版本(被备份的就是这个版本),不是正在部署的新版本。
-func (a *agent) backupCurrent(cfg DeployConfig) (string, error) {
+func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 	if _, err := os.Stat(cfg.BinPath); err != nil {
 		return "", nil // 首次部署
 	}
@@ -276,7 +343,11 @@ func (a *agent) backupCurrent(cfg DeployConfig) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
-	if err := copyFile(cfg.BinPath, filepath.Join(dir, "app"), 0755); err != nil {
+	if archived {
+		if err := tarDir(filepath.Dir(cfg.BinPath), filepath.Join(dir, "app.tar.gz")); err != nil {
+			return "", err
+		}
+	} else if err := copyFile(cfg.BinPath, filepath.Join(dir, "app"), 0755); err != nil {
 		return "", err
 	}
 	// 一并备份当前运行期配置(systemd unit 或 pm2 ecosystem):回滚要连配置一起还原,
@@ -482,11 +553,13 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 		emit(s) // 每步完成即推送,供 SSE 实时呈现
 	}
 
+	archived := scriptArchived(cfg, artifact) // python/node 多文件压缩包 → 解包到目录
+
 	// 1. 校验制品
 	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "目标 "+cfg.BinPath)
 
-	// 2. 备份当前版本
-	bkDir, err := a.backupCurrent(cfg)
+	// 2. 备份当前版本(多文件整目录打包)
+	bkDir, err := a.backupCurrent(cfg, archived)
 	if err != nil {
 		add("备份当前版本", false, err.Error())
 		res.Result = "failed"
@@ -502,14 +575,14 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	sysctl("stop", unitName(cfg.ID))
 	add("停止服务", true, "systemctl stop "+unitName(cfg.ID))
 
-	// 4. 原子替换制品
-	os.MkdirAll(filepath.Dir(cfg.BinPath), 0755)
-	if err := atomicReplace(artifact, cfg.BinPath); err != nil {
+	// 4. 落盘制品(单文件原子替换 / 多文件智能解包)
+	plog, err := placeArtifact(cfg, artifact)
+	if err != nil {
 		add("替换制品", false, err.Error())
 		res.Result = "failed"
 		return res
 	}
-	add("替换制品", true, "tmp 落盘 → rename 原子替换 "+cfg.BinPath)
+	add("替换制品", true, plog)
 
 	// 5. 生成 unit + 启动
 	if err := writeUnit(cfg); err != nil {
@@ -544,9 +617,9 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 		res.Result = "failed"
 		return res
 	}
-	rlog := []string{"读取 " + bkDir, "还原备份制品(原子替换)"}
+	rlog := []string{"读取 " + bkDir, "还原备份制品"}
 	sysctl("stop", unitName(cfg.ID))
-	if err := atomicReplace(filepath.Join(bkDir, "app"), cfg.BinPath); err != nil {
+	if err := restoreArtifactFrom(cfg, bkDir); err != nil {
 		rlog = append(rlog, "还原失败: "+err.Error())
 		add("回滚 · 还原备份", false, rlog...)
 		res.Result = "failed"
@@ -806,8 +879,8 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	// 1. 校验制品
 	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "WAR "+cfg.BinPath)
 
-	// 2. 备份当前 WAR(无 systemd unit,backupCurrent 仅备份 WAR 文件)
-	bkDir, err := a.backupCurrent(cfg)
+	// 2. 备份当前 WAR(单文件)
+	bkDir, err := a.backupCurrent(cfg, false)
 	if err != nil {
 		add("备份当前版本", false, err.Error())
 		res.Result = "failed"
