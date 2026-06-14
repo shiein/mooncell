@@ -78,6 +78,64 @@ func (s *Store) seedAdmin(username, password string) {
 	log.Printf("[db] 已创建默认管理员: %s / %s", username, password)
 }
 
+// UserInfo 是用户列表对外形态(不含口令哈希)。
+type UserInfo struct {
+	Username  string `json:"username"`
+	Role      string `json:"role"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *Store) userRole(username string) string {
+	var role string
+	if err := s.db.QueryRow("SELECT role FROM users WHERE username = ?", username).Scan(&role); err != nil {
+		return ""
+	}
+	return role
+}
+
+func (s *Store) listUsers() ([]UserInfo, error) {
+	rows, err := s.db.Query("SELECT username, role, created_at FROM users ORDER BY created_at")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []UserInfo{}
+	for rows.Next() {
+		var u UserInfo
+		if err := rows.Scan(&u.Username, &u.Role, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) createUser(username, password, role string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		"INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+		username, string(hash), role, time.Now().UnixMilli(),
+	)
+	return err // UNIQUE 冲突 → 用户名已存在
+}
+
+// deleteUser 删除用户并清其会话。
+func (s *Store) deleteUser(username string) error {
+	_, err := s.db.Exec("DELETE FROM users WHERE username = ?", username)
+	s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
+	return err
+}
+
+// countAdmins 用于防止删掉最后一个管理员。
+func (s *Store) countAdmins() int {
+	var n int
+	s.db.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&n)
+	return n
+}
+
 func (s *Store) verifyUser(username, password string) bool {
 	var hash string
 	if err := s.db.QueryRow("SELECT password_hash FROM users WHERE username = ?", username).Scan(&hash); err != nil {

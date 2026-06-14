@@ -57,7 +57,7 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  exp,
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"user": username})
+	writeJSON(w, http.StatusOK, map[string]string{"user": username, "role": a.store.userRole(username)})
 }
 
 func (a *api) logout(w http.ResponseWriter, r *http.Request) {
@@ -86,5 +86,42 @@ func (a *api) session(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"user": username})
+	writeJSON(w, http.StatusOK, map[string]string{"user": username, "role": a.store.userRole(username)})
+}
+
+var validRoles = map[string]bool{"admin": true, "operator": true, "viewer": true}
+
+// currentUser 从会话 cookie 取用户名与角色。
+func (a *api) currentUser(r *http.Request) (string, string, bool) {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return "", "", false
+	}
+	u, ok := a.store.userByToken(c.Value)
+	if !ok {
+		return "", "", false
+	}
+	return u, a.store.userRole(u), true
+}
+
+// requireRole 包裹需要特定角色的接口:未登录 401,角色不符 403。
+func (a *api) requireRole(allowed ...string) func(http.HandlerFunc) http.HandlerFunc {
+	allow := map[string]bool{}
+	for _, role := range allowed {
+		allow[role] = true
+	}
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_, role, ok := a.currentUser(r)
+			if !ok {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
+				return
+			}
+			if !allow[role] {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "权限不足:需要 " + strings.Join(allowed, "/") + " 角色"})
+				return
+			}
+			next(w, r)
+		}
+	}
 }
