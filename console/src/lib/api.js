@@ -126,6 +126,15 @@ async function agentGet(path) {
   }
 }
 
+// 新建应用前真实预检(路径可写/端口空闲/运行时可用);失败返回 null。
+async function precheckApp(query) {
+  try {
+    const r = await fetch('/api/agent/precheck?' + query, { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
 const getAgentCapabilities = () => agentGet('/api/agent/capabilities');
 const getAgentSystem = () => agentGet('/api/agent/system');
 const getAgentPing = () => agentGet('/api/agent/ping');
@@ -300,7 +309,7 @@ export {
   listUsers, createUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   uploadCabinetFile, removeCabinetFile,
-  getAgentCapabilities, getAgentSystem, getAgentPing,
+  getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp,
   hydrateData, putEntity, deleteEntity, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };

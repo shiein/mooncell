@@ -39,6 +39,7 @@ func main() {
 	mux.HandleFunc("GET /api/ping", a.tokenAuth(a.ping))
 	mux.HandleFunc("GET /api/capabilities", a.tokenAuth(a.capabilities))
 	mux.HandleFunc("GET /api/system", a.tokenAuth(a.system))
+	mux.HandleFunc("GET /api/precheck", a.tokenAuth(a.precheck)) // 新建应用前真实预检
 
 	// 部署(go-binary / systemd Runner):上传制品 + 配置 → 备份→替换→起停→健康检查→失败回滚
 	mux.HandleFunc("POST /api/apps/{id}/deploy", a.tokenAuth(a.deploy))

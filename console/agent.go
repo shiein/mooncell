@@ -383,6 +383,20 @@ func (a *api) agentLogFileStream(w http.ResponseWriter, r *http.Request) {
 	a.streamAgentResp(w, resp, err)
 }
 
+// agentPrecheck 新建应用前预检(只读),按 ?agent 路由(应用尚未创建,不能据已存配置派生)。
+func (a *api) agentPrecheck(w http.ResponseWriter, r *http.Request) {
+	cl := a.resolveAgent(r)
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	path := "/api/precheck"
+	if q := r.URL.RawQuery; q != "" {
+		path += "?" + q
+	}
+	status, body, err := cl.get(path)
+	relayAgent(w, status, body, err)
+}
+
 func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	cl, runner := a.appRouting(id)

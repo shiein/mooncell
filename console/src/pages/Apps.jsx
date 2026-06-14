@@ -4,7 +4,7 @@ import { useMC, AGENT, DEPLOY_TYPES, timeAgo } from '../lib/data.js';
 import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, EmptyState } from '../components/primitives.jsx';
 import { DeployDialog } from '../components/pipeline.jsx';
 import { PageHead } from '../components/Shell.jsx';
-import { listAgentNodes } from '../lib/api.js';
+import { listAgentNodes, precheckApp } from '../lib/api.js';
 
 const APP_SCHEMAS = {
   "java-jar": [
@@ -61,20 +61,25 @@ function CreateAppDialog({ open, onClose }) {
     return () => timers.current.forEach(clearTimeout);
   }, [open]);
 
-  const runPrecheck = () => {
+  const runPrecheck = async () => {
     setStep(2);
-    const items = [
-      { label: "Agent 连通性 · " + AGENT.host, st: "pending" },
-      { label: "目标路径可写 · " + (form.path || form.interp || "/srv/apps/" + (form.name || "new-app")), st: "pending" },
-      { label: "端口未被占用 · :" + (form.port || "8080"), st: "pending" },
-      { label: "Runner 可用 · " + (form.runner || "systemd"), st: "pending" },
-    ];
-    setChecks(items.map((c) => ({ ...c })));
-    items.forEach((c, i) => {
-      timers.current.push(setTimeout(() => {
-        setChecks((prev) => prev.map((p, j) => (j === i ? { ...p, st: i === 1 ? "warn" : "ok", note: i === 1 ? "目录不存在,保存时将自动创建" : "" } : p)));
-      }, 600 + i * 650));
+    setChecks([{ label: "正在向 Agent 预检…", st: "pending" }]);
+    const id = (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
+    const isScript = type === "python" || type === "node";
+    const binPath = isScript
+      ? `/srv/apps/${id}/${form.entry || (type === "node" ? "server.js" : "app.py")}`
+      : (form.path || `/srv/apps/${id}/app`);
+    const params = new URLSearchParams({
+      binPath, port: form.port || "", type,
+      runner: form.runner || (DEPLOY_TYPES[type].runners[0] || "systemd"),
+      agent: form.agentId || "default",
     });
+    const res = await precheckApp(params.toString());
+    if (!res || !res.checks) {
+      setChecks([{ label: "Agent 不可达,无法预检(仍可创建,部署时再校验)", st: "warn" }]);
+      return;
+    }
+    setChecks(res.checks.map((c) => ({ label: c.label, st: c.ok ? "ok" : "fail", note: c.detail || "" })));
   };
   const checksDone = checks.length > 0 && checks.every((c) => c.st !== "pending");
 
