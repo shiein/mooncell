@@ -14,8 +14,8 @@ function LoginPage({ onLogin, onWizard }) {
     if (!u || !p) return;
     setErr(""); setBusy(true);
     try {
-      const { user } = await apiLogin(u, p);
-      onLogin(user);
+      const res = await apiLogin(u, p); // { user, role }
+      onLogin(res);
     } catch (e) {
       setErr(e.message || "登录失败");
       setBusy(false);
