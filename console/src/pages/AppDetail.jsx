@@ -140,18 +140,38 @@ function normAgentBackup(b, appId) {
 
 function BackupsTab({ app, onRestore }) {
   const store = useMC();
-  // go-binary:优先拉取 Agent 真实备份(还原目标须真实存在);拉到(含空数组)即用真实列表,否则回退 mock。
-  const [realBaks, setRealBaks] = React.useState(null);
+  const realBackups = isRealType(app.type);
+  // 真实应用的备份来源只能是 Agent;接口失败也不能回退到 mock,否则会暴露假还原入口。
+  const [realBaks, setRealBaks] = React.useState(realBackups ? [] : null);
+  const [backupState, setBackupState] = React.useState(realBackups ? "loading" : "mock");
   React.useEffect(() => {
     let alive = true;
-    if (isRealType(app.type)) {
+    if (realBackups) {
+      setRealBaks([]);
+      setBackupState("loading");
       listAgentBackups(app.id, app.agentId).then((arr) => {
-        if (alive && arr) setRealBaks(arr.map((b) => normAgentBackup(b, app.id)));
+        if (!alive) return;
+        if (arr) {
+          setRealBaks(arr.map((b) => normAgentBackup(b, app.id)));
+          setBackupState("ready");
+        } else {
+          setRealBaks([]);
+          setBackupState("error");
+        }
       });
-    } else setRealBaks(null);
+    } else {
+      setRealBaks(null);
+      setBackupState("mock");
+    }
     return () => { alive = false; };
-  }, [app.id, app.type]);
-  const list = realBaks !== null ? realBaks : store.backups.filter((b) => b.appId === app.id);
+  }, [app.id, app.type, app.agentId, realBackups]);
+  const list = realBackups ? (realBaks || []) : store.backups.filter((b) => b.appId === app.id);
+  const currentBackupState = realBackups && backupState === "mock" ? "loading" : backupState;
+  const backupHint = realBackups
+    ? (currentBackupState === "error" ? " · Agent 备份列表不可用" : currentBackupState === "loading" ? " · 正在读取 Agent 真实备份" : " · 来自 Agent 真实备份")
+    : " · 当前占用 " + (list.length > 0 ? "约 " + list.length * 30 + " MB" : "0");
+  const emptyTitle = currentBackupState === "loading" ? "正在读取备份" : currentBackupState === "error" ? "无法读取真实备份" : "暂无备份";
+  const emptyDesc = currentBackupState === "error" ? "Agent 不可达或备份接口失败,请稍后重试" : "首次部署时会自动创建备份";
   const [backing, setBacking] = React.useState(false);
   const manualBackup = () => {
     setBacking(true);
@@ -161,10 +181,10 @@ function BackupsTab({ app, onRestore }) {
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
         <div style={{ fontSize: 12.5, color: "var(--muted-fg)", flex: 1 }}>
-          每次部署/还原前自动备份至 <span className="code-chip">backups/{app.id}/</span> · 滚动保留 {app.backupKeep} 份{realBaks !== null ? " · 来自 Agent 真实备份" : " · 当前占用 " + (list.length > 0 ? "约 " + list.length * 30 + " MB" : "0")}
+          每次部署/还原前自动备份至 <span className="code-chip">backups/{app.id}/</span> · 滚动保留 {app.backupKeep} 份{backupHint}
         </div>
         {store.can("write") ? (
-          <Btn size="sm" icon={backing ? undefined : "archive"} disabled={backing || realBaks !== null} title={realBaks !== null ? "真实备份在部署/还原时自动生成" : undefined} onClick={manualBackup}>
+          <Btn size="sm" icon={backing ? undefined : "archive"} disabled={backing || realBackups} title={realBackups ? "真实备份在部署/还原时自动生成" : undefined} onClick={manualBackup}>
             {backing ? <React.Fragment><Spinner size={12} /> 备份中…</React.Fragment> : "手动备份"}
           </Btn>
         ) : null}
@@ -191,7 +211,7 @@ function BackupsTab({ app, onRestore }) {
             ))}
           </tbody>
         </table>
-        {list.length === 0 ? <EmptyState icon="archive" title="暂无备份" desc="首次部署时会自动创建备份" /> : null}
+        {list.length === 0 ? <EmptyState icon="archive" title={emptyTitle} desc={emptyDesc} /> : null}
       </div>
     </div>
   );

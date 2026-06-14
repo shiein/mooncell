@@ -251,7 +251,7 @@ async function deployViaAgentStream(appId, version, releaseId, file, onEvent) {
   }
 }
 
-// 列出某应用在 Agent 上的真实历史备份(新→旧);失败返回 null,调用方回退 mock。
+// 列出某应用在 Agent 上的真实历史备份(新→旧);失败返回 null,调用方必须显式处理失败态。
 async function listAgentBackups(appId, agentId) {
   try {
     const r = await fetch(qa(`/api/agent/apps/${encodeURIComponent(appId)}/backups`, agentId), { credentials: 'same-origin' });
