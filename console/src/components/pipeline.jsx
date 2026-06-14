@@ -63,7 +63,7 @@ function makeDeployPlan(app, opt) {
     id: "verify", label: "校验制品", dur: 1400,
     logs: [
       `接收制品 ${opt.fileName} (${opt.size})`,
-      `分块合并完成 · ${opt.chunks}/${opt.chunks} chunks · 断点续传 0 次`,
+      `单次上传完成 · Console 服务端权威计算 sha256`,
       { text: `sha256 ${opt.sha}… 与上传声明一致`, cls: "ok" },
     ],
   });
@@ -328,7 +328,6 @@ function DeployDialog({ app, open, onClose }) {
   // 进程类(go-binary/java-jar/python)且上传了真实文件 → 走 Agent 真实部署;否则(其它类型 / 示例制品)沿用模拟。
   const isReal = isRealType(app.type) && !!realFile;
   const ext = DEPLOY_TYPES[app.type].artifactExt;
-  const chunks = up.file ? Math.ceil(up.file.sizeMB / 4) : 0;
 
   const pickExample = () => {
     setRealFile(null);
@@ -354,7 +353,7 @@ function DeployDialog({ app, open, onClose }) {
       store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result || "failed", real: true });
       return;
     }
-    const plan = makeDeployPlan(app, { fileName: up.file.name, size: up.file.size, chunks, sha, simulateFail });
+    const plan = makeDeployPlan(app, { fileName: up.file.name, size: up.file.size, sha, simulateFail });
     setStage("pipeline");
     pipe.start(plan, (result) => store.finishDeploy(app, { version, size: up.file.size, result }));
   };
@@ -408,7 +407,7 @@ function DeployDialog({ app, open, onClose }) {
                 <Icon name="fileText" size={18} style={{ color: "var(--primary)" }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{up.file.name}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{up.file.size} · {chunks} chunks</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{up.file.size} · 单次上传</div>
                 </div>
                 {up.phase === "ready" ? <Badge tone="success" dot>校验通过</Badge> :
                   up.phase === "hashing" ? <Badge tone="info"><Spinner size={11} /> sha256 校验中</Badge> :

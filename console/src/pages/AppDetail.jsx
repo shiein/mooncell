@@ -197,24 +197,32 @@ function BackupsTab({ app, onRestore }) {
   );
 }
 
+// isConcreteLogPath:可真实 tail 的日志路径——不含 glob(* ? [)、不以 ~ 开头(Agent/Console 都不展开)。
+const isConcreteLogPath = (p) => p && !/[*?[]/.test(p) && !p.startsWith("~");
+
 // ---------- 实时日志 ----------
 function LogViewer({ app }) {
   const genActive = app.status === "running" || app.status === "static" || app.status === "failed";
-  // 进程类应用(systemd journal)优先接 Agent 真实日志流;失败则回退模拟。
-  const canReal = isProcessType(app.type);
   const [realFailed, setRealFailed] = React.useState(false);
-  const useReal = canReal && !realFailed;
 
   const [lines, setLines] = React.useState([]);
   const [follow, setFollow] = React.useState(true);
   const [filter, setFilter] = React.useState("");
   const [onlyMatch, setOnlyMatch] = React.useState(false);
-  // 日志源:__journal__ 跟随进程 journal/pm2;其余为应用声明的具体日志文件(Console 按 logPaths 授权)。
+  // 日志源:__journal__ 跟随进程 journal/pm2(仅进程类有 unit);具体文件为声明的可 tail 日志路径
+  // (排除 glob/tilde——Agent tail 与 Console 精确授权都不展开)。static/tomcat 无 journal,只列文件。
   const JOURNAL = "__journal__";
+  const canJournal = isProcessType(app.type);
+  const fileOpts = (app.logPaths || []).filter(isConcreteLogPath);
   const journalLabel = app.runner === "pm2" ? "进程日志 · pm2" : "进程日志 · journal";
-  const logOptions = [{ value: JOURNAL, label: journalLabel }, ...(app.logPaths || []).map((p) => ({ value: p, label: p }))];
-  const [logSrc, setLogSrc] = React.useState(JOURNAL);
-  const followingFile = logSrc !== JOURNAL;
+  const logOptions = [
+    ...(canJournal ? [{ value: JOURNAL, label: journalLabel }] : []),
+    ...fileOpts.map((p) => ({ value: p, label: p })),
+  ];
+  const [logSrc, setLogSrc] = React.useState(canJournal ? JOURNAL : (fileOpts[0] || ""));
+  const followingFile = logSrc !== JOURNAL && logSrc !== "";
+  // 可走真实 Agent 流:进程类的 journal,或任意类型选中的具体日志文件。
+  const useReal = !realFailed && ((canJournal && logSrc === JOURNAL) || followingFile);
 
   const append = (line) => setLines((s) => { const n = [...s, line]; return n.length > 400 ? n.slice(-400) : n; });
 
@@ -260,7 +268,9 @@ function LogViewer({ app }) {
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <div style={{ width: 300 }}>
-          <Select value={logSrc} onChange={setLogSrc} options={logOptions} style={{ fontFamily: "var(--font-mono)", fontSize: 12 }} />
+          {logOptions.length > 0
+            ? <Select value={logSrc} onChange={setLogSrc} options={logOptions} style={{ fontFamily: "var(--font-mono)", fontSize: 12 }} />
+            : <span style={{ fontSize: 12, color: "var(--muted-fg)" }} className="mono">无可跟随的日志源(未声明具体日志文件)</span>}
         </div>
         <div style={{ position: "relative", width: 220 }}>
           <Icon name="search" size={13} style={{ position: "absolute", left: 9, top: 8, color: "var(--muted-fg)" }} />
@@ -275,8 +285,9 @@ function LogViewer({ app }) {
             : genActive ? (follow ? "tail -F 实时跟随(演示)" : "已暂停") : "进程未运行 · 历史日志"}
         </Badge>
         <Btn size="sm" icon={follow ? "pause" : "play"} onClick={() => setFollow(!follow)}>{follow ? "暂停" : "继续"}</Btn>
-        <Btn size="sm" icon="download" title="导出最近 7 天日志(gzip)" onClick={() => {
-          if (!useReal) { toast("演示应用无真实日志可导出", { tone: "warn" }); return; }
+        <Btn size="sm" icon="download" title="导出最近 7 天进程日志(gzip)" onClick={() => {
+          // 下载导出的是进程 journal/pm2 日志;仅进程类可用(文件 tail 源无对应导出)。
+          if (!canJournal) { toast("仅进程类应用支持导出 journal/pm2 日志", { tone: "warn" }); return; }
           const since = Math.floor((Date.now() - 7 * 24 * 3600 * 1000) / 1000);
           const a = document.createElement("a");
           a.href = `/api/agent/apps/${encodeURIComponent(app.id)}/logs/download?since=${since}`;

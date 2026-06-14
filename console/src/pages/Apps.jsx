@@ -12,7 +12,7 @@ const APP_SCHEMAS = {
     { key: "jvm", label: "JVM 参数", ph: "-Xms512m -Xmx2g", mono: true },
     { key: "user", label: "启动用户", ph: "appuser" },
     { key: "health", label: "健康检查 URL / 端口", ph: "http://127.0.0.1:8080/actuator/health", mono: true },
-    { key: "logs", label: "日志路径(支持通配)", ph: "/srv/apps/my-app/logs/*.log", mono: true },
+    { key: "logs", label: "日志文件路径(用于在线 tail,需具体文件、不支持通配/~)", ph: "/srv/apps/my-app/logs/app.log", mono: true },
   ],
   "tomcat-war": [
     { key: "path", label: "WAR 目标路径(webapps 下)", ph: "/opt/tomcat/webapps/report.war", mono: true },
@@ -98,7 +98,7 @@ function CreateAppDialog({ open, onClose }) {
       status: "stopped", version: "—", pid: null, port: +(form.port || 8080),
       path, interp, workdir: form.workdir || `/srv/apps/${id}`,
       health: form.health || "端口探活 :" + (form.port || 8080), healthType: form.health ? "HTTP 200" : "端口探活",
-      logPaths: [form.logs || `/srv/apps/${id}/logs/*.log`],
+      logPaths: [form.logs || `/srv/apps/${id}/logs/app.log`],
       jvm: form.jvm || form.args || "", user: form.user || "appuser",
       agentId: form.agentId || "default",
       backupKeep: +(form.backupKeep || 5), lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
@@ -189,10 +189,11 @@ function CreateAppDialog({ open, onClose }) {
           {checks.map((c, i) => (
             <div key={i} className="card" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
               {c.st === "pending" ? <Spinner size={14} style={{ color: "var(--muted-fg)" }} /> :
+                c.st === "fail" ? <Icon name="alert" size={15} style={{ color: "var(--error)" }} /> :
                 c.st === "warn" ? <Icon name="alert" size={15} style={{ color: "var(--warn)" }} /> :
                   <Icon name="check" size={15} style={{ color: "var(--success)" }} />}
               <span style={{ fontSize: 13, flex: 1 }} className="mono">{c.label}</span>
-              {c.note ? <span style={{ fontSize: 11.5, color: "var(--warn)" }}>{c.note}</span> : null}
+              {c.note ? <span style={{ fontSize: 11.5, color: c.st === "fail" ? "var(--error)" : "var(--warn)" }}>{c.note}</span> : null}
             </div>
           ))}
           {checksDone && checksBlocked ? <div className="fade-up" style={{ fontSize: 12.5, color: "var(--error)", display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}><Icon name="alert" size={14} />预检未通过,请修正后重试(白名单/端口/运行时)</div> : null}
