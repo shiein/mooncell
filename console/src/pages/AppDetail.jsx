@@ -66,7 +66,7 @@ function OverviewTab({ app, releases }) {
         <div style={grid}>
           <InfoRow label="方式">{app.healthType}</InfoRow>
           <InfoRow label="目标" mono>{app.health}</InfoRow>
-          <InfoRow label="策略">超时 5s · 重试 3 次 · 间隔 3s</InfoRow>
+          <InfoRow label="策略">超时 3s · 重试 5 次 · 间隔 2s</InfoRow>
           <InfoRow label="最近探活">{app.status === "running" ? <Badge tone="success" dot>30s 前 · 200 OK</Badge> : app.status === "failed" ? <Badge tone="error" dot>5 小时前 · 连接被拒绝</Badge> : <Badge>未启用</Badge>}</InfoRow>
         </div>
       </div>

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -494,27 +495,55 @@ func (a *agent) rotateBackups(id string, keep int) {
 
 // ---------- 健康检查 ----------
 
+// httpHealthy:HTTP 探活。2xx/3xx(< 400)即视为存活——只认 200 会把返回 204/302/401
+// 等正常端点误判为失败触发回滚。不跟随重定向(用最后一跳的状态码判定)。
 func httpHealthy(url string) bool {
-	c := &http.Client{Timeout: 3 * time.Second}
+	c := &http.Client{
+		Timeout:       3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := c.Get(url)
 	if err != nil {
 		return false
 	}
 	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	return resp.StatusCode < 400
 }
 
-func healthCheck(url string, logs *[]string) bool {
-	if strings.TrimSpace(url) == "" {
+// tcpHealthy:TCP 端口探活,能建连即视为存活(UI 的"端口探活"由此真正落地)。
+func tcpHealthy(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// probeOnce 按 spec 探活一次:tcp://host:port 走 TCP 连接,其余按 HTTP(s) URL。
+func probeOnce(spec string) bool {
+	if strings.HasPrefix(spec, "tcp://") {
+		return tcpHealthy(strings.TrimPrefix(spec, "tcp://"))
+	}
+	return httpHealthy(spec)
+}
+
+// healthCheck 按健康检查规格探活(带重试):空跳过;tcp:// 端口探活;http(s) HTTP 探活(2xx/3xx 通过)。
+func healthCheck(spec string, logs *[]string) bool {
+	if strings.TrimSpace(spec) == "" {
 		*logs = append(*logs, "未配置健康检查,跳过")
 		return true
 	}
+	kind := "HTTP"
+	if strings.HasPrefix(spec, "tcp://") {
+		kind = "TCP"
+	}
 	for i := 1; i <= healthRetries; i++ {
-		if httpHealthy(url) {
-			*logs = append(*logs, fmt.Sprintf("%s → 200 OK(第 %d 次)", url, i))
+		if probeOnce(spec) {
+			*logs = append(*logs, fmt.Sprintf("%s %s → 通过(第 %d 次)", kind, spec, i))
 			return true
 		}
-		*logs = append(*logs, fmt.Sprintf("%s → 未通过,%s 后重试(%d/%d)", url, healthInterval, i, healthRetries))
+		*logs = append(*logs, fmt.Sprintf("%s %s → 未通过,%s 后重试(%d/%d)", kind, spec, healthInterval, i, healthRetries))
 		if i < healthRetries {
 			time.Sleep(healthInterval)
 		}

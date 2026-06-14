@@ -24,6 +24,7 @@ type appConfig struct {
 	Path       string            `json:"path"`
 	Workdir    string            `json:"workdir"`
 	Health     string            `json:"health"`
+	Port       int               `json:"port"` // 应用端口,用于"端口探活"健康检查
 	Interp     string            `json:"interp"`
 	Jvm        string            `json:"jvm"`
 	User       string            `json:"user"`
@@ -84,7 +85,7 @@ func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID st
 		"name": app.Name, "type": app.Type, "runner": app.Runner,
 		"interpreter": app.Interp,
 		"binPath":     binPath, "workdir": app.Workdir, "user": app.User,
-		"health":         httpHealthURL(app.Health),
+		"health":         healthSpec(app),
 		"version":        version,
 		"releaseId":      releaseID,
 		"expectedSha256": expectedSha256,
@@ -149,10 +150,16 @@ func sha256Reader(r io.Reader) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// httpHealthURL 仅放行 http(s) 健康检查 URL;其它(如「端口探活 :8080」)视为未配置。
-func httpHealthURL(h string) string {
-	if strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") {
-		return h
+// healthSpec 决定下发给 Agent 的健康检查规格:
+//   - 配了 http(s) URL → HTTP 探活(Agent 端 2xx/3xx 通过);
+//   - 否则进程类有端口 → tcp://127.0.0.1:<port> 端口探活(UI 的"端口探活"由此真正落地);
+//   - static-nginx 不做 TCP(无监听端口,由 reload + HTTP 判定),其它情况留空(退化为进程存活)。
+func healthSpec(app appConfig) string {
+	if strings.HasPrefix(app.Health, "http://") || strings.HasPrefix(app.Health, "https://") {
+		return app.Health
+	}
+	if app.Type != "static-nginx" && app.Port > 0 {
+		return fmt.Sprintf("tcp://127.0.0.1:%d", app.Port)
 	}
 	return ""
 }

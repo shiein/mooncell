@@ -4,6 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -344,6 +347,50 @@ func TestPlaceArtifactRejectsRootDir(t *testing.T) {
 	}
 	if !fileExists(filepath.Join(root, "app", "main.py")) {
 		t.Error("独立子目录应正确落盘入口")
+	}
+}
+
+// T7:HTTP 探活 2xx/3xx 通过(不再只认 200);连接失败判失败。
+func TestHttpHealthyAcceptsNon200(t *testing.T) {
+	for _, code := range []int{200, 204, 302, 401} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		ok := httpHealthy(srv.URL)
+		srv.Close()
+		want := code < 400
+		if ok != want {
+			t.Errorf("状态码 %d:httpHealthy=%v, want %v", code, ok, want)
+		}
+	}
+	// 500 应判失败
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer srv.Close()
+	if httpHealthy(srv.URL) {
+		t.Error("500 应判失败")
+	}
+	if httpHealthy("http://127.0.0.1:1") {
+		t.Error("连接失败应判失败")
+	}
+}
+
+// T7:TCP 端口探活——监听中能建连判存活,无监听判失败;probeOnce 按 tcp:// 前缀分发。
+func TestTcpHealthyAndProbe(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+	if !tcpHealthy(addr) {
+		t.Error("监听中的端口应判存活")
+	}
+	if !probeOnce("tcp://" + addr) {
+		t.Error("probeOnce tcp:// 应判存活")
+	}
+	ln.Close()
+	if tcpHealthy(addr) {
+		t.Error("关闭后端口应判失败")
 	}
 }
 
