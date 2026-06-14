@@ -33,7 +33,11 @@ func writePm2Eco(cfg DeployConfig) (string, error) {
 	}
 	switch cfg.Type {
 	case "python":
-		app["interpreter"] = "python3"
+		if ip := strings.TrimSpace(cfg.Interpreter); ip != "" {
+			app["interpreter"] = ip // venv 解释器
+		} else {
+			app["interpreter"] = "python3"
+		}
 	case "java-jar":
 		app["interpreter"] = "java"
 		app["interpreter_args"] = strings.TrimSpace("-jar " + cfg.JvmArgs)

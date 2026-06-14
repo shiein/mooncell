@@ -80,11 +80,15 @@ function CreateAppDialog({ open, onClose }) {
 
   const create = () => {
     const id = (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
+    // python:path 是入口脚本,interp 是解释器(支持 venv);其余类型 path 即制品路径。
+    const path = type === "python"
+      ? `/srv/apps/${id}/${form.entry || "app.py"}`
+      : (form.path || `/srv/apps/${id}/`);
     store.addApp({
       id: id + "-" + Math.random().toString(36).slice(2, 5),
       name: form.name || "未命名应用", type, runner: form.runner || DEPLOY_TYPES[type].runners[0],
       status: "stopped", version: "—", pid: null, port: +(form.port || 8080),
-      path: form.path || form.interp || `/srv/apps/${id}/`, workdir: form.workdir || `/srv/apps/${id}`,
+      path, interp: form.interp || "", workdir: form.workdir || `/srv/apps/${id}`,
       health: form.health || "端口探活 :" + (form.port || 8080), healthType: form.health ? "HTTP 200" : "端口探活",
       logPaths: [form.logs || `/srv/apps/${id}/logs/*.log`],
       jvm: form.jvm || form.args || "", user: form.user || "appuser",

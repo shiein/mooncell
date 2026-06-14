@@ -21,10 +21,11 @@ type DeployConfig struct {
 	Name       string            `json:"name"`
 	Type       string            `json:"type"`    // go-binary | java-jar | static-nginx;空默认 go-binary
 	BinPath    string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
-	Workdir    string            `json:"workdir"`
-	Runner     string            `json:"runner"`  // systemd(默认)| pm2;决定进程托管方式
-	Args       string            `json:"args"`    // 启动参数
-	JvmArgs    string            `json:"jvmArgs"` // java-jar:JVM 参数
+	Workdir     string            `json:"workdir"`
+	Runner      string            `json:"runner"`      // systemd(默认)| pm2;决定进程托管方式
+	Interpreter string            `json:"interpreter"` // python:解释器路径(支持 venv,如 .../venv/bin/python);空则 python3
+	Args        string            `json:"args"`        // 启动参数
+	JvmArgs     string            `json:"jvmArgs"`     // java-jar:JVM 参数
 	Env        map[string]string `json:"env"`
 	User       string            `json:"user"`
 	Health     string            `json:"health"` // HTTP 健康检查 URL,空则跳过
@@ -78,11 +79,10 @@ func execStart(cfg DeployConfig) (string, error) {
 		}
 		return strings.Join(parts, " "), nil
 	case "python":
-		// 首版:单文件入口,system python3 托管运行(systemd 需绝对路径)。
-		// 多文件/venv/requirements 为后续增强。
-		py, err := exec.LookPath("python3")
+		// 入口脚本经解释器运行。Interpreter 指定时用之(支持 venv 的 python),否则 system python3。
+		py, err := pythonInterp(cfg)
 		if err != nil {
-			return "", fmt.Errorf("未找到 python3: %w", err)
+			return "", err
 		}
 		parts := []string{py, cfg.BinPath}
 		if a := strings.TrimSpace(cfg.Args); a != "" {
@@ -96,6 +96,18 @@ func execStart(cfg DeployConfig) (string, error) {
 		}
 		return es, nil
 	}
+}
+
+// pythonInterp 解析 python 解释器:Interpreter 指定则用之(venv 支持),否则 system python3。
+func pythonInterp(cfg DeployConfig) (string, error) {
+	if ip := strings.TrimSpace(cfg.Interpreter); ip != "" {
+		return ip, nil
+	}
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		return "", fmt.Errorf("未找到 python3(或在配置里指定解释器路径): %w", err)
+	}
+	return py, nil
 }
 
 func writeUnit(cfg DeployConfig) error {

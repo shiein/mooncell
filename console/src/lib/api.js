@@ -267,11 +267,12 @@ async function restoreViaAgentStream(appId, config, backup, onEvent, agentId) {
 // 订阅应用运行时日志(Agent journal SSE):先收最近 tail 行再实时跟随。
 // onLine({ts,level,text}) 每行回调;signal 用于暂停/离开时中断。
 // 返回 {ended}|{aborted}|{error}——error 时调用方回退到模拟日志。
-async function streamAppLogs(appId, { tail = 200, signal, onLine, agentId }) {
+async function streamAppLogs(appId, { tail = 200, signal, onLine, agentId, runner }) {
   let r;
   try {
     let url = `/api/agent/apps/${encodeURIComponent(appId)}/logs/stream?tail=${tail}`;
     if (agentId && agentId !== 'default') url += `&agent=${encodeURIComponent(agentId)}`;
+    if (runner === 'pm2') url += `&runner=pm2`;
     r = await fetch(url, { credentials: 'same-origin', signal });
   } catch (e) {
     return e.name === 'AbortError' ? { aborted: true } : { error: 'Agent 不可达: ' + (e.message || e) };

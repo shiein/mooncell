@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// logStream 处理 GET /api/apps/{id}/logs/stream?tail=N(SSE):
-// 跟随 systemd 托管服务(deploy-<id>)的 journald 日志,先吐最近 tail 行再实时跟随。
-// 每行推 `event: line`(含 ts/level/text);客户端断开时 r.Context() 取消,CommandContext 杀掉 journalctl。
+// logStream 处理 GET /api/apps/{id}/logs/stream?tail=N&runner=<systemd|pm2>(SSE):
+// 跟随该应用的运行时日志,先吐最近 tail 行再实时跟随。systemd 走 journald(-o json),
+// pm2 走 `pm2 logs --raw`。每行推 `event: line`;客户端断开时 r.Context() 取消,杀掉子进程。
 func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	tail := r.URL.Query().Get("tail")
@@ -26,10 +26,16 @@ func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// exec.Command 数组传参不经 shell,id 来自单段路径,无注入面;journalctl 只读指定 unit。
-	// -o json:逐行结构化输出,时间/优先级/消息精确可取,免去文本格式与时区的脆弱解析。
-	cmd := exec.CommandContext(r.Context(), "journalctl",
-		"-u", unitName(id), "-n", tail, "-f", "-o", "json", "--no-pager")
+	// exec.Command 数组传参不经 shell,id 来自单段路径,无注入面。
+	var cmd *exec.Cmd
+	if r.URL.Query().Get("runner") == "pm2" {
+		// pm2 应用日志走 pm2 logs --raw(裸消息);parseJournalLine 对非 JSON 行回退为纯文本。
+		cmd = exec.CommandContext(r.Context(), "pm2", "logs", unitName(id), "--lines", tail, "--raw")
+	} else {
+		// journalctl -o json:逐行结构化,时间/优先级/消息精确可取,免去文本格式与时区的脆弱解析。
+		cmd = exec.CommandContext(r.Context(), "journalctl",
+			"-u", unitName(id), "-n", tail, "-f", "-o", "json", "--no-pager")
+	}
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw // journalctl 的错误(无 unit / 权限)也透给前端,便于定位

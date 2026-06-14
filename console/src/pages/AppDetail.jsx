@@ -203,7 +203,7 @@ function LogViewer({ app }) {
     const ac = new AbortController();
     let cancelled = false;
     setLines([]); // 重新拉取 tail,避免暂停后重复
-    streamAppLogs(app.id, { tail: 200, signal: ac.signal, agentId: app.agentId, onLine: (l) => { if (!cancelled) append(l); } })
+    streamAppLogs(app.id, { tail: 200, signal: ac.signal, agentId: app.agentId, runner: app.runner, onLine: (l) => { if (!cancelled) append(l); } })
       .then((res) => { if (res && res.error && !cancelled) setRealFailed(true); });
     return () => { cancelled = true; ac.abort(); };
   }, [useReal, follow, app.id]);
@@ -254,7 +254,7 @@ function LogViewer({ app }) {
       </div>
       <Console lines={shown} filter={filter} height={460} />
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>
-        <span className="mono">{useReal ? `journalctl -u deploy-${app.id}` : logFile}</span>
+        <span className="mono">{useReal ? (app.runner === "pm2" ? `pm2 logs deploy-${app.id}` : `journalctl -u deploy-${app.id}`) : logFile}</span>
         <span>缓冲 {lines.length} / 400 行 · {useReal ? "journald 跟随(轮转安全)" : "轮转安全(fsnotify 重开文件)"}</span>
       </div>
     </div>
