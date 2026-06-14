@@ -269,6 +269,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return
 	}
+	defer cleanupMultipart(r)
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
 

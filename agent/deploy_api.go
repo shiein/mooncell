@@ -10,6 +10,12 @@ import (
 	"strings"
 )
 
+func cleanupMultipart(r *http.Request) {
+	if r.MultipartForm != nil {
+		r.MultipartForm.RemoveAll()
+	}
+}
+
 // prepareDeploy 解析部署请求公共部分:multipart(config + artifact)+ 安全边界校验 + 制品暂存。
 // 成功返回 cfg、暂存路径、清理函数与 ok=true;失败已写好响应,ok=false。
 func (a *agent) prepareDeploy(w http.ResponseWriter, r *http.Request) (DeployConfig, string, func(), bool) {
@@ -30,6 +36,7 @@ func (a *agent) prepareDeploy(w http.ResponseWriter, r *http.Request) (DeployCon
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return zero, "", nil, false
 	}
+	defer cleanupMultipart(r)
 
 	var cfg DeployConfig
 	if err := json.Unmarshal([]byte(r.FormValue("config")), &cfg); err != nil {

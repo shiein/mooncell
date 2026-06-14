@@ -20,6 +20,12 @@ func isMaxBytes(err error) bool {
 	return errors.As(err, &mbe)
 }
 
+func cleanupMultipart(r *http.Request) {
+	if r.MultipartForm != nil {
+		r.MultipartForm.RemoveAll()
+	}
+}
+
 // 文件柜:内网临时文件中转。Console 落盘存二进制(cabinet 目录),元数据复用 entity(kind=cabinet)。
 // 上传/删除限 write 角色;按 id 下载需登录(任意角色);公开文件可凭提取码免登录下载。
 
@@ -57,6 +63,7 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return
 	}
+	defer cleanupMultipart(r)
 	file, hdr, err := r.FormFile("file")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 file 字段"})
