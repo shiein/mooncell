@@ -114,7 +114,7 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	pm2("stop", unitName(cfg.ID))
 	add("停止服务", true, "pm2 stop "+unitName(cfg.ID))
 
-	plog, err := placeArtifact(cfg, artifact)
+	plog, err := a.placeArtifact(cfg, artifact)
 	if err != nil {
 		add("替换制品", false, err.Error())
 		res.Result = "failed"
@@ -155,7 +155,7 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	}
 	rlog := []string{"读取 " + bkDir, "还原备份制品"}
 	pm2("stop", unitName(cfg.ID))
-	if err := restoreArtifactFrom(cfg, bkDir); err != nil {
+	if err := a.restoreArtifactFrom(cfg, bkDir); err != nil {
 		rlog = append(rlog, "还原失败: "+err.Error())
 		add("回滚 · 还原备份", false, rlog...)
 		res.Result = "failed"

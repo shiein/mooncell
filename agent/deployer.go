@@ -377,10 +377,38 @@ func swapDirFromArchive(appDir, archive, format, entry string) error {
 	return nil
 }
 
+// dirEqualsRoot 判断 dir 解析真实路径后是否恰好等于某个部署根。多文件包部署/还原会整体替换
+// appDir(=Dir(binPath)),若 appDir 就是部署根,replace 会摧毁根下所有其它应用——必须拦截。
+func dirEqualsRoot(p string, roots []string) bool {
+	ap, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	real := resolveExisting(ap)
+	for _, r := range roots {
+		ar, err := filepath.Abs(r)
+		if err != nil {
+			continue
+		}
+		rr, err := filepath.EvalSymlinks(ar)
+		if err != nil {
+			rr = filepath.Clean(ar)
+		}
+		if real == rr {
+			return true
+		}
+	}
+	return false
+}
+
 // placeArtifact 落盘制品:python/node 压缩包 → 解到 staging 校验后原子切换(失败旧目录不动);否则单文件原子替换。
-func placeArtifact(cfg DeployConfig, artifact string) (string, error) {
+func (a *agent) placeArtifact(cfg DeployConfig, artifact string) (string, error) {
 	if scriptArchived(cfg, artifact) {
 		appDir := filepath.Dir(cfg.BinPath)
+		// 护栏:整目录替换的目标不得是部署根本身,否则会连带摧毁根下其它应用。
+		if dirEqualsRoot(appDir, a.cfg.Paths.DeployRoots) {
+			return "", fmt.Errorf("多文件包目标目录 %s 即部署根,拒绝整目录替换(会摧毁根下其它应用);请把入口脚本放到独立子目录", appDir)
+		}
 		format := sniffArchive(artifact)
 		if err := swapDirFromArchive(appDir, artifact, format, filepath.Base(cfg.BinPath)); err != nil {
 			return "", err
@@ -395,9 +423,13 @@ func placeArtifact(cfg DeployConfig, artifact string) (string, error) {
 }
 
 // restoreArtifactFrom 从备份还原制品:含 app.tar.gz → 解到 staging 后原子切换;否则单文件原子替换。
-func restoreArtifactFrom(cfg DeployConfig, bkDir string) error {
+func (a *agent) restoreArtifactFrom(cfg DeployConfig, bkDir string) error {
 	if tarPath := filepath.Join(bkDir, "app.tar.gz"); fileExists(tarPath) {
-		return swapDirFromArchive(filepath.Dir(cfg.BinPath), tarPath, "gzip", "")
+		appDir := filepath.Dir(cfg.BinPath)
+		if dirEqualsRoot(appDir, a.cfg.Paths.DeployRoots) {
+			return fmt.Errorf("还原目标目录 %s 即部署根,拒绝整目录替换(会摧毁根下其它应用)", appDir)
+		}
+		return swapDirFromArchive(appDir, tarPath, "gzip", "")
 	}
 	return atomicReplace(filepath.Join(bkDir, "app"), cfg.BinPath)
 }
@@ -693,7 +725,7 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	add("停止服务", true, "systemctl stop "+unitName(cfg.ID))
 
 	// 4. 落盘制品(单文件原子替换 / 多文件智能解包)
-	plog, err := placeArtifact(cfg, artifact)
+	plog, err := a.placeArtifact(cfg, artifact)
 	if err != nil {
 		add("替换制品", false, err.Error())
 		res.Result = "failed"
@@ -736,7 +768,7 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	}
 	rlog := []string{"读取 " + bkDir, "还原备份制品"}
 	sysctl("stop", unitName(cfg.ID))
-	if err := restoreArtifactFrom(cfg, bkDir); err != nil {
+	if err := a.restoreArtifactFrom(cfg, bkDir); err != nil {
 		rlog = append(rlog, "还原失败: "+err.Error())
 		add("回滚 · 还原备份", false, rlog...)
 		res.Result = "failed"

@@ -316,6 +316,37 @@ func TestExtractArchiveSmart(t *testing.T) {
 	}
 }
 
+// T4:多文件包整目录替换的目标不得是部署根本身,否则会摧毁根下其它应用。
+func TestPlaceArtifactRejectsRootDir(t *testing.T) {
+	root := t.TempDir()
+	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{root}}}}
+	archive := filepath.Join(t.TempDir(), "pkg.tar.gz")
+	makeTarGz(t, archive, map[string]string{"main.py": "print(1)"})
+
+	// 同时放一个"其它应用"的文件在根下,验证被拒绝时它不被摧毁。
+	sibling := filepath.Join(root, "other-app")
+	os.MkdirAll(sibling, 0755)
+	os.WriteFile(filepath.Join(sibling, "keep.txt"), []byte("x"), 0644)
+
+	// binPath 直接在根级 → appDir = root → 必须拒绝
+	cfgBad := DeployConfig{Type: "python", BinPath: filepath.Join(root, "main.py")}
+	if _, err := a.placeArtifact(cfgBad, archive); err == nil {
+		t.Error("appDir 等于部署根时应拒绝整目录替换")
+	}
+	if !fileExists(filepath.Join(sibling, "keep.txt")) {
+		t.Fatal("被拒绝时根目录下其它应用不应被摧毁")
+	}
+
+	// binPath 在独立子目录 → appDir = root/app → 应通过
+	cfgOK := DeployConfig{Type: "python", BinPath: filepath.Join(root, "app", "main.py")}
+	if _, err := a.placeArtifact(cfgOK, archive); err != nil {
+		t.Errorf("独立子目录应通过: %v", err)
+	}
+	if !fileExists(filepath.Join(root, "app", "main.py")) {
+		t.Error("独立子目录应正确落盘入口")
+	}
+}
+
 // 安全解包:拒绝路径穿越(zip-slip)与链接条目。
 func TestExtractRejectsTraversalAndLinks(t *testing.T) {
 	dir := t.TempDir()
