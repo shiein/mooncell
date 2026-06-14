@@ -29,7 +29,23 @@ type appConfig struct {
 	User       string            `json:"user"`
 	AgentID    string            `json:"agentId"`
 	BackupKeep float64           `json:"backupKeep"`
+	Reload     bool              `json:"reload"` // static/tomcat:部署后是否触发 reload 钩子
 	Env        map[string]string `json:"env"`
+}
+
+// reloadActionFor 按应用类型把「是否 reload」表意映射到 Agent 白名单内的固定动作名。
+// 前端只能开关 bool,动作名由服务端按类型决定,前端无法注入任意动作;Agent 侧另有白名单二次校验。
+func reloadActionFor(typ string, reload bool) string {
+	if !reload {
+		return ""
+	}
+	switch typ {
+	case "static-nginx":
+		return "nginx-reload"
+	case "tomcat-war":
+		return "tomcat-restart"
+	}
+	return ""
 }
 
 // buildAgentConfig 据已存应用配置 + 本次 version + 制品 sha256 生成下发给 Agent 的部署配置 JSON。
@@ -56,6 +72,10 @@ func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID st
 		"releaseId":      releaseID,
 		"expectedSha256": expectedSha256,
 		"backupKeep":     keep,
+	}
+	// static/tomcat 的部署后 reload 钩子:服务端按类型映射白名单动作名(空则不下发)。
+	if rc := reloadActionFor(app.Type, app.Reload); rc != "" {
+		cfg["reloadCmd"] = rc
 	}
 	// jvm 字段按类型映射:java 是 JVM 参数,其余是启动参数。
 	if app.Type == "java-jar" {

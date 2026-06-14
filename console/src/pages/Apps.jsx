@@ -15,10 +15,9 @@ const APP_SCHEMAS = {
     { key: "logs", label: "日志路径(支持通配)", ph: "/srv/apps/my-app/logs/*.log", mono: true },
   ],
   "tomcat-war": [
-    { key: "path", label: "Tomcat 目录", ph: "/opt/tomcat", mono: true },
-    { key: "webapp", label: "webapps 名称", ph: "report", mono: true },
-    { key: "clean", label: "替换前清理解压目录", type: "switch", def: true },
-    { key: "jvm", label: "JAVA_OPTS", ph: "-Xmx1g", mono: true },
+    { key: "path", label: "WAR 目标路径(webapps 下)", ph: "/opt/tomcat/webapps/report.war", mono: true },
+    { key: "health", label: "健康检查 URL / 端口", ph: "http://127.0.0.1:8081/report/ 或 端口探活 :8081", mono: true },
+    { key: "reload", label: "部署后 systemctl restart tomcat", type: "switch", def: false },
   ],
   "go-binary": [
     { key: "path", label: "二进制目标路径", ph: "/srv/apps/my-app/server", mono: true },
