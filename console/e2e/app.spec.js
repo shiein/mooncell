@@ -84,13 +84,13 @@ test('Runner 不可用时预检提交首个可用 Runner(systemd 而非 pm2)', a
   expect(req.url()).not.toContain('runner=pm2');
 });
 
-test('tomcat-war 的 tomcat Runner 按能力置灰(Agent 无 Tomcat)', async ({ page }) => {
+test('tomcat-war 的 tomcat Runner 置灰(caps 缺 tomcat key → fail-closed)', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: '应用 Applications' }).click();
   await page.getByRole('button', { name: /新建应用/ }).click();
   await page.getByRole('button', { name: /Tomcat WAR/ }).click();
   await page.getByRole('button', { name: '下一步', exact: true }).click();
-  // 假 Agent 报 tomcat 不可用 → tomcat Runner option 置灰(不再恒可用)
+  // 假 Agent 能力清单不含 tomcat key → fail-closed:tomcat Runner option 置灰(不再恒可用)
   await expect(page.locator('option[value="tomcat"]')).toBeDisabled();
 });
 

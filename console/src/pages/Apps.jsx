@@ -122,12 +122,13 @@ function CreateAppDialog({ open, onClose }) {
   const schema = type ? APP_SCHEMAS[type] : [];
   const runnersOf = type ? DEPLOY_TYPES[type].runners : [];
   // Runner 可用性据选中 Agent 的真实能力清单:仅静态类(无进程/软链)无运行时依赖恒可用;
-  // tomcat/pm2/systemd 等均按 caps 判定。能力未知(Agent 不可达)不禁用、留给预检/部署校验。
+  // tomcat/pm2/systemd 等均按 caps 判定。能力未知(caps===null=Agent 不可达)才降级不禁用、留预检兜底;
+  // caps 已加载但缺该 key → fail-closed 视为不可用(与 Agent 预检一致,不放过未自检出的能力)。
   const capOk = (r) => {
-    if (r === "无进程" || r === "软链") return true; // 静态类无运行时依赖;tomcat 有 caps 依赖,走下方判定
-    if (!caps) return true;
+    if (r === "无进程" || r === "软链") return true;
+    if (!caps) return true; // Agent 不可达降级
     const c = caps.find((x) => x.key === r);
-    return c ? c.ok : true;
+    return c ? c.ok : false; // caps 已加载却无此 key → fail-closed
   };
   // selectedRunner:UI 显示值、预检、创建保存共用同一个 Runner——用户手选则用之,
   // 否则取首个能力可用的 Runner(没有则首个)。杜绝「UI 显示 systemd 却提交 pm2」。
@@ -141,7 +142,7 @@ function CreateAppDialog({ open, onClose }) {
     let available = true;
     if (r !== "无进程" && r !== "软链" && caps) {
       const c = caps.find((x) => x.key === r);
-      available = c ? c.ok : true;
+      available = c ? c.ok : false; // 与 capOk 一致:caps 已加载却缺 key → 不可用
     }
     if (!inType || !available) setForm((f) => ({ ...f, runner: undefined }));
   }, [caps, type, form.agentId, form.runner]);

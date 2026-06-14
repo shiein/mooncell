@@ -20,10 +20,12 @@ printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n[agen
 ( cd "$DIR" && "$BIN" >"$DIR/console.log" 2>&1 & echo $! > "$DIR/pid" )
 
 cleanup() {
-  [ -f "$DIR/pid" ] && kill -9 "$(cat "$DIR/pid")" 2>/dev/null || true
-  kill -9 "$FAKE_PID" 2>/dev/null || true
-  pkill -9 -f mc-console-e2e 2>/dev/null || true
-  pkill -9 -f "e2e/fake-agent.mjs" 2>/dev/null || true
+  # 先 TERM 优雅退出并 wait 收割,避免 SIGKILL 的「Killed: 9」噪音;再兜底 pkill。
+  [ -f "$DIR/pid" ] && kill "$(cat "$DIR/pid")" 2>/dev/null || true
+  [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null || true
+  wait 2>/dev/null || true
+  pkill -f mc-console-e2e 2>/dev/null || true
+  pkill -f "e2e/fake-agent.mjs" 2>/dev/null || true
   rm -rf "$DIR"
 }
 trap cleanup EXIT INT TERM

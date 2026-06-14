@@ -16,7 +16,7 @@ const srv = http.createServer((req, res) => {
       { key: 'node', label: 'Node', ok: false, ver: '未检测到' },
       { key: 'python', label: 'Python', ok: true, ver: '3.12' },
       { key: 'nginx', label: 'nginx', ok: false, ver: '未检测到' },
-      { key: 'tomcat', label: 'Tomcat', ok: false, ver: '未检测到' },
+      // 故意不含 tomcat:验证 UI 对「caps 已加载但缺该 key」的 fail-closed(置灰)处理。
     ],
   });
   if (p === '/api/system') return json(res, 200, { cpuPercent: 10, memPercent: 20, disk: { usedPercent: 30 } });
