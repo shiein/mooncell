@@ -63,5 +63,15 @@ backup_dir   = "/opt/deploy-agent/backups"
 - 所有落盘/读日志路径经 `deploy_roots` / `log_roots` 白名单校验(防穿越)。
 - reload 钩子为白名单动作枚举(非自由 shell);systemd unit 字段拒绝换行/控制字符注入。
 - `releaseId` 幂等:本地记录成功结果,重复请求直接返回缓存。
+- 制品上传经 `[deploy] max_upload_mb` 传输层硬上限(默认 1024MB,超限 413),防超大制品撑爆磁盘。
+- 多文件包整目录替换的目标(`Dir(binPath)`)不得为某个 `deploy_root` 本身,否则拒绝(防摧毁根下其它应用)。
+
+### 日志文件 tail 的授权边界
+
+- Agent 侧:`log_roots` 白名单是**穿越/越界**的硬边界(路径规范化后须落在白名单根内)。
+- Console 侧:文件 tail 还要求路径属于该应用**已声明的 `logPaths`**(规范化后精确比对,仅绝对路径)。
+  这道闸主要约束 **viewer(只读角色)**——viewer 不能改 `logPaths`,只能 tail 管理员/operator 声明过的日志。
+- 对 admin/operator 不是提权:他们本就能通过部署任意制品在目标机执行代码读文件,声明 `logPath` 不构成新能力。
+  因此 `log_roots` 应按需收窄(如无必要不要纳入 `/var/log` 全量)。
 
 设计详见 [../docs/deploy-platform-design-v1.md](../docs/deploy-platform-design-v1.md);完成度见 [../README.md](../README.md)。

@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strings"
 )
 
@@ -108,11 +109,21 @@ func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID st
 	return b, app.AgentID, err
 }
 
-// appDeclaresLog 校验请求的日志文件路径是否在该应用已存配置声明的 logPaths 内(精确匹配)。
-// 应用不存在或路径不在声明内即拒绝——日志文件 tail 的授权边界,防越权读他应用/任意文件。
+// appDeclaresLog 校验请求的日志文件路径是否在该应用已存配置声明的 logPaths 内。
+//
+// 信任边界(务必理解):这是给 **viewer(只读角色)** 的授权闸——viewer 不能改 logPaths
+// (那是 admin/operator 的 write 权限),故只能 tail 管理员/operator 声明过的日志,符合"只读看日志"。
+// 对 admin/operator 而言这不是提权:他们本就能通过部署任意制品/脚本在目标机执行代码读任意文件,
+// 声明 logPath 不构成新能力。真正的穿越/越界由 Agent 端 log_roots 白名单兜底(防路径穿越)。
+//
+// 匹配收紧为"必须绝对路径 + 规范化比对",fail-closed:相对路径/含 ../ 一律拒绝,规范化后精确相等才放行。
 func (a *api) appDeclaresLog(id, path string) bool {
 	if path == "" {
 		return false
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return false // 拒绝相对路径 / 穿越,只接受绝对路径
 	}
 	raw, ok := a.store.getEntity("app", id)
 	if !ok {
@@ -123,7 +134,7 @@ func (a *api) appDeclaresLog(id, path string) bool {
 		return false
 	}
 	for _, p := range app.LogPaths {
-		if p == path {
+		if filepath.Clean(p) == clean {
 			return true
 		}
 	}

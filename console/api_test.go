@@ -281,4 +281,15 @@ func TestAppDeclaresLog(t *testing.T) {
 	if a.appDeclaresLog("nope", "/srv/apps/x/logs/app.log") {
 		t.Error("应用不存在必须拒绝")
 	}
+	// 规范化后等价的路径应放行(/./、重复斜杠)
+	if !a.appDeclaresLog("x", "/srv/apps/x/logs/./app.log") {
+		t.Error("规范化后等价的已声明路径应放行")
+	}
+	// 相对路径 / 穿越必须拒绝(fail-closed)
+	if a.appDeclaresLog("x", "srv/apps/x/logs/app.log") {
+		t.Error("相对路径必须拒绝")
+	}
+	if a.appDeclaresLog("x", "/srv/apps/x/logs/../../other/secret.log") {
+		t.Error("穿越路径规范化后不在声明内,必须拒绝")
+	}
 }
