@@ -208,6 +208,9 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.
 		target += " " + version
 	}
 	a.store.appendAudit(user, action, target, auditResultText(result))
+	if result != "" {
+		a.store.appendRelease(appID, version, result, user) // 服务端权威发布记录(真实结果,前端不再伪造)
+	}
 	if releaseID != "" {
 		a.store.putDeploy(releaseID, appID, result) // 幂等:记录该 release 的最终结果
 	}

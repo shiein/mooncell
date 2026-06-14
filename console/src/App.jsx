@@ -108,8 +108,9 @@ function App() {
       const now = Date.now();
       const backup = { id: "b" + now, appId: app.id, version: app.version, time: now, size: size || "—", auto: true, operator: user, dir: tsDir(now), note: "" };
       const release = { id: "r" + now, appId: app.id, version, status: result, time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" };
-      setBackups((s) => [backup, ...s]); persist("backup", backup);
-      setReleases((s) => [release, ...s]); persist("release", release);
+      // 真实部署:release 由 Console 服务端权威落库、backup 在 Agent 真实生成;前端只乐观显示不落库。
+      setBackups((s) => [backup, ...s]); if (!real) persist("backup", backup);
+      setReleases((s) => [release, ...s]); // release 服务端权威,前端不落库(刷新读服务端记录)
       if (result === "success") {
         patchApp(app.id, {
           version, lastDeploy: now,
@@ -139,7 +140,8 @@ function App() {
     finishRestore(app, backup, { real } = {}) {
       const now = Date.now();
       const bak = { id: "b" + now, appId: app.id, version: app.version, time: now, size: backup.size, auto: true, operator: user, dir: tsDir(now), note: "还原前自动备份" };
-      setBackups((s) => [bak, ...s]); persist("backup", bak);
+      // 真实还原:还原前备份在 Agent 真实生成、release 由服务端落库;前端只乐观显示。
+      setBackups((s) => [bak, ...s]); if (!real) persist("backup", bak);
       patchApp(app.id, {
         version: backup.version, lastDeploy: now,
         status: app.type === "static-nginx" ? "static" : "running",

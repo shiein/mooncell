@@ -13,6 +13,10 @@ var keyOfKind = map[string]string{
 	"app": "apps", "release": "releases", "backup": "backups", "cabinet": "cabinet", "audit": "audit",
 }
 
+// serverOnlyKinds:权威实体,只由服务端在真实操作时写(审计 append、发布记录 appendRelease),
+// 禁止前端经通用 PUT/DELETE 直写伪造。
+var serverOnlyKinds = map[string]bool{"audit": true, "release": true}
+
 // hydrate 处理 POST /api/data:body 为前端 INITIAL_* 种子(仅库为空时使用),
 // 始终返回库中当前全部业务数据。前端据此首启种子、后续重载取持久化数据。
 func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
@@ -65,9 +69,9 @@ func (a *api) putEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法 kind 或 id"})
 		return
 	}
-	// 审计为权威记录,只允许服务端在真实操作时 append(appendAudit),禁止前端直接写入伪造。
-	if kind == "audit" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "审计日志为服务端只追加,不可前端写入"})
+	// 审计/发布记录为权威记录,只允许服务端在真实操作时写,禁止前端直接写入伪造。
+	if serverOnlyKinds[kind] {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "该实体为服务端权威记录,不可前端写入"})
 		return
 	}
 	var data json.RawMessage
@@ -89,8 +93,8 @@ func (a *api) deleteEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法 kind 或 id"})
 		return
 	}
-	if kind == "audit" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "审计日志不可前端删除"})
+	if serverOnlyKinds[kind] {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "服务端权威记录不可前端删除"})
 		return
 	}
 	if err := a.store.deleteEntity(kind, id); err != nil {

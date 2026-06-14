@@ -23,20 +23,22 @@ func TestPutDeleteEntityRejectsAudit(t *testing.T) {
 	defer s.Close()
 	a := &api{store: s}
 
-	for _, m := range []struct {
-		name string
-		call func(http.ResponseWriter, *http.Request)
-		req  *http.Request
-	}{
-		{"PUT", a.putEntity, httptest.NewRequest("PUT", "/api/data/audit/x", strings.NewReader(`{"id":"x"}`))},
-		{"DELETE", a.deleteEntity, httptest.NewRequest("DELETE", "/api/data/audit/x", nil)},
-	} {
-		m.req.SetPathValue("kind", "audit")
-		m.req.SetPathValue("id", "x")
-		w := httptest.NewRecorder()
-		m.call(w, m.req)
-		if w.Code != http.StatusForbidden {
-			t.Errorf("%s kind=audit 应 403,得 %d", m.name, w.Code)
+	for _, kind := range []string{"audit", "release"} {
+		for _, m := range []struct {
+			name string
+			call func(http.ResponseWriter, *http.Request)
+			req  *http.Request
+		}{
+			{"PUT", a.putEntity, httptest.NewRequest("PUT", "/api/data/"+kind+"/x", strings.NewReader(`{"id":"x"}`))},
+			{"DELETE", a.deleteEntity, httptest.NewRequest("DELETE", "/api/data/"+kind+"/x", nil)},
+		} {
+			m.req.SetPathValue("kind", kind)
+			m.req.SetPathValue("id", "x")
+			w := httptest.NewRecorder()
+			m.call(w, m.req)
+			if w.Code != http.StatusForbidden {
+				t.Errorf("%s kind=%s 应 403,得 %d", m.name, kind, w.Code)
+			}
 		}
 	}
 
@@ -51,16 +53,19 @@ func TestPutDeleteEntityRejectsAudit(t *testing.T) {
 	}
 }
 
-// 服务端审计追加可用,且确实落库。
-func TestAppendAudit(t *testing.T) {
+// 服务端审计/发布记录追加可用,且确实落库。
+func TestAppendAuditAndRelease(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()
 	if err := s.appendAudit("admin", "部署", "x v1", "成功"); err != nil {
 		t.Fatalf("appendAudit err: %v", err)
 	}
+	if err := s.appendRelease("x", "v1", "success", "admin"); err != nil {
+		t.Fatalf("appendRelease err: %v", err)
+	}
 	got, err := s.loadEntities()
-	if err != nil || len(got["audit"]) != 1 {
-		t.Fatalf("审计应落库 1 条,得 %d (err=%v)", len(got["audit"]), err)
+	if err != nil || len(got["audit"]) != 1 || len(got["release"]) != 1 {
+		t.Fatalf("审计/发布各应落库 1 条,得 audit=%d release=%d (err=%v)", len(got["audit"]), len(got["release"]), err)
 	}
 }
 

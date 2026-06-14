@@ -116,6 +116,19 @@ func (s *Store) cabinetByCode(code string) (map[string]any, bool) {
 	return nil, false
 }
 
+// appendRelease 服务端权威写一条发布记录:真实部署/还原完成后,Console 据 Agent 实际结果落库,
+// 不依赖前端伪造。status ∈ success|rolledback|failed,source=agent 标识权威记录。
+func (s *Store) appendRelease(appID, version, status, operator string) error {
+	id := fmt.Sprintf("r%d", time.Now().UnixNano())
+	rec := map[string]any{
+		"id": id, "appId": appID, "version": version, "status": status,
+		"time": time.Now().UnixMilli(), "operator": operator,
+		"duration": "", "size": "—", "source": "agent",
+	}
+	b, _ := json.Marshal(rec)
+	return s.putEntity("release", id, b)
+}
+
 // appendAudit 服务端权威写一条审计实体:真实操作(经 Agent 的部署/还原)由 Console 据会话与
 // Agent 实际结果落库,不依赖前端乐观上报。source=agent 标识其为权威记录(区别于前端模拟操作)。
 func (s *Store) appendAudit(user, action, target, result string) error {
