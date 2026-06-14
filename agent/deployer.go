@@ -551,18 +551,18 @@ func healthCheck(spec string, logs *[]string) bool {
 	return false
 }
 
-// processHealthy 进程类健康判定:配置了 HTTP 健康检查走 HTTP;否则退化为「进程是否真的在托管运行」。
-// 杜绝「启动失败 + 未配健康检查」被误判为成功——alive 由各 Runner 传入(systemd is-active / pm2 online)。
+// processHealthy 进程类健康判定:必须先确认托管进程 active/online,再做可选 HTTP/TCP 探活。
+// 杜绝「systemctl/pm2 启动失败,但 health URL 被旧进程/其它服务打通」被误判为成功。
 func processHealthy(healthURL string, alive bool, logs *[]string) bool {
+	if !alive {
+		*logs = append(*logs, "进程未处于托管运行态(active/online),判定失败")
+		return false
+	}
 	if strings.TrimSpace(healthURL) != "" {
 		return healthCheck(healthURL, logs)
 	}
-	if alive {
-		*logs = append(*logs, "未配置 HTTP 健康检查 · 进程托管状态正常(active/online)")
-		return true
-	}
-	*logs = append(*logs, "未配置 HTTP 健康检查 · 进程未处于运行态(启动失败)")
-	return false
+	*logs = append(*logs, "未配置 HTTP 健康检查 · 进程托管状态正常(active/online)")
+	return true
 }
 
 // reloadActions 是 static/tomcat 部署后可选 reload 钩子的白名单:动作名 → 固定 argv(不经 shell)。

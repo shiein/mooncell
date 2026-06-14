@@ -114,6 +114,22 @@ func TestProcessHealthyGate(t *testing.T) {
 	}
 }
 
+func TestProcessHealthyRequiresManagedProcessEvenWithHealth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	var logs []string
+	if processHealthy(srv.URL, false, &logs) {
+		t.Fatal("HTTP health 通过但托管进程未运行,仍应判失败")
+	}
+	logs = nil
+	if !processHealthy(srv.URL, true, &logs) {
+		t.Fatal("托管进程运行且 HTTP health 通过,应判成功")
+	}
+}
+
 // copyToTemp:还原源保护——拷贝独立副本,清理后删除。
 func TestCopyToTemp(t *testing.T) {
 	dir := t.TempDir()
