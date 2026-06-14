@@ -612,3 +612,45 @@ func TestInstallPyRequirements(t *testing.T) {
 	}
 	_ = log
 }
+
+// fakePm2OnPath 在 PATH 前置一个假的 pm2:记录调用、pid 返回固定值、其余返回 ok。
+// 用于把 pm2 部署路径从「stand-in」提升为「编排逻辑集成验证」,不依赖真机装 pm2。
+func fakePm2OnPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls.log")
+	script := "#!/bin/sh\necho \"$@\" >> " + calls + "\ncase \"$1\" in\n  pid) echo 12345 ;;\n  jlist) echo '[]' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "pm2"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return calls
+}
+
+// pm2 部署编排集成验证:用假 pm2 驱动 runDeployPm2 全流程,验证 stop/delete/start/pid 调用与成功判定。
+func TestRunDeployPm2Orchestration(t *testing.T) {
+	calls := fakePm2OnPath(t)
+	work := t.TempDir()
+	binPath := filepath.Join(work, "app")
+	artifact := filepath.Join(work, "artifact.bin")
+	os.WriteFile(artifact, []byte("#!/bin/true\n"), 0755)
+
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(work, "backups")}}}
+	cfg := DeployConfig{ID: "fakepm2", Type: "go-binary", Runner: "pm2", BinPath: binPath, Workdir: work, Version: "v1"}
+	res := a.runDeployPm2(cfg, artifact, func(Step) {})
+	if res.Result != "success" {
+		t.Fatalf("假 pm2 在线应判 success,got %q · steps=%v", res.Result, res.Steps)
+	}
+	// 制品已落盘
+	if !fileExists(binPath) {
+		t.Error("制品应已落盘到 BinPath")
+	}
+	// 验证编排调用顺序里有 stop / start / pid
+	logb, _ := os.ReadFile(calls)
+	log := string(logb)
+	for _, want := range []string{"stop deploy-fakepm2", "start", "pid deploy-fakepm2"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("pm2 调用应包含 %q,实际:\n%s", want, log)
+		}
+	}
+}
