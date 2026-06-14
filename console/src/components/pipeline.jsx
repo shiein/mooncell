@@ -48,7 +48,7 @@ function startLogs(app, pid) {
     case "systemd": return [`systemctl daemon-reload`, `systemctl start deploy-${app.id}.service`, `进程已启动 · pid ${pid} · 由 systemd 托管(崩溃自动拉起)`];
     case "pm2": return [`pm2 start ecosystem.config.js --only ${app.id}`, `pm2: [${app.id}](0) ✓ online · pid ${pid}`];
     case "tomcat": return [`执行 ${app.workdir}/bin/startup.sh`, `Tomcat started · pid ${pid}`];
-    default: return [`nohup 启动 · 工作目录 ${app.workdir}`, `写入 pidfile · pid ${pid} 由 Agent 托管`];
+    default: return [`原子切换软链 → 新 release`, `无常驻进程 · 由 Web 服务器直接 serve`];
   }
 }
 

@@ -108,7 +108,7 @@ function CreateAppDialog({ open, onClose }) {
   const typeEntries = Object.entries(DEPLOY_TYPES);
   const schema = type ? APP_SCHEMAS[type] : [];
   const runnersOf = type ? DEPLOY_TYPES[type].runners : [];
-  const capOk = (r) => r === "无进程" || r === "nohup" || (AGENT.caps.find((c) => c.key === r) || { ok: true }).ok;
+  const capOk = (r) => r === "无进程" || r === "软链" || r === "tomcat" || (AGENT.caps.find((c) => c.key === r) || { ok: true }).ok;
 
   return (
     <Dialog open={open} onClose={onClose} width={620}

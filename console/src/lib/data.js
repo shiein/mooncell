@@ -85,7 +85,7 @@ const INITIAL_APPS = [
     artifactName: "gateway-linux-arm64", extraFiles: ["config.toml"],
   },
   {
-    id: "algo-svc", name: "算法分析服务", type: "python", runner: "nohup",
+    id: "algo-svc", name: "算法分析服务", type: "python", runner: "systemd",
     status: "failed", version: "v0.8.2", pid: null, port: 8090,
     path: "/srv/apps/algo/main.py", workdir: "/srv/apps/algo",
     health: "http://127.0.0.1:8090/ping", healthType: "HTTP 200",
@@ -115,7 +115,7 @@ const INITIAL_APPS = [
     artifactName: "dq-frontend-dist", extraFiles: [],
   },
   {
-    id: "job-scheduler", name: "定时任务调度器", type: "java-jar", runner: "nohup",
+    id: "job-scheduler", name: "定时任务调度器", type: "java-jar", runner: "systemd",
     status: "stopped", version: "v1.1.0", pid: null, port: 8085,
     path: "/srv/apps/scheduler/scheduler.jar", workdir: "/srv/apps/scheduler",
     health: "端口探活 :8085", healthType: "端口探活",
