@@ -116,6 +116,9 @@ func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
 // appStatus 处理 GET /api/apps/{id}/status?runner=<systemd|pm2>:返回进程托管状态。
 func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
 	if r.URL.Query().Get("runner") == "pm2" {
 		online := pm2Online(id)
 		pid, _ := pm2("pid", unitName(id))
@@ -139,6 +142,9 @@ func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 // 真机启停已托管的进程(不重新部署),返回启停后的真实状态。前端不再前端伪造启停/pid。
 func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
 	action := r.URL.Query().Get("action")
 	if action != "start" && action != "stop" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
@@ -174,6 +180,9 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 // undeploy 处理 DELETE /api/apps/{id}:停止并移除 systemd unit(保留制品与备份)。
 func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
 	sysctl("stop", unitName(id))
 	sysctl("disable", unitName(id))
 	os.Remove(unitPath(id))

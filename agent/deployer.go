@@ -27,6 +27,17 @@ var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func validName(s string) bool { return nameRe.MatchString(s) }
 
+// requireValidID 校验 URL 路径里的应用 id;非法即写 400 并返回 ok=false。
+// 所有 /api/apps/{id}/... 入口统一调用——id 会进入 systemd/pm2 unit 名与备份/日志路径,
+// 不能只在 deploy/restore 校验而让 status/启停/下线/日志/备份列表裸用。
+func requireValidID(w http.ResponseWriter, id string) bool {
+	if !validName(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法应用 id(仅允许字母数字 . _ -,1–64 位): " + id})
+		return false
+	}
+	return true
+}
+
 // validIDAndRelease 校验应用 id(必填)与 releaseId(选填,非空则校验)是否合法。
 func validIDAndRelease(id, rid string) (string, bool) {
 	if !validName(id) {
@@ -547,9 +558,11 @@ type releaseRecord struct {
 }
 
 // releaseFingerprint 用足以区分一次部署/还原意图的字段构成指纹:
-// 制品 sha(部署时 Console 权威填入)+ 落盘路径 + Runner + 版本 + 类型。
-func releaseFingerprint(cfg DeployConfig) string {
-	return strings.Join([]string{cfg.ExpectedSha256, cfg.BinPath, cfg.Runner, cfg.Version, cfg.Type}, "|")
+// 制品 sha(部署时 Console 权威填入)+ 落盘路径 + Runner + 版本 + 类型 + 来源额外标识。
+// fpExtra 用于还原:把恢复源(static 的 releaseTS、进程类的备份目录名)纳入指纹,
+// 否则同 releaseId 用不同备份还原会被误判为「已成功,跳过」。
+func releaseFingerprint(cfg DeployConfig, fpExtra string) string {
+	return strings.Join([]string{cfg.ExpectedSha256, cfg.BinPath, cfg.Runner, cfg.Version, cfg.Type, fpExtra}, "|")
 }
 
 // releaseDone 读取该 (op,app,releaseId) 的已成功记录(仅 success 才算幂等命中),返回结果与记录指纹。
@@ -583,13 +596,13 @@ func (a *agent) lockApp(id string) func() {
 // runIdempotent 是幂等执行骨架:按 op/appId 隔离的 releaseId 幂等 + 同应用串行锁。
 // 命中已成功记录时核对指纹——指纹一致才返回缓存;不一致(同 releaseId 复用于不同制品/配置)
 // 直接拒绝,既不返回旧结果也不执行,杜绝「换了制品却复用 releaseId 拿到旧成功」。
-// run 是实际流水线(部署/还原),由调用方注入。
-func (a *agent) runIdempotent(op string, cfg DeployConfig, emit func(Step), run func(func(Step)) DeployResult) DeployResult {
+// run 是实际流水线(部署/还原),由调用方注入。fpExtra 混入指纹(还原源标识,部署传空)。
+func (a *agent) runIdempotent(op string, cfg DeployConfig, fpExtra string, emit func(Step), run func(func(Step)) DeployResult) DeployResult {
 	if emit == nil {
 		emit = func(Step) {}
 	}
 	defer a.lockApp(cfg.ID)() // 同应用串行,临界区内做幂等检查 + 执行 + 记录
-	fp := releaseFingerprint(cfg)
+	fp := releaseFingerprint(cfg, fpExtra)
 	if cfg.ReleaseID != "" {
 		if cached, cfp, ok := a.releaseDone(op, cfg.ID, cfg.ReleaseID); ok {
 			if cfp != fp {
@@ -608,9 +621,9 @@ func (a *agent) runIdempotent(op string, cfg DeployConfig, emit func(Step), run 
 	return res
 }
 
-// runDeployIdempotent 包裹进程类部署/还原流水线(runDeploy)。op ∈ "deploy"|"restore"。
+// runDeployIdempotent 包裹进程类部署流水线(runDeploy)。部署无还原源,指纹额外标识为空。
 func (a *agent) runDeployIdempotent(op string, cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
-	return a.runIdempotent(op, cfg, emit, func(e func(Step)) DeployResult { return a.runDeploy(cfg, artifact, e) })
+	return a.runIdempotent(op, cfg, "", emit, func(e func(Step)) DeployResult { return a.runDeploy(cfg, artifact, e) })
 }
 
 // runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
@@ -774,7 +787,39 @@ func sniffArchive(path string) string {
 	}
 }
 
-var maxEntryBytes int64 = 4 << 30 // 单文件解包上限 4GB,防 zip/tar 炸弹(var 便于测试覆写)
+var (
+	maxEntryBytes int64 = 4 << 30 // 单文件解包上限 4GB,防 zip/tar 炸弹(var 便于测试覆写)
+	maxTotalBytes int64 = 8 << 30 // 解包总字节上限 8GB,防大量小文件累积撑爆磁盘
+	maxEntryCount       = 50000   // 解包条目数上限,防大量小文件撑爆 inode
+	maxPathDepth        = 32      // 条目相对 dest 的路径深度上限,防超深目录树
+)
+
+// extractLimits 在一次解包过程中累积条目数/总字节,供逐条校验总量。
+type extractLimits struct {
+	count int
+	bytes int64
+}
+
+// check 对一个待写条目做总量/数量/深度校验;超限返回错误。
+func (l *extractLimits) check(rel string) error {
+	l.count++
+	if l.count > maxEntryCount {
+		return fmt.Errorf("压缩包条目数超出上限 %d(疑似炸弹)", maxEntryCount)
+	}
+	if depth := strings.Count(filepath.Clean(rel), string(os.PathSeparator)) + 1; depth > maxPathDepth {
+		return fmt.Errorf("压缩包路径深度超出上限 %d: %s", maxPathDepth, rel)
+	}
+	return nil
+}
+
+// addBytes 累加已写字节并校验总量上限。
+func (l *extractLimits) addBytes(n int64) error {
+	l.bytes += n
+	if l.bytes > maxTotalBytes {
+		return fmt.Errorf("解包总大小超出上限 %d 字节(疑似炸弹)", maxTotalBytes)
+	}
+	return nil
+}
 
 // safeJoin 校验压缩包条目名安全:拒绝绝对路径与 ../ 穿越,确保解析后落在 dest 内。
 func safeJoin(dest, name string) (string, error) {
@@ -798,17 +843,18 @@ func extractArchive(archive, dest, format string) error {
 	if err := os.MkdirAll(dest, 0755); err != nil {
 		return err
 	}
+	lim := &extractLimits{}
 	switch format {
 	case "zip":
-		return extractZipSafe(archive, dest)
+		return extractZipSafe(archive, dest, lim)
 	case "gzip", "tar":
-		return extractTarSafe(archive, dest, format == "gzip")
+		return extractTarSafe(archive, dest, format == "gzip", lim)
 	default:
 		return fmt.Errorf("不支持的压缩格式")
 	}
 }
 
-func extractTarSafe(archive, dest string, gzipped bool) error {
+func extractTarSafe(archive, dest string, gzipped bool, lim *extractLimits) error {
 	f, err := os.Open(archive)
 	if err != nil {
 		return err
@@ -836,13 +882,20 @@ func extractTarSafe(archive, dest string, gzipped bool) error {
 		if err != nil {
 			return err
 		}
+		if err := lim.check(h.Name); err != nil {
+			return err
+		}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0755); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := writeExtracted(target, tr); err != nil {
+			n, werr := writeExtracted(target, tr)
+			if werr != nil {
+				return werr
+			}
+			if err := lim.addBytes(n); err != nil {
 				return err
 			}
 		case tar.TypeSymlink, tar.TypeLink:
@@ -854,7 +907,7 @@ func extractTarSafe(archive, dest string, gzipped bool) error {
 	return nil
 }
 
-func extractZipSafe(archive, dest string) error {
+func extractZipSafe(archive, dest string, lim *extractLimits) error {
 	zr, err := zip.OpenReader(archive)
 	if err != nil {
 		return err
@@ -868,6 +921,9 @@ func extractZipSafe(archive, dest string) error {
 		if err != nil {
 			return err
 		}
+		if err := lim.check(zf.Name); err != nil {
+			return err
+		}
 		if zf.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0755); err != nil {
 				return err
@@ -878,33 +934,37 @@ func extractZipSafe(archive, dest string) error {
 		if err != nil {
 			return err
 		}
-		err = writeExtracted(target, rc)
+		n, werr := writeExtracted(target, rc)
 		rc.Close()
-		if err != nil {
+		if werr != nil {
+			return werr
+		}
+		if err := lim.addBytes(n); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func writeExtracted(target string, src io.Reader) error {
+// writeExtracted 写出一个条目并返回写入字节数;单文件超 maxEntryBytes 即报错(不静默截断)。
+func writeExtracted(target string, src io.Reader) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return err
+		return 0, err
 	}
 	out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0755)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer out.Close()
 	// 多读 1 字节探测是否超限:若写满上限仍有数据,说明被截断/疑似炸弹,报错而非静默落一个残缺文件。
 	n, err := io.Copy(out, io.LimitReader(src, maxEntryBytes+1))
 	if err != nil {
-		return err
+		return n, err
 	}
 	if n > maxEntryBytes {
-		return fmt.Errorf("单文件超出解包上限 %d 字节(疑似压缩炸弹或截断): %s", maxEntryBytes, filepath.Base(target))
+		return n, fmt.Errorf("单文件超出解包上限 %d 字节(疑似压缩炸弹或截断): %s", maxEntryBytes, filepath.Base(target))
 	}
-	return nil
+	return n, nil
 }
 
 // nonHiddenEntries 过滤掉点文件与 __MACOSX(zip 元数据),用于判断压缩包真实顶层结构。

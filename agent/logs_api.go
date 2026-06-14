@@ -17,6 +17,9 @@ import (
 // pm2 走 `pm2 logs --raw`。每行推 `event: line`;客户端断开时 r.Context() 取消,杀掉子进程。
 func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
 	tail := r.URL.Query().Get("tail")
 	if _, err := strconv.Atoi(tail); err != nil || tail == "" {
 		tail = "200"
@@ -94,6 +97,9 @@ func lineLevel(text, base string) string {
 // 按时间范围导出该应用日志(systemd journal / pm2),gzip 打包为 attachment 下载。
 func (a *agent) logDownload(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
 	q := r.URL.Query()
 	fname := unitName(id) + "-logs-" + time.Now().Format("20060102_150405") + ".log.gz"
 	w.Header().Set("Content-Type", "application/gzip")
@@ -130,6 +136,9 @@ func isUnixSec(s string) bool {
 // logFileStream 处理 GET /api/apps/{id}/logs/file/stream?path=&tail= :
 // tail -F 跟随声明的日志文件。path 必须在 log_roots 白名单内(防穿越/越权读任意文件)。
 func (a *agent) logFileStream(w http.ResponseWriter, r *http.Request) {
+	if !requireValidID(w, r.PathValue("id")) {
+		return
+	}
 	path := r.URL.Query().Get("path")
 	if !withinRoots(path, a.cfg.Paths.LogRoots) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "日志路径不在 log_roots 白名单内: " + path})

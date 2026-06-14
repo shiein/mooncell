@@ -77,7 +77,8 @@ func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) Dep
 	}
 	if cfg.Type == "static-nginx" {
 		// static 还原也走 releaseId 幂等(防重复切软链/reload);runIdempotent 内部已加同应用串行锁。
-		return a.runIdempotent("restore", cfg, emit, func(e func(Step)) DeployResult { return a.restoreStatic(cfg, backup, e) })
+		// 恢复源(releaseTS=backup)纳入指纹:同 releaseId 还原到不同 release 不会被误判为已成功跳过。
+		return a.runIdempotent("restore", cfg, "src="+backup, emit, func(e func(Step)) DeployResult { return a.restoreStatic(cfg, backup, e) })
 	}
 	artifact, err := a.backupArtifact(cfg.ID, backup)
 	if err != nil {
@@ -93,7 +94,8 @@ func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) Dep
 		return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
 	}
 	defer cleanup()
-	return a.runDeployIdempotent("restore", cfg, tmp, emit)
+	// 进程类还原:恢复源为备份目录名,纳入指纹。
+	return a.runIdempotent("restore", cfg, "src="+backup, emit, func(e func(Step)) DeployResult { return a.runDeploy(cfg, tmp, e) })
 }
 
 // restoreStatic 把静态站点软链切回指定历史 release(<BinPath>-releases/<ts>/),失败回滚软链。
@@ -144,14 +146,21 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 		res.Result = "failed"
 		return res
 	}
-	switchSymlink(prevTarget, cfg.BinPath)
-	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
-	var rh []string
-	ok := rerr == nil && healthCheck(cfg.Health, &rh)
+	// 切回失败必须如实反映——否则切回没成功却因 reload/health 没报错被误记为已回滚。
+	swErr := switchSymlink(prevTarget, cfg.BinPath)
 	rlogs := []string{"切回 " + prevTarget}
+	if swErr != nil {
+		rlogs = append(rlogs, "切回失败: "+swErr.Error())
+		add("回滚 · 软链", false, rlogs...)
+		res.Result = "failed"
+		return res
+	}
+	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
 	if rloadLog != "" {
 		rlogs = append(rlogs, rloadLog)
 	}
+	var rh []string
+	ok := rerr == nil && healthCheck(cfg.Health, &rh)
 	add("回滚 · 软链", ok, append(rlogs, rh...)...)
 	if ok {
 		res.Result = "rolledback"
@@ -215,6 +224,9 @@ func (a *agent) listReleases(w http.ResponseWriter, r *http.Request) {
 // 备份目录不存在(尚未部署过)返回空列表,而非错误。
 func (a *agent) listBackups(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
 	dir := filepath.Join(a.cfg.Paths.BackupDir, id)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

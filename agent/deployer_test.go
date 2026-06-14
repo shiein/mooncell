@@ -158,21 +158,83 @@ func TestIdempotencyFingerprintConflict(t *testing.T) {
 	cfg1 := DeployConfig{ID: "app1", ReleaseID: "R1", Type: "go-binary", BinPath: "/srv/apps/app1/app", Runner: "systemd", Version: "v1", ExpectedSha256: "aaa"}
 	// 首次:执行并记录成功
 	ran := 0
-	res := a.runIdempotent("deploy", cfg1, nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success", Version: "v1"} })
+	res := a.runIdempotent("deploy", cfg1, "", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success", Version: "v1"} })
 	if res.Result != "success" || ran != 1 {
 		t.Fatalf("首次应执行成功: %q ran=%d", res.Result, ran)
 	}
 	// 同 releaseId 同指纹:幂等跳过,不再执行
-	a.runIdempotent("deploy", cfg1, nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	a.runIdempotent("deploy", cfg1, "", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
 	if ran != 1 {
 		t.Errorf("同指纹应幂等跳过,不应再执行,ran=%d", ran)
 	}
 	// 同 releaseId 不同制品(sha 变):拒绝,既不返回旧 success 也不执行
 	cfg2 := cfg1
 	cfg2.ExpectedSha256 = "bbb"
-	res2 := a.runIdempotent("deploy", cfg2, nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	res2 := a.runIdempotent("deploy", cfg2, "", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
 	if res2.Result == "success" || ran != 1 {
 		t.Errorf("不同指纹复用 releaseId 应被拒绝(不执行不返回旧成功): result=%q ran=%d", res2.Result, ran)
+	}
+}
+
+// 还原:同 releaseId 用不同恢复源(fpExtra)不应被误判为已成功跳过。
+func TestRestoreFingerprintIncludesSource(t *testing.T) {
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: t.TempDir()}}}
+	cfg := DeployConfig{ID: "app1", ReleaseID: "R1", Type: "static-nginx", BinPath: "/srv/apps/app1/site", Version: "v1"}
+	ran := 0
+	// 用备份 A 还原成功并记录
+	r1 := a.runIdempotent("restore", cfg, "src=bakA", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	if r1.Result != "success" || ran != 1 {
+		t.Fatalf("首次还原应成功: %q ran=%d", r1.Result, ran)
+	}
+	// 同 releaseId 同源:幂等跳过
+	a.runIdempotent("restore", cfg, "src=bakA", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	if ran != 1 {
+		t.Errorf("同源应幂等跳过,ran=%d", ran)
+	}
+	// 同 releaseId 不同源(备份 B):指纹不同 → 拒绝(不返回旧成功、不执行)
+	r3 := a.runIdempotent("restore", cfg, "src=bakB", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	if r3.Result == "success" || ran != 1 {
+		t.Errorf("不同恢复源复用 releaseId 应被拒绝: result=%q ran=%d", r3.Result, ran)
+	}
+}
+
+// 解包总量/条目数/深度限制:超条目数即报错(防大量小文件炸弹)。
+func TestExtractRejectsTooManyEntries(t *testing.T) {
+	old := maxEntryCount
+	maxEntryCount = 5
+	defer func() { maxEntryCount = old }()
+	dir := t.TempDir()
+	arch := filepath.Join(dir, "many.tar.gz")
+	makeTarGzCustom(t, arch, func(tw *tar.Writer) {
+		for i := 0; i < 20; i++ {
+			name := "f" + string(rune('a'+i)) + ".txt"
+			tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: 1})
+			tw.Write([]byte("x"))
+		}
+	})
+	err := extractArchive(arch, filepath.Join(dir, "out"), "gzip")
+	if err == nil || !strings.Contains(err.Error(), "条目数超出上限") {
+		t.Fatalf("超条目数应报错,got err=%v", err)
+	}
+}
+
+// 解包总字节限制:总量超上限即报错(单文件未超但累积超)。
+func TestExtractRejectsTotalSize(t *testing.T) {
+	oldT, oldE := maxTotalBytes, maxEntryBytes
+	maxTotalBytes, maxEntryBytes = 100, 80
+	defer func() { maxTotalBytes, maxEntryBytes = oldT, oldE }()
+	dir := t.TempDir()
+	arch := filepath.Join(dir, "big.tar.gz")
+	makeTarGzCustom(t, arch, func(tw *tar.Writer) {
+		for i := 0; i < 3; i++ { // 3 × 50B = 150B > 100B 总上限,单文件 50B < 80B
+			data := strings.Repeat("y", 50)
+			tw.WriteHeader(&tar.Header{Name: "f" + string(rune('a'+i)) + ".bin", Mode: 0644, Size: int64(len(data))})
+			tw.Write([]byte(data))
+		}
+	})
+	err := extractArchive(arch, filepath.Join(dir, "out"), "gzip")
+	if err == nil || !strings.Contains(err.Error(), "总大小超出上限") {
+		t.Fatalf("超总量应报错,got err=%v", err)
 	}
 }
 
