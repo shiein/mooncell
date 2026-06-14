@@ -13,7 +13,11 @@ import (
 
 // resolveAgent 按 ?agent=<id> 解析目标 Agent 客户端;空/"default" 用配置内置;未知返回 nil。
 func (a *api) resolveAgent(r *http.Request) *agentClient {
-	id := r.URL.Query().Get("agent")
+	return a.resolveAgentByID(r.URL.Query().Get("agent"))
+}
+
+// resolveAgentByID 按 Agent id 解析客户端(供服务端按应用 agentId 路由);空/"default" 用配置内置;未知返回 nil。
+func (a *api) resolveAgentByID(id string) *agentClient {
 	if id == "" || id == "default" {
 		return a.agent
 	}

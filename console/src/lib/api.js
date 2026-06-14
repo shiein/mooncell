@@ -168,24 +168,6 @@ async function deleteEntity(kind, id) {
   } catch (e) { console.error('[persist] delete', kind, e); }
 }
 
-// 真实部署:multipart 上传 config(JSON)+ artifact(File)到 Agent(经 Console 代理)。
-// 返回 {result, version, steps} 或 {error}。
-async function deployViaAgent(appId, config, file) {
-  try {
-    const fd = new FormData();
-    fd.append('config', JSON.stringify(config));
-    fd.append('artifact', file);
-    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy`, {
-      method: 'POST', body: fd, credentials: 'same-origin',
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) return { error: d.error || `部署失败 (${r.status})` };
-    return d;
-  } catch (e) {
-    return { error: 'Agent 不可达: ' + (e.message || e) };
-  }
-}
-
 // consumeSSE 消费一个 text/event-stream 响应:按 \n\n 分帧,解析 event/data,
 // 每帧回调 onEvent(type, data);返回最终 done 事件数据。部署与还原共用。
 async function consumeSSE(r, onEvent, errLabel) {
@@ -220,14 +202,16 @@ async function consumeSSE(r, onEvent, errLabel) {
   return done || { error: '流中断,未收到结果' };
 }
 
-// 真实部署(SSE 实时流):multipart 上传后,Agent 每完成一步推送 step 事件,结束推送 done。
-// onEvent(type, data) 在每个事件到达时回调(type ∈ "step"|"done");返回最终结果 {result,version,steps} 或 {error}。
-async function deployViaAgentStream(appId, config, file, onEvent, agentId) {
+// 真实部署(SSE 实时流):前端只提交 制品 + version + releaseId;Agent 配置由 Console 据已存应用配置
+// 服务端生成(前端不再组装,杜绝配置注入),目标 Agent 也据应用 agentId 服务端路由。
+// releaseId 提供幂等(同 id 已成功不重复部署)。onEvent(type,data) 回调;返回 {result,version,steps} 或 {error}。
+async function deployViaAgentStream(appId, version, releaseId, file, onEvent) {
   try {
     const fd = new FormData();
-    fd.append('config', JSON.stringify(config));
+    fd.append('version', version || '');
+    fd.append('releaseId', releaseId || '');
     fd.append('artifact', file);
-    const r = await fetch(qa(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, agentId), {
+    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, {
       method: 'POST', body: fd, credentials: 'same-origin',
     });
     return await consumeSSE(r, onEvent, '部署失败');
@@ -248,14 +232,14 @@ async function listAgentBackups(appId, agentId) {
   }
 }
 
-// 真实还原(SSE 实时流):用指定备份(backup=时间戳目录名)重跑部署流水线,逐步推送。
-// onEvent(type, data) 回调;返回 {result,version,steps} 或 {error}。
-async function restoreViaAgentStream(appId, config, backup, onEvent, agentId) {
+// 真实还原(SSE 实时流):前端只提交 backup(时间戳目录名)+ version + releaseId;
+// Agent 配置由 Console 服务端据已存应用配置生成。onEvent 回调;返回 {result,version,steps} 或 {error}。
+async function restoreViaAgentStream(appId, version, backup, releaseId, onEvent) {
   try {
-    const r = await fetch(qa(`/api/agent/apps/${encodeURIComponent(appId)}/restore/stream`, agentId), {
+    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/restore/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config, backup }),
+      body: JSON.stringify({ backup, version, releaseId }),
       credentials: 'same-origin',
     });
     return await consumeSSE(r, onEvent, '还原失败');
@@ -315,6 +299,6 @@ export {
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   uploadCabinetFile, removeCabinetFile,
   getAgentCapabilities, getAgentSystem, getAgentPing,
-  hydrateData, putEntity, deleteEntity, deployViaAgent, deployViaAgentStream,
+  hydrateData, putEntity, deleteEntity, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };

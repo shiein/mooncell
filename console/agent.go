@@ -161,33 +161,11 @@ func (a *api) unknownAgent(w http.ResponseWriter, cl *agentClient) bool {
 	return false
 }
 
-// agentDeploy 透传部署请求(multipart:config + artifact)到 Agent /api/apps/{id}/deploy。
-func (a *api) agentDeploy(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	defer r.Body.Close()
-	cl := a.resolveAgent(r)
-	if a.unknownAgent(w, cl) {
-		return
-	}
-	status, body, err := cl.post("/api/apps/"+id+"/deploy", r.Header.Get("Content-Type"), r.Body)
-	relayAgent(w, status, body, err)
-}
-
-// agentDeployStream 把 Agent 的 SSE 部署流透传给前端,并据 done 事件结果服务端权威写审计。
-func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	defer r.Body.Close()
-	cl := a.resolveAgent(r)
-	if a.unknownAgent(w, cl) {
-		return
-	}
-	resp, err := cl.postStream("/api/apps/"+id+"/deploy/stream", r.Header.Get("Content-Type"), r.Body)
-	a.streamAndAudit(w, r, resp, err, "部署", id)
-}
 
 // streamAndAudit 透传 Agent 的 SSE 流(部署/还原),同时旁路捕获末尾 done 事件,
-// 据实际结果与会话操作人服务端写一条权威审计。仅用于有限流(部署/还原),日志等无限流不可用此法。
-func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.Response, err error, action, appID string) {
+// 据实际结果与会话操作人服务端写一条权威审计;releaseID 非空时记录部署结果用于幂等。
+// 仅用于有限流(部署/还原),日志等无限流不可用此法。
+func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.Response, err error, action, appID, releaseID string) {
 	user := a.sessionUser(r)
 	if err != nil {
 		a.store.appendAudit(user, action, appID, "失败·Agent不可达")
@@ -230,6 +208,9 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.
 		target += " " + version
 	}
 	a.store.appendAudit(user, action, target, auditResultText(result))
+	if releaseID != "" {
+		a.store.putDeploy(releaseID, appID, result) // 幂等:记录该 release 的最终结果
+	}
 }
 
 // parseDoneResult 从 SSE 字节流中取最后一个 `event: done` 帧的 data,解析出 result 与 version。
@@ -314,18 +295,6 @@ func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	}
 	status, body, err := cl.get("/api/apps/" + id + "/backups")
 	relayAgent(w, status, body, err)
-}
-
-// agentRestoreStream 把 Agent 的 SSE 还原流透传给前端(请求体为 JSON,无制品上传),并据结果服务端写审计。
-func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	defer r.Body.Close()
-	cl := a.resolveAgent(r)
-	if a.unknownAgent(w, cl) {
-		return
-	}
-	resp, err := cl.postStream("/api/apps/"+id+"/restore/stream", r.Header.Get("Content-Type"), r.Body)
-	a.streamAndAudit(w, r, resp, err, "还原", id)
 }
 
 // agentLogStream 把 Agent 的应用日志 SSE 流透传给前端;用请求 context 绑定上游,前端断开即级联取消。

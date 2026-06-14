@@ -51,6 +51,12 @@ func openDB(cfg *Config) *Store {
 			token      TEXT    NOT NULL,
 			created_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS deploys (
+			release_id TEXT    PRIMARY KEY,
+			app_id     TEXT    NOT NULL,
+			result     TEXT    NOT NULL,
+			created_at INTEGER NOT NULL
+		);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
 	}
@@ -106,6 +112,23 @@ func (s *Store) addAgent(id, name, addr, token string) error {
 func (s *Store) deleteAgent(id string) error {
 	_, err := s.db.Exec("DELETE FROM agents WHERE id = ?", id)
 	return err
+}
+
+// getDeploy 返回某 releaseId 已记录的结果(用于幂等:同 releaseId 已成功则不重复部署)。
+func (s *Store) getDeploy(releaseID string) (string, bool) {
+	var result string
+	if err := s.db.QueryRow("SELECT result FROM deploys WHERE release_id = ?", releaseID).Scan(&result); err != nil {
+		return "", false
+	}
+	return result, true
+}
+
+func (s *Store) putDeploy(releaseID, appID, result string) {
+	s.db.Exec(
+		`INSERT INTO deploys (release_id, app_id, result, created_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(release_id) DO UPDATE SET result = excluded.result, created_at = excluded.created_at`,
+		releaseID, appID, result, time.Now().UnixMilli(),
+	)
 }
 
 // seedAdmin 仅在用户表为空时种入默认管理员(bcrypt)。

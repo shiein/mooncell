@@ -36,7 +36,6 @@ func main() {
 	mux.HandleFunc("GET /api/agent/ping", a.requireAuth(a.agentProxy("/api/ping")))
 	mux.HandleFunc("GET /api/agent/capabilities", a.requireAuth(a.agentProxy("/api/capabilities")))
 	mux.HandleFunc("GET /api/agent/system", a.requireAuth(a.agentProxy("/api/system")))
-	mux.HandleFunc("POST /api/agent/apps/{id}/deploy", writeRoles(a.agentDeploy))
 	mux.HandleFunc("POST /api/agent/apps/{id}/deploy/stream", writeRoles(a.agentDeployStream))
 	mux.HandleFunc("GET /api/agent/apps/{id}/status", a.requireAuth(a.agentAppStatus))
 	mux.HandleFunc("DELETE /api/agent/apps/{id}", writeRoles(a.agentUndeploy))
