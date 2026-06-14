@@ -364,3 +364,65 @@ func TestAgentLogsRequireExistingApp(t *testing.T) {
 		}
 	}
 }
+
+// 服务端权威更新应用状态:部署成功切版本+running;失败=failed;启停据 Agent 真实状态。
+func TestApplyAppRuntimeState(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s}
+	put := func(m map[string]any) {
+		b, _ := json.Marshal(m)
+		s.putEntity("app", "x", b)
+	}
+	get := func() map[string]any {
+		raw, _ := s.getEntity("app", "x")
+		var m map[string]any
+		json.Unmarshal(raw, &m)
+		return m
+	}
+	// 部署成功:版本切到 v2,状态 running,pid 清空
+	put(map[string]any{"id": "x", "type": "go-binary", "version": "v1", "status": "stopped", "pid": float64(123)})
+	a.applyAppRuntimeState("x", "v2", "success")
+	if m := get(); m["version"] != "v2" || m["status"] != "running" || m["pid"] != nil {
+		t.Fatalf("success 应切 v2/running/pid空,got %v", m)
+	}
+	// 回滚:版本不动(保留 v2),状态 running
+	a.applyAppRuntimeState("x", "v3", "rolledback")
+	if m := get(); m["version"] != "v2" || m["status"] != "running" {
+		t.Errorf("rolledback 应保留旧版本 v2,got version=%v status=%v", get()["version"], m["status"])
+	}
+	// 失败:status=failed,版本不动
+	a.applyAppRuntimeState("x", "v3", "failed")
+	if m := get(); m["status"] != "failed" || m["version"] != "v2" {
+		t.Errorf("failed 应 status=failed/版本不动,got %v", m)
+	}
+	// static 类型:成功 → static
+	put(map[string]any{"id": "x", "type": "static-nginx", "version": "v1"})
+	a.applyAppRuntimeState("x", "v2", "success")
+	if get()["status"] != "static" {
+		t.Errorf("static 成功应 status=static,got %v", get()["status"])
+	}
+}
+
+func TestApplyLifecycleState(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s}
+	b, _ := json.Marshal(map[string]any{"id": "x", "type": "go-binary", "status": "stopped"})
+	s.putEntity("app", "x", b)
+	// stop 返回 active=false
+	a.applyLifecycleState("x", []byte(`{"active":false,"pid":"0"}`))
+	raw, _ := s.getEntity("app", "x")
+	var m map[string]any
+	json.Unmarshal(raw, &m)
+	if m["status"] != "stopped" || m["pid"] != nil {
+		t.Fatalf("stop 应 stopped/pid空,got %v", m)
+	}
+	// start 返回 active=true,pid
+	a.applyLifecycleState("x", []byte(`{"active":true,"pid":"4321"}`))
+	raw, _ = s.getEntity("app", "x")
+	json.Unmarshal(raw, &m)
+	if m["status"] != "running" || m["pid"] != "4321" {
+		t.Errorf("start 应 running/pid=4321,got %v", m)
+	}
+}

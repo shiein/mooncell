@@ -239,6 +239,58 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 	if releaseID != "" {
 		a.store.putDeploy(op, appID, releaseID, result, fingerprint) // 幂等:按 操作+app+release 记录结果与指纹
 	}
+	if result == "success" || result == "rolledback" || result == "failed" {
+		a.applyAppRuntimeState(appID, version, result) // 服务端权威更新应用 version/status/lastDeploy
+	}
+}
+
+// applyAppRuntimeState 在真机部署/还原结束后,由 Console 服务端权威更新应用实体状态,
+// 并清零前端曾伪造的 pid/cpu/mem(运行态由 …/status 轮询补)。前端真实操作只做即时显示、
+// 不再 patch 落库,刷新后一律以服务端记录为准。三态:
+//   success    → 切到新 version,running/static
+//   rolledback → 保留旧 version(已回滚),running/static
+//   failed     → status=failed,version 不变
+func (a *api) applyAppRuntimeState(appID, version, result string) {
+	raw, ok := a.store.getEntity("app", appID)
+	if !ok {
+		return
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return
+	}
+	static := false
+	if typ, _ := m["type"].(string); typ == "static-nginx" {
+		static = true
+	}
+	switch result {
+	case "success":
+		if version != "" {
+			m["version"] = version
+		}
+		m["status"] = boolStr(static, "static", "running")
+	case "rolledback":
+		m["status"] = boolStr(static, "static", "running") // 旧版本仍在跑,version 不动
+	case "failed":
+		m["status"] = "failed"
+	default:
+		return
+	}
+	m["lastDeploy"] = time.Now().UnixMilli()
+	m["pid"] = nil
+	m["cpu"] = "—"
+	m["mem"] = "—"
+	m["uptime"] = "—"
+	if b, err := json.Marshal(m); err == nil {
+		a.store.putEntity("app", appID, b)
+	}
+}
+
+func boolStr(b bool, t, f string) string {
+	if b {
+		return t
+	}
+	return f
 }
 
 // fetchReleaseRecord 向 Agent 查询某 (op,app,releaseId) 的权威幂等记录(仅成功才记录)。
@@ -481,7 +533,10 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
 		return
 	}
-	cl, runner := a.appRouting(id)
+	cl, runner, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
 	if a.unknownAgent(w, cl) {
 		return
 	}
@@ -496,8 +551,43 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 		a.store.appendAudit(user, verb, id, "失败")
 	} else {
 		a.store.appendAudit(user, verb, id, "成功")
+		a.applyLifecycleState(id, body) // 服务端权威更新 status/pid(据 Agent 返回的真实状态)
 	}
 	relayAgent(w, status, body, err)
+}
+
+// applyLifecycleState 据 Agent 启停后返回的真实状态({active,pid})服务端权威更新应用实体的
+// status/pid——前端启停只做即时显示,不再 patch 落库。
+func (a *api) applyLifecycleState(appID string, body []byte) {
+	var st struct {
+		Active bool   `json:"active"`
+		Pid    string `json:"pid"`
+	}
+	if json.Unmarshal(body, &st) != nil {
+		return
+	}
+	raw, ok := a.store.getEntity("app", appID)
+	if !ok {
+		return
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return
+	}
+	if st.Active {
+		m["status"] = "running"
+		if st.Pid != "" && st.Pid != "0" {
+			m["pid"] = st.Pid
+		}
+	} else {
+		m["status"] = "stopped"
+		m["pid"] = nil
+	}
+	m["cpu"] = "—"
+	m["mem"] = "—"
+	if b, err := json.Marshal(m); err == nil {
+		a.store.putEntity("app", appID, b)
+	}
 }
 
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {

@@ -96,6 +96,9 @@ function App() {
     persist("app", next);
     return next;
   }));
+  // patchAppLocal:仅更新本地显示,不落库。真机操作(部署/还原/启停)的 version/status 由 Console
+  // 服务端权威落库(applyAppRuntimeState),前端不再重复 persist——刷新后以服务端记录为准。
+  const patchAppLocal = (id, patch) => setApps((s) => s.map((a) => (a.id === id ? { ...a, ...patch } : a)));
 
   const store = {
     user, role, nav, route,
@@ -112,8 +115,10 @@ function App() {
       // 真实部署:release 由 Console 服务端权威落库、backup 在 Agent 真实生成;前端只乐观显示不落库。
       setBackups((s) => [backup, ...s]); if (!real) persist("backup", backup);
       setReleases((s) => [release, ...s]); // release 服务端权威,前端不落库(刷新读服务端记录)
+      // 真机操作:status/version 由 Console 服务端权威落库,前端仅本地即时显示(patchAppLocal,不 persist)。
+      const setState = real ? patchAppLocal : patchApp;
       if (result === "success") {
-        patchApp(app.id, {
+        setState(app.id, {
           version, lastDeploy: now,
           status: app.type === "static-nginx" ? "static" : "running",
           // 真实部署:运行态(pid/cpu/mem/uptime)由 Agent status 查询,前端不伪造随机值;模拟部署才填演示值。
@@ -124,7 +129,7 @@ function App() {
         addAudit("部署", `${app.name} ${version}`, "成功");
         toast(`${app.name} · ${version} 部署成功`);
       } else if (result === "rolledback") {
-        patchApp(app.id, { status: app.type === "static-nginx" ? "static" : "running", lastDeploy: now });
+        setState(app.id, { status: app.type === "static-nginx" ? "static" : "running", lastDeploy: now });
         if (real) {
           addAudit("部署", `${app.name} ${version}`, "失败·已回滚");
         } else {
@@ -134,7 +139,7 @@ function App() {
         toast(`部署失败 · 已自动回滚至 ${app.version}`, { tone: "warn", icon: "rotate" });
       } else {
         // failed:既没成功也没能回滚(如首次部署失败),应用进入异常态。
-        patchApp(app.id, { status: "failed", lastDeploy: now, pid: null });
+        setState(app.id, { status: "failed", lastDeploy: now, pid: null });
         addAudit("部署", `${app.name} ${version}`, "失败");
         toast(`${app.name} · ${version} 部署失败,未能回滚`, { tone: "error", icon: "alert" });
       }
@@ -145,7 +150,8 @@ function App() {
       const bak = { id: "b" + now, appId: app.id, version: app.version, time: now, size: backup.size, auto: true, operator: user, dir: tsDir(now), note: "还原前自动备份" };
       // 真实还原:还原前备份在 Agent 真实生成、release 由服务端落库;前端只乐观显示。
       setBackups((s) => [bak, ...s]); if (!real) persist("backup", bak);
-      patchApp(app.id, {
+      // 真机还原:status/version 由 Console 服务端权威落库,前端仅本地即时显示。
+      (real ? patchAppLocal : patchApp)(app.id, {
         version: backup.version, lastDeploy: now,
         status: app.type === "static-nginx" ? "static" : "running",
         // 真实还原:运行态由 Agent status 查询,不前端伪造。
@@ -166,7 +172,8 @@ function App() {
         toast(`${app.name} ${verb}失败(Agent 未响应或操作出错)`, { tone: "error", icon: "alert" });
         return;
       }
-      patchApp(app.id, {
+      // status/pid 由 Console 服务端 applyLifecycleState 权威落库,前端仅本地即时显示。
+      patchAppLocal(app.id, {
         status: st.active ? "running" : "stopped",
         pid: st.active && st.pid && st.pid !== "0" ? (Number(st.pid) || st.pid) : null,
         uptime: st.active ? "刚刚" : "—", cpu: "—", mem: "—",
