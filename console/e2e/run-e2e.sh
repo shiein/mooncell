@@ -10,13 +10,20 @@ echo "[e2e] 构建前端 + Console 二进制…"
 pnpm build >/dev/null
 go build -o "$BIN" .
 
+FAKE_AGENT_PORT=9111
+# 假 Agent:让 Console 有真实能力清单与可控错误态(能力过滤 / 备份失败态 E2E)。
+node e2e/fake-agent.mjs >/tmp/mc-fake-agent.log 2>&1 &
+FAKE_PID=$!
+
 DIR="$(mktemp -d)"
-printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n' "$PORT" "$DIR" > "$DIR/config.toml"
+printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n[agent]\naddr="127.0.0.1:%s"\ntoken="tok"\n' "$PORT" "$DIR" "$FAKE_AGENT_PORT" > "$DIR/config.toml"
 ( cd "$DIR" && "$BIN" >"$DIR/console.log" 2>&1 & echo $! > "$DIR/pid" )
 
 cleanup() {
   [ -f "$DIR/pid" ] && kill -9 "$(cat "$DIR/pid")" 2>/dev/null || true
+  kill -9 "$FAKE_PID" 2>/dev/null || true
   pkill -9 -f mc-console-e2e 2>/dev/null || true
+  pkill -9 -f "e2e/fake-agent.mjs" 2>/dev/null || true
   rm -rf "$DIR"
 }
 trap cleanup EXIT INT TERM
