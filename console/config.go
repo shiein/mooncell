@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"log"
 
 	"github.com/BurntSushi/toml"
@@ -69,8 +71,14 @@ func loadConfig(path string) *Config {
 		Cabinet:  CabinetConfig{Dir: "cabinet"},
 		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 	}
+	// 文件不存在 → 用内置默认(单机首跑可接受);文件存在但解析失败(语法错误/权限等)→ 直接退出,
+	// 否则一个配置 typo 会把生产实例悄悄降级为周知默认凭据(admin 默认口令 / 默认 token / 0.0.0.0)。
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
-		log.Printf("[config] 未能读取 %s(%v),使用内置默认配置", path, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Printf("[config] 未找到 %s,使用内置默认配置", path)
+		} else {
+			log.Fatalf("[config] 解析 %s 失败(拒绝以默认凭据启动): %v", path, err)
+		}
 	}
 	return cfg
 }

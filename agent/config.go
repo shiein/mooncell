@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"log"
 
 	"github.com/BurntSushi/toml"
@@ -47,8 +49,13 @@ func loadConfig(path string) *Config {
 		},
 		Deploy: DeployConfigT{MaxUploadMB: 1024},
 	}
+	// 文件不存在 → 用内置默认;文件存在但解析失败 → 直接退出,避免悄悄降级为默认 token(mc_ag_change_me)。
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
-		log.Printf("[config] 未能读取 %s(%v),使用内置默认配置", path, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Printf("[config] 未找到 %s,使用内置默认配置", path)
+		} else {
+			log.Fatalf("[config] 解析 %s 失败(拒绝以默认 token 启动): %v", path, err)
+		}
 	}
 	return cfg
 }
