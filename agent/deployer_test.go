@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -144,6 +146,77 @@ func TestReleaseIdempotency(t *testing.T) {
 	if _, ok := a.releaseDone("R2"); ok {
 		t.Fatal("失败结果不应被当作幂等命中")
 	}
+}
+
+// flattenSingleTopDir:单一顶层目录上提,散落文件 / 单文件不动。
+func TestFlattenSingleTopDir(t *testing.T) {
+	// 单一顶层目录 → 内容上提,去掉该层
+	d := t.TempDir()
+	os.MkdirAll(filepath.Join(d, "myapp-v1"), 0755)
+	os.WriteFile(filepath.Join(d, "myapp-v1", "a.txt"), []byte("a"), 0644)
+	os.WriteFile(filepath.Join(d, "myapp-v1", "b.txt"), []byte("b"), 0644)
+	if err := flattenSingleTopDir(d); err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(filepath.Join(d, "a.txt")) || fileExists(filepath.Join(d, "myapp-v1")) {
+		t.Error("单一顶层目录应被去掉、内容上提")
+	}
+
+	// 散落文件 → 原样保留
+	d2 := t.TempDir()
+	os.WriteFile(filepath.Join(d2, "index.html"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(d2, "app.js"), []byte("y"), 0644)
+	flattenSingleTopDir(d2)
+	if !fileExists(filepath.Join(d2, "index.html")) || !fileExists(filepath.Join(d2, "app.js")) {
+		t.Error("散落文件应原样保留")
+	}
+
+	// 单个顶层文件(非目录)→ 不动
+	d3 := t.TempDir()
+	os.WriteFile(filepath.Join(d3, "only.py"), []byte("z"), 0644)
+	flattenSingleTopDir(d3)
+	if !fileExists(filepath.Join(d3, "only.py")) {
+		t.Error("单个顶层文件应保留")
+	}
+}
+
+// extractArchiveSmart:tar.gz 嗅探 + 解包 + 智能去顶层目录(端到端)。
+func TestExtractArchiveSmart(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "pkg.tar.gz")
+	// 造一个含单一顶层目录 release/ 的 tar.gz
+	makeTarGz(t, archive, map[string]string{
+		"release/main.py":     "print(1)",
+		"release/lib/util.py": "x=1",
+	})
+	if sniffArchive(archive) != "gzip" {
+		t.Fatalf("应嗅探为 gzip")
+	}
+	dest := filepath.Join(dir, "out")
+	if err := extractArchiveSmart(archive, dest, "gzip"); err != nil {
+		t.Fatal(err)
+	}
+	// 顶层 release/ 应被去掉,main.py 直接在 dest 下
+	if !fileExists(filepath.Join(dest, "main.py")) || !fileExists(filepath.Join(dest, "lib", "util.py")) {
+		t.Error("解包后应智能去掉顶层 release/,入口直达 dest")
+	}
+}
+
+func makeTarGz(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	for name, content := range files {
+		tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(content))})
+		tw.Write([]byte(content))
+	}
+	tw.Close()
+	gz.Close()
 }
 
 // withinRoots:路径穿越防护。

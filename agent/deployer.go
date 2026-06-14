@@ -575,13 +575,89 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 
 // ---------- 静态站点(软链切换)----------
 
-// extractTarGz 把 tar.gz 制品解包到 dest 目录(dest 须已建)。用系统 tar,省去手写流解析。
-func extractTarGz(archive, dest string) error {
-	out, err := exec.Command("tar", "-xzf", archive, "-C", dest).CombinedOutput()
+// sniffArchive 按魔数(非扩展名)判断压缩格式:gzip(.tar.gz)/ zip / tar;非压缩单文件返回空。
+func sniffArchive(path string) string {
+	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("tar 解包失败: %s", strings.TrimSpace(string(out)))
+		return ""
+	}
+	defer f.Close()
+	head := make([]byte, 264)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	switch {
+	case len(head) >= 2 && head[0] == 0x1f && head[1] == 0x8b:
+		return "gzip"
+	case len(head) >= 4 && head[0] == 0x50 && head[1] == 0x4b && (head[2] == 3 || head[2] == 5 || head[2] == 7):
+		return "zip"
+	case len(head) >= 262 && string(head[257:262]) == "ustar":
+		return "tar"
+	default:
+		return ""
+	}
+}
+
+// extractArchive 按格式解包到 dest(已建)。用系统 tar/unzip。
+func extractArchive(archive, dest, format string) error {
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	var cmd *exec.Cmd
+	switch format {
+	case "gzip":
+		cmd = exec.Command("tar", "-xzf", archive, "-C", dest)
+	case "tar":
+		cmd = exec.Command("tar", "-xf", archive, "-C", dest)
+	case "zip":
+		cmd = exec.Command("unzip", "-oq", archive, "-d", dest)
+	default:
+		return fmt.Errorf("不支持的压缩格式")
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("解包失败: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// nonHiddenEntries 过滤掉点文件与 __MACOSX(zip 元数据),用于判断压缩包真实顶层结构。
+func nonHiddenEntries(dir string) []os.DirEntry {
+	all, _ := os.ReadDir(dir)
+	out := all[:0]
+	for _, e := range all {
+		if n := e.Name(); strings.HasPrefix(n, ".") || n == "__MACOSX" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// flattenSingleTopDir 智能去多余顶层目录:压缩包若只含一个顶层目录(如 myapp-v1/ 整包包裹),
+// 把其内容上提一层、去掉它;若是散落文件(index.html、app.js…)则原样保留。
+func flattenSingleTopDir(dir string) error {
+	entries := nonHiddenEntries(dir)
+	if len(entries) != 1 || !entries[0].IsDir() {
+		return nil
+	}
+	top := filepath.Join(dir, entries[0].Name())
+	children, err := os.ReadDir(top)
+	if err != nil {
+		return err
+	}
+	for _, c := range children {
+		if err := os.Rename(filepath.Join(top, c.Name()), filepath.Join(dir, c.Name())); err != nil {
+			return err
+		}
+	}
+	return os.Remove(top)
+}
+
+// extractArchiveSmart 解包 + 智能去多余顶层目录。
+func extractArchiveSmart(archive, dest, format string) error {
+	if err := extractArchive(archive, dest, format); err != nil {
+		return err
+	}
+	return flattenSingleTopDir(dest)
 }
 
 // switchSymlink 原子切换软链 link → target:先建临时软链再 rename 覆盖,避免出现 link 短暂消失的窗口。
@@ -624,13 +700,20 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 		res.Result = "failed"
 		return res
 	}
-	if err := extractTarGz(artifact, newRelease); err != nil {
+	format := sniffArchive(artifact)
+	if format == "" {
+		os.RemoveAll(newRelease)
+		add("解包制品", false, "静态站点制品须为压缩包(tar.gz / zip),收到非压缩文件")
+		res.Result = "failed"
+		return res
+	}
+	if err := extractArchiveSmart(artifact, newRelease, format); err != nil {
 		os.RemoveAll(newRelease)
 		add("解包制品", false, err.Error())
 		res.Result = "failed"
 		return res
 	}
-	add("解包制品", true, "tar -xzf → "+newRelease)
+	add("解包制品", true, format+" 解包 + 智能去顶层目录 → "+newRelease)
 
 	// 4. 原子切换软链
 	if err := switchSymlink(newRelease, cfg.BinPath); err != nil {
