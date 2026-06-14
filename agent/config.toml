@@ -1,7 +1,7 @@
 # Mooncell Agent 配置
 
 [server]
-addr = "0.0.0.0"   # 监听地址,127.0.0.1 仅本机
+addr = "127.0.0.1" # 监听地址;生产若改 0.0.0.0,必须同步修改默认 token
 port = 9100
 
 [security]

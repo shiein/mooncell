@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -61,24 +62,54 @@ type AdminConfig struct {
 	Password string `toml:"password"`
 }
 
+const (
+	defaultAdminPassword = "jch@9388"
+	defaultAgentToken    = "mc_ag_change_me"
+)
+
 func loadConfig(path string) *Config {
 	cfg := &Config{
-		Server:   ServerConfig{Addr: "0.0.0.0", Port: 8787},
+		Server:   ServerConfig{Addr: "127.0.0.1", Port: 8787},
 		Database: DatabaseConfig{Path: "mooncell.db"},
 		Session:  SessionConfig{TTLHours: 168}, // 7 天
-		Admin:    AdminConfig{Username: "admin", Password: "jch@9388"},
-		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: "mc_ag_change_me"},
+		Admin:    AdminConfig{Username: "admin", Password: defaultAdminPassword},
+		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
 		Cabinet:  CabinetConfig{Dir: "cabinet"},
 		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 	}
-	// 文件不存在 → 用内置默认(单机首跑可接受);文件存在但解析失败(语法错误/权限等)→ 直接退出,
-	// 否则一个配置 typo 会把生产实例悄悄降级为周知默认凭据(admin 默认口令 / 默认 token / 0.0.0.0)。
+	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败(语法错误/权限等)→ 直接退出。
+	// 显式对外监听时若仍使用周知默认密码/token,同样拒绝启动。
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			log.Printf("[config] 未找到 %s,使用内置默认配置", path)
+			log.Printf("[config] 未找到 %s,使用仅本机可访问的内置默认配置", path)
 		} else {
 			log.Fatalf("[config] 解析 %s 失败(拒绝以默认凭据启动): %v", path, err)
 		}
 	}
+	if reason := unsafeConsoleConfigReason(cfg); reason != "" {
+		log.Fatalf("[config] 拒绝以不安全配置对外启动: %s", reason)
+	}
 	return cfg
+}
+
+func externalBind(addr string) bool {
+	switch strings.TrimSpace(addr) {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	default:
+		return false
+	}
+}
+
+func unsafeConsoleConfigReason(cfg *Config) string {
+	if !externalBind(cfg.Server.Addr) {
+		return ""
+	}
+	if cfg.Admin.Password == defaultAdminPassword {
+		return "server.addr 对外监听时不能使用默认管理员密码"
+	}
+	if cfg.Agent.Token == defaultAgentToken {
+		return "server.addr 对外监听时不能使用默认 Agent token"
+	}
+	return ""
 }

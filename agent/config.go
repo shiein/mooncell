@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -38,10 +39,12 @@ type PathsConfig struct {
 	BackupDir   string   `toml:"backup_dir"`   // 备份存储根目录
 }
 
+const defaultAgentToken = "mc_ag_change_me"
+
 func loadConfig(path string) *Config {
 	cfg := &Config{
-		Server:   ServerConfig{Addr: "0.0.0.0", Port: 9100},
-		Security: SecurityConfig{Token: "mc_ag_change_me"},
+		Server:   ServerConfig{Addr: "127.0.0.1", Port: 9100},
+		Security: SecurityConfig{Token: defaultAgentToken},
 		Paths: PathsConfig{
 			DeployRoots: []string{"/srv/apps", "/data/web"},
 			LogRoots:    []string{"/srv/apps", "/var/log"},
@@ -49,13 +52,36 @@ func loadConfig(path string) *Config {
 		},
 		Deploy: DeployConfigT{MaxUploadMB: 1024},
 	}
-	// 文件不存在 → 用内置默认;文件存在但解析失败 → 直接退出,避免悄悄降级为默认 token(mc_ag_change_me)。
+	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败 → 直接退出。
+	// 显式对外监听时若仍使用周知默认 token,同样拒绝启动。
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			log.Printf("[config] 未找到 %s,使用内置默认配置", path)
+			log.Printf("[config] 未找到 %s,使用仅本机可访问的内置默认配置", path)
 		} else {
 			log.Fatalf("[config] 解析 %s 失败(拒绝以默认 token 启动): %v", path, err)
 		}
 	}
+	if reason := unsafeAgentConfigReason(cfg); reason != "" {
+		log.Fatalf("[config] 拒绝以不安全配置对外启动: %s", reason)
+	}
 	return cfg
+}
+
+func externalBind(addr string) bool {
+	switch strings.TrimSpace(addr) {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	default:
+		return false
+	}
+}
+
+func unsafeAgentConfigReason(cfg *Config) string {
+	if !externalBind(cfg.Server.Addr) {
+		return ""
+	}
+	if cfg.Security.Token == defaultAgentToken {
+		return "server.addr 对外监听时不能使用默认 Agent token"
+	}
+	return ""
 }
