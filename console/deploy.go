@@ -49,6 +49,22 @@ func reloadActionFor(typ string, reload bool) string {
 	return ""
 }
 
+// appBinPath 取应用落盘路径首段(static 的 path 可能含 " → release" 后缀)。
+func appBinPath(app appConfig) string {
+	if f := strings.Fields(app.Path); len(f) > 0 {
+		return f[0]
+	}
+	return app.Path
+}
+
+// deployFingerprint 必须与 Agent releaseFingerprint 完全一致(字段、顺序、分隔符):
+// sha | binPath | runner | version | type | fpExtra。
+// 用于 Console 层短路前比对——指纹一致才返回缓存,否则放行给 Agent 做最终裁决。
+// 部署 fpExtra 为空;还原传 "src=<backup>" 与 Agent 对齐。
+func deployFingerprint(app appConfig, sha, version, fpExtra string) string {
+	return strings.Join([]string{sha, appBinPath(app), app.Runner, version, app.Type, fpExtra}, "|")
+}
+
 // buildAgentConfig 据已存应用配置 + 本次 version + 制品 sha256 生成下发给 Agent 的部署配置 JSON。
 // 返回 (配置 JSON, 目标 agentId)。binPath 取 path 首段(static 的 path 可能含 " → release")。
 func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID string) ([]byte, string, error) {
@@ -173,14 +189,6 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
 
-	// 幂等:同(部署 + 本 app + releaseId)已成功则直接返回缓存结果,不重复执行。
-	if releaseID != "" {
-		if res, ok := a.store.getDeploy("deploy", id, releaseID); ok && res == "success" {
-			a.sseIdempotent(w, "部署", res, version)
-			return
-		}
-	}
-
 	appRaw, ok := a.store.getEntity("app", id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法部署"})
@@ -199,6 +207,18 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 幂等:同(部署 + 本 app + releaseId)已成功**且指纹一致**才短路返回缓存。
+	// 指纹含制品 sha,故换了制品复用 releaseId 不会被 Console 误短路——放行给 Agent 做最终裁决。
+	var app appConfig
+	json.Unmarshal(appRaw, &app)
+	fp := deployFingerprint(app, sha, version, "")
+	if releaseID != "" {
+		if res, cfp, ok := a.store.getDeploy("deploy", id, releaseID); ok && res == "success" && cfp == fp {
+			a.sseIdempotent(w, "部署", res, version)
+			return
+		}
+	}
+
 	cfgJSON, agentID, err := buildAgentConfig(appRaw, version, sha, releaseID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "生成部署配置失败"})
@@ -211,7 +231,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 
 	body, ct := buildDeployBody(cfgJSON, file)
 	resp, perr := cl.postStream("/api/apps/"+id+"/deploy/stream", ct, body)
-	a.streamAndAudit(w, r, resp, perr, "部署", id, releaseID)
+	a.streamAndAudit(w, r, resp, perr, "部署", id, releaseID, fp)
 }
 
 // agentRestoreStream 服务端还原:读已存应用配置生成 Agent 请求(前端只提交 backup + version + releaseId)。
@@ -227,16 +247,21 @@ func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	if releaseID := req.ReleaseID; releaseID != "" {
-		if res, ok := a.store.getDeploy("restore", id, releaseID); ok && res == "success" {
-			a.sseIdempotent(w, "还原", res, req.Version)
-			return
-		}
-	}
 	appRaw, ok := a.store.getEntity("app", id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法还原"})
 		return
+	}
+	// 幂等:同(还原 + 本 app + releaseId)已成功**且指纹一致**才短路。
+	// 还原指纹含恢复源 src=<backup>,故同 releaseId 用不同备份还原不会被误短路——放行给 Agent 裁决。
+	var app appConfig
+	json.Unmarshal(appRaw, &app)
+	fp := deployFingerprint(app, "", req.Version, "src="+req.Backup)
+	if releaseID := req.ReleaseID; releaseID != "" {
+		if res, cfp, ok := a.store.getDeploy("restore", id, releaseID); ok && res == "success" && cfp == fp {
+			a.sseIdempotent(w, "还原", res, req.Version)
+			return
+		}
 	}
 	cfgJSON, agentID, err := buildAgentConfig(appRaw, req.Version, "", req.ReleaseID) // 还原用 Agent 本地备份制品,无需上传 sha 校验
 	if err != nil {
@@ -249,7 +274,7 @@ func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 	}
 	agentBody, _ := json.Marshal(map[string]any{"config": json.RawMessage(cfgJSON), "backup": req.Backup})
 	resp, perr := cl.postStream("/api/apps/"+id+"/restore/stream", "application/json", bytes.NewReader(agentBody))
-	a.streamAndAudit(w, r, resp, perr, "还原", id, req.ReleaseID)
+	a.streamAndAudit(w, r, resp, perr, "还原", id, req.ReleaseID, fp)
 }
 
 // sseIdempotent 对已成功的 releaseId 直接回一个 SSE done(幂等跳过,不重复部署)。

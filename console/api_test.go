@@ -136,24 +136,24 @@ func TestDeployIdempotencyIsolation(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()
 
-	s.putDeploy("deploy", "app-a", "rid-1", "success")
+	s.putDeploy("deploy", "app-a", "rid-1", "success", "fp1")
 
-	// 同 op+app+rid:命中
-	if res, ok := s.getDeploy("deploy", "app-a", "rid-1"); !ok || res != "success" {
-		t.Fatalf("同键应命中 success,got %q ok=%v", res, ok)
+	// 同 op+app+rid:命中,指纹一并返回
+	if res, fp, ok := s.getDeploy("deploy", "app-a", "rid-1"); !ok || res != "success" || fp != "fp1" {
+		t.Fatalf("同键应命中 success/fp1,got %q fp=%q ok=%v", res, fp, ok)
 	}
 	// 同 rid 不同 op(还原):不得命中
-	if _, ok := s.getDeploy("restore", "app-a", "rid-1"); ok {
+	if _, _, ok := s.getDeploy("restore", "app-a", "rid-1"); ok {
 		t.Error("还原复用部署 releaseId 不应命中(op 隔离)")
 	}
 	// 同 rid 不同 app:不得命中
-	if _, ok := s.getDeploy("deploy", "app-b", "rid-1"); ok {
+	if _, _, ok := s.getDeploy("deploy", "app-b", "rid-1"); ok {
 		t.Error("不同 app 复用 releaseId 不应命中(app 隔离)")
 	}
-	// 同键再写不同结果:覆盖(ON CONFLICT)
-	s.putDeploy("deploy", "app-a", "rid-1", "failed")
-	if res, _ := s.getDeploy("deploy", "app-a", "rid-1"); res != "failed" {
-		t.Errorf("同键重写应覆盖为 failed,got %q", res)
+	// 同键再写不同结果+指纹:覆盖(ON CONFLICT)
+	s.putDeploy("deploy", "app-a", "rid-1", "failed", "fp2")
+	if res, fp, _ := s.getDeploy("deploy", "app-a", "rid-1"); res != "failed" || fp != "fp2" {
+		t.Errorf("同键重写应覆盖为 failed/fp2,got %q fp=%q", res, fp)
 	}
 }
 
@@ -177,13 +177,41 @@ func TestMigrateLegacyDeploys(t *testing.T) {
 	defer s.Close()
 
 	// 旧记录已随旧表清空(迁移丢弃去重记录,可接受)
-	if _, ok := s.getDeploy("deploy", "x", "old"); ok {
+	if _, _, ok := s.getDeploy("deploy", "x", "old"); ok {
 		t.Error("迁移后旧单列记录应被清空")
 	}
 	// 新复合主键正常工作
-	s.putDeploy("deploy", "x", "new", "success")
-	if res, ok := s.getDeploy("deploy", "x", "new"); !ok || res != "success" {
+	s.putDeploy("deploy", "x", "new", "success", "fp")
+	if res, _, ok := s.getDeploy("deploy", "x", "new"); !ok || res != "success" {
 		t.Errorf("迁移后复合主键写入应可用,got %q ok=%v", res, ok)
+	}
+}
+
+// 复合主键库缺 fingerprint 列时:迁移补列,旧记录指纹为空(命中比对视为不一致),新写入带指纹。
+func TestMigrateAddsFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v2.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 复合主键但无 fingerprint 列(review5 形态)
+	old.Exec(`CREATE TABLE deploys (op TEXT NOT NULL, app_id TEXT NOT NULL, release_id TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(op,app_id,release_id))`)
+	old.Exec(`INSERT INTO deploys (op,app_id,release_id,result,created_at) VALUES ('deploy','x','r1','success',1)`)
+	old.Close()
+
+	s := openDB(&Config{Database: DatabaseConfig{Path: path}, Session: SessionConfig{TTLHours: 1}})
+	defer s.Close()
+
+	// 旧记录保留,指纹为空(命中后调用方比对会因空指纹放行给 Agent)
+	res, fp, ok := s.getDeploy("deploy", "x", "r1")
+	if !ok || res != "success" || fp != "" {
+		t.Fatalf("迁移后旧记录应保留且指纹为空,got res=%q fp=%q ok=%v", res, fp, ok)
+	}
+	// 新写入带指纹
+	s.putDeploy("deploy", "x", "r2", "success", "fpX")
+	if _, fp2, _ := s.getDeploy("deploy", "x", "r2"); fp2 != "fpX" {
+		t.Errorf("迁移后新写入应带指纹,got %q", fp2)
 	}
 }
 

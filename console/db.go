@@ -54,11 +54,12 @@ func openDB(cfg *Config) *Store {
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS deploys (
-			op         TEXT    NOT NULL,
-			app_id     TEXT    NOT NULL,
-			release_id TEXT    NOT NULL,
-			result     TEXT    NOT NULL,
-			created_at INTEGER NOT NULL,
+			op          TEXT    NOT NULL,
+			app_id      TEXT    NOT NULL,
+			release_id  TEXT    NOT NULL,
+			result      TEXT    NOT NULL,
+			fingerprint TEXT    NOT NULL DEFAULT '',
+			created_at  INTEGER NOT NULL,
 			PRIMARY KEY (op, app_id, release_id)
 		);
 	`); err != nil {
@@ -126,7 +127,7 @@ func migrateDeploys(db *sql.DB) {
 		return // 表尚不存在(全新库):无需迁移
 	}
 	defer rows.Close()
-	hasOp, hasAny := false, false
+	hasOp, hasFp, hasAny := false, false, false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -136,34 +137,43 @@ func migrateDeploys(db *sql.DB) {
 			return
 		}
 		hasAny = true
-		if name == "op" {
+		switch name {
+		case "op":
 			hasOp = true
+		case "fingerprint":
+			hasFp = true
 		}
 	}
 	if hasAny && !hasOp {
 		db.Exec(`DROP TABLE deploys`)
 		log.Printf("[db] 迁移 deploys → 复合主键(op,app_id,release_id),旧去重记录已清空")
+		return
+	}
+	if hasAny && hasOp && !hasFp {
+		// 已是复合主键但缺 fingerprint 列:补列(旧记录指纹为空,命中比对时视为不一致 → 放行给 Agent 裁决)。
+		db.Exec(`ALTER TABLE deploys ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`)
+		log.Printf("[db] 迁移 deploys → 增加 fingerprint 列")
 	}
 }
 
-// getDeploy 返回某 (op,appId,releaseId) 已记录的结果(幂等:同操作+同 app+同 release 已成功则不重复)。
+// getDeploy 返回某 (op,appId,releaseId) 已记录的结果与指纹(幂等:同操作+同 app+同 release)。
 // 按操作与应用隔离——部署/还原、不同 app 复用同一 releaseId 不会互相误命中。
-func (s *Store) getDeploy(op, appID, releaseID string) (string, bool) {
-	var result string
+// 调用方还需比对指纹:仅当指纹一致才短路,否则放行给 Agent 做最终裁决。
+func (s *Store) getDeploy(op, appID, releaseID string) (result, fingerprint string, ok bool) {
 	if err := s.db.QueryRow(
-		"SELECT result FROM deploys WHERE op = ? AND app_id = ? AND release_id = ?",
+		"SELECT result, fingerprint FROM deploys WHERE op = ? AND app_id = ? AND release_id = ?",
 		op, appID, releaseID,
-	).Scan(&result); err != nil {
-		return "", false
+	).Scan(&result, &fingerprint); err != nil {
+		return "", "", false
 	}
-	return result, true
+	return result, fingerprint, true
 }
 
-func (s *Store) putDeploy(op, appID, releaseID, result string) {
+func (s *Store) putDeploy(op, appID, releaseID, result, fingerprint string) {
 	s.db.Exec(
-		`INSERT INTO deploys (op, app_id, release_id, result, created_at) VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(op, app_id, release_id) DO UPDATE SET result = excluded.result, created_at = excluded.created_at`,
-		op, appID, releaseID, result, time.Now().UnixMilli(),
+		`INSERT INTO deploys (op, app_id, release_id, result, fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(op, app_id, release_id) DO UPDATE SET result = excluded.result, fingerprint = excluded.fingerprint, created_at = excluded.created_at`,
+		op, appID, releaseID, result, fingerprint, time.Now().UnixMilli(),
 	)
 }
 

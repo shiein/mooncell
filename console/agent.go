@@ -166,7 +166,7 @@ func (a *api) unknownAgent(w http.ResponseWriter, cl *agentClient) bool {
 // streamAndAudit 透传 Agent 的 SSE 流(部署/还原),同时旁路捕获末尾 done 事件,
 // 据实际结果与会话操作人服务端写一条权威审计;releaseID 非空时记录部署结果用于幂等。
 // 仅用于有限流(部署/还原),日志等无限流不可用此法。
-func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.Response, err error, action, appID, releaseID string) {
+func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.Response, err error, action, appID, releaseID, fingerprint string) {
 	user := a.sessionUser(r)
 	if err != nil {
 		a.store.appendAudit(user, action, appID, "失败·Agent不可达")
@@ -217,7 +217,7 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, resp *http.
 		if action == "还原" {
 			op = "restore"
 		}
-		a.store.putDeploy(op, appID, releaseID, result) // 幂等:按 操作+app+release 记录最终结果
+		a.store.putDeploy(op, appID, releaseID, result, fingerprint) // 幂等:按 操作+app+release 记录结果与指纹
 	}
 }
 
