@@ -84,6 +84,34 @@ test('Runner 不可用时预检提交首个可用 Runner(systemd 而非 pm2)', a
   expect(req.url()).not.toContain('runner=pm2');
 });
 
+test('tomcat-war 的 tomcat Runner 按能力置灰(Agent 无 Tomcat)', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByRole('button', { name: /新建应用/ }).click();
+  await page.getByRole('button', { name: /Tomcat WAR/ }).click();
+  await page.getByRole('button', { name: '下一步', exact: true }).click();
+  // 假 Agent 报 tomcat 不可用 → tomcat Runner option 置灰(不再恒可用)
+  await expect(page.locator('option[value="tomcat"]')).toBeDisabled();
+});
+
+test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByRole('button', { name: /新建应用/ }).click();
+  // 先选 go-binary,手动选 systemd(可用)
+  await page.getByRole('button', { name: /Go Binary/ }).click();
+  await page.getByRole('button', { name: '下一步', exact: true }).click();
+  const runnerSel = page.locator('select').filter({ has: page.locator('option[value="systemd"]') });
+  await runnerSel.selectOption('systemd');
+  await expect(runnerSel).toHaveValue('systemd');
+  // 退回选 static-nginx(runner 仅 软链)→ 陈旧的 systemd 应被自动清空、回落 软链
+  await page.getByRole('button', { name: '上一步', exact: true }).click();
+  await page.getByRole('button', { name: /Static \/ Nginx/ }).click();
+  await page.getByRole('button', { name: '下一步', exact: true }).click();
+  const staticSel = page.locator('select').filter({ has: page.locator('option[value="软链"]') });
+  await expect(staticSel).toHaveValue('软链');
+});
+
 test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ page }) => {
   await login(page);
   // 经 API 建一个真实类型应用(假 Agent 的 backups 端点会 500)

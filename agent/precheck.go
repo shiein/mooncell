@@ -53,8 +53,11 @@ func (a *agent) precheck(w http.ResponseWriter, r *http.Request) {
 	// 3. 运行时 / Runner 能力
 	need := map[string]string{} // capKey → 描述
 	switch q.Get("type") {
-	case "java-jar", "tomcat-war":
+	case "java-jar":
 		need["java"] = "Java 运行时"
+	case "tomcat-war":
+		need["java"] = "Java 运行时"
+		need["tomcat"] = "Tomcat 容器" // 目标机须有 Tomcat,否则换 WAR/健康检查阶段才暴露
 	case "python":
 		need["python"] = "Python 运行时"
 	case "node":

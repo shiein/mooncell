@@ -121,10 +121,10 @@ function CreateAppDialog({ open, onClose }) {
   const typeEntries = Object.entries(DEPLOY_TYPES);
   const schema = type ? APP_SCHEMAS[type] : [];
   const runnersOf = type ? DEPLOY_TYPES[type].runners : [];
-  // Runner 可用性据选中 Agent 的真实能力清单:无进程/软链/tomcat 无能力依赖恒可用;
-  // 能力未知(Agent 不可达)不禁用、留给预检/部署校验;否则按 caps 里该项 ok 判定。
+  // Runner 可用性据选中 Agent 的真实能力清单:仅静态类(无进程/软链)无运行时依赖恒可用;
+  // tomcat/pm2/systemd 等均按 caps 判定。能力未知(Agent 不可达)不禁用、留给预检/部署校验。
   const capOk = (r) => {
-    if (r === "无进程" || r === "软链" || r === "tomcat") return true;
+    if (r === "无进程" || r === "软链") return true; // 静态类无运行时依赖;tomcat 有 caps 依赖,走下方判定
     if (!caps) return true;
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : true;
@@ -132,6 +132,19 @@ function CreateAppDialog({ open, onClose }) {
   // selectedRunner:UI 显示值、预检、创建保存共用同一个 Runner——用户手选则用之,
   // 否则取首个能力可用的 Runner(没有则首个)。杜绝「UI 显示 systemd 却提交 pm2」。
   const selectedRunner = () => form.runner || runnersOf.find(capOk) || runnersOf[0] || "systemd";
+  // Runner 旧选择纠正:能力加载/切类型/换 Agent 后,若已手选的 form.runner 不再属于当前类型
+  // 或能力不可用,清空它 → selectedRunner 自动回落首个可用 Runner(避免提交陈旧的不可用值)。
+  React.useEffect(() => {
+    if (!form.runner) return;
+    const r = form.runner;
+    const inType = (type ? DEPLOY_TYPES[type].runners : []).includes(r);
+    let available = true;
+    if (r !== "无进程" && r !== "软链" && caps) {
+      const c = caps.find((x) => x.key === r);
+      available = c ? c.ok : true;
+    }
+    if (!inType || !available) setForm((f) => ({ ...f, runner: undefined }));
+  }, [caps, type, form.agentId, form.runner]);
 
   return (
     <Dialog open={open} onClose={onClose} width={620}
