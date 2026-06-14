@@ -3,7 +3,7 @@ import React from 'react';
 import { useTweaks } from './lib/tweaks.js';
 import {
   MCStore, INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
-  tsDir, MC_DAY, fmtBytes, isProcessType,
+  tsDir, MC_DAY, fmtBytes,
 } from './lib/data.js';
 import { ToastHost, toast } from './components/primitives.jsx';
 import { Shell } from './components/Shell.jsx';
@@ -159,26 +159,19 @@ function App() {
 
     async toggleApp(app, on) {
       const verb = on ? "启动" : "停止";
-      // 真实进程类:打 Agent 真机启停(systemd/pm2),用返回的真实状态刷新——不再前端伪造 pid/cpu/mem。
-      // Agent 不可达或无托管单元(演示应用)时返回 null,回退到可视化模拟。
-      if (isProcessType(app.type)) {
-        const st = await setAppLifecycle(app.id, on ? "start" : "stop");
-        if (st) {
-          patchApp(app.id, {
-            status: st.active ? "running" : "stopped",
-            pid: st.active && st.pid && st.pid !== "0" ? (Number(st.pid) || st.pid) : null,
-            uptime: st.active ? "刚刚" : "—", cpu: "—", mem: "—",
-          });
-          addAudit(on ? "启动服务" : "停止服务", app.name, "成功"); // 服务端 lifecycle 已权威落审计,这里仅乐观显示
-          toast(`${app.name} 已${verb}`);
-          return;
-        }
+      // 真机启停(systemd/pm2),用 Agent 返回的真实状态刷新——绝不伪造 pid/cpu/mem。
+      // 失败(Agent 不可达 / systemctl 出错 / 无托管单元)返回 null:报错,不写成功状态。
+      const st = await setAppLifecycle(app.id, on ? "start" : "stop");
+      if (!st) {
+        toast(`${app.name} ${verb}失败(Agent 未响应或操作出错)`, { tone: "error", icon: "alert" });
+        return;
       }
-      // 回退:演示/模拟应用(无真机单元)——保留可视化模拟。
-      patchApp(app.id, on
-        ? { status: "running", pid: 20000 + (Math.random() * 9000 | 0), uptime: "刚刚", cpu: "0.8%", mem: app.mem === "—" ? "280 MB" : app.mem }
-        : { status: "stopped", pid: null, uptime: "—", cpu: "—", mem: "—" });
-      addAudit(on ? "启动服务" : "停止服务", app.name, "成功");
+      patchApp(app.id, {
+        status: st.active ? "running" : "stopped",
+        pid: st.active && st.pid && st.pid !== "0" ? (Number(st.pid) || st.pid) : null,
+        uptime: st.active ? "刚刚" : "—", cpu: "—", mem: "—",
+      });
+      addAudit(on ? "启动服务" : "停止服务", app.name, "成功"); // 服务端 lifecycle 已权威落审计,这里仅乐观显示
       toast(`${app.name} 已${verb}`);
     },
 

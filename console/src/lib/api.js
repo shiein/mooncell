@@ -282,12 +282,18 @@ async function restoreViaAgentStream(appId, version, backup, releaseId, onEvent)
 // 订阅应用运行时日志(Agent journal SSE):先收最近 tail 行再实时跟随。
 // onLine({ts,level,text}) 每行回调;signal 用于暂停/离开时中断。
 // 返回 {ended}|{aborted}|{error}——error 时调用方回退到模拟日志。
-async function streamAppLogs(appId, { tail = 200, signal, onLine, agentId, runner }) {
+async function streamAppLogs(appId, { tail = 200, signal, onLine, agentId, runner, path }) {
   let r;
   try {
-    let url = `/api/agent/apps/${encodeURIComponent(appId)}/logs/stream?tail=${tail}`;
+    // path 指定时跟随该声明日志文件(Console 校验属于本应用 logPaths);否则跟随进程 journal/pm2。
+    let url;
+    if (path) {
+      url = `/api/agent/apps/${encodeURIComponent(appId)}/logs/file/stream?path=${encodeURIComponent(path)}&tail=${tail}`;
+    } else {
+      url = `/api/agent/apps/${encodeURIComponent(appId)}/logs/stream?tail=${tail}`;
+      if (runner === 'pm2') url += `&runner=pm2`;
+    }
     if (agentId && agentId !== 'default') url += `&agent=${encodeURIComponent(agentId)}`;
-    if (runner === 'pm2') url += `&runner=pm2`;
     r = await fetch(url, { credentials: 'same-origin', signal });
   } catch (e) {
     return e.name === 'AbortError' ? { aborted: true } : { error: 'Agent 不可达: ' + (e.message || e) };

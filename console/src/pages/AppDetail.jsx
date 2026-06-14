@@ -209,20 +209,29 @@ function LogViewer({ app }) {
   const [follow, setFollow] = React.useState(true);
   const [filter, setFilter] = React.useState("");
   const [onlyMatch, setOnlyMatch] = React.useState(false);
-  const [logFile, setLogFile] = React.useState(app.logPaths[0]);
+  // 日志源:__journal__ 跟随进程 journal/pm2;其余为应用声明的具体日志文件(Console 按 logPaths 授权)。
+  const JOURNAL = "__journal__";
+  const journalLabel = app.runner === "pm2" ? "进程日志 · pm2" : "进程日志 · journal";
+  const logOptions = [{ value: JOURNAL, label: journalLabel }, ...(app.logPaths || []).map((p) => ({ value: p, label: p }))];
+  const [logSrc, setLogSrc] = React.useState(JOURNAL);
+  const followingFile = logSrc !== JOURNAL;
 
   const append = (line) => setLines((s) => { const n = [...s, line]; return n.length > 400 ? n.slice(-400) : n; });
 
-  // 真实日志:订阅 Agent journal SSE;暂停/切换/离开时 abort,不可达则标记回退模拟。
+  // 真实日志:订阅 Agent SSE。logSrc=journal 跟随进程日志;否则跟随选中的声明日志文件。
+  // 暂停/切源/离开时 abort,不可达则标记回退模拟。
   React.useEffect(() => {
     if (!useReal || !follow) return;
     const ac = new AbortController();
     let cancelled = false;
     setLines([]); // 重新拉取 tail,避免暂停后重复
-    streamAppLogs(app.id, { tail: 200, signal: ac.signal, agentId: app.agentId, runner: app.runner, onLine: (l) => { if (!cancelled) append(l); } })
-      .then((res) => { if (res && res.error && !cancelled) setRealFailed(true); });
+    streamAppLogs(app.id, {
+      tail: 200, signal: ac.signal, agentId: app.agentId, runner: app.runner,
+      path: followingFile ? logSrc : undefined,
+      onLine: (l) => { if (!cancelled) append(l); },
+    }).then((res) => { if (res && res.error && !cancelled) setRealFailed(true); });
     return () => { cancelled = true; ac.abort(); };
-  }, [useReal, follow, app.id]);
+  }, [useReal, follow, app.id, logSrc]);
 
   // 模拟日志:非进程类应用或真实流回退时使用。
   React.useEffect(() => {
@@ -251,7 +260,7 @@ function LogViewer({ app }) {
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <div style={{ width: 300 }}>
-          <Select value={logFile} onChange={setLogFile} options={app.logPaths} style={{ fontFamily: "var(--font-mono)", fontSize: 12 }} />
+          <Select value={logSrc} onChange={setLogSrc} options={logOptions} style={{ fontFamily: "var(--font-mono)", fontSize: 12 }} />
         </div>
         <div style={{ position: "relative", width: 220 }}>
           <Icon name="search" size={13} style={{ position: "absolute", left: 9, top: 8, color: "var(--muted-fg)" }} />
@@ -262,7 +271,7 @@ function LogViewer({ app }) {
         </label>
         <div style={{ flex: 1 }}></div>
         <Badge tone={follow ? "success" : "default"} dot={follow}>
-          {useReal ? (follow ? "Agent journal 实时" : "已暂停")
+          {useReal ? (follow ? (followingFile ? "文件 tail -F 实时" : "Agent journal 实时") : "已暂停")
             : genActive ? (follow ? "tail -F 实时跟随(演示)" : "已暂停") : "进程未运行 · 历史日志"}
         </Badge>
         <Btn size="sm" icon={follow ? "pause" : "play"} onClick={() => setFollow(!follow)}>{follow ? "暂停" : "继续"}</Btn>
@@ -277,8 +286,8 @@ function LogViewer({ app }) {
       </div>
       <Console lines={shown} filter={filter} height={460} />
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>
-        <span className="mono">{useReal ? (app.runner === "pm2" ? `pm2 logs deploy-${app.id}` : `journalctl -u deploy-${app.id}`) : logFile}</span>
-        <span>缓冲 {lines.length} / 400 行 · {useReal ? "journald 跟随(轮转安全)" : "轮转安全(fsnotify 重开文件)"}</span>
+        <span className="mono">{useReal ? (followingFile ? `tail -F ${logSrc}` : (app.runner === "pm2" ? `pm2 logs deploy-${app.id}` : `journalctl -u deploy-${app.id}`)) : (app.logPaths && app.logPaths[0]) || "—"}</span>
+        <span>缓冲 {lines.length} / 400 行 · {useReal ? (followingFile ? "tail -F 跟随(轮转安全)" : "journald 跟随(轮转安全)") : "轮转安全(fsnotify 重开文件)"}</span>
       </div>
     </div>
   );
