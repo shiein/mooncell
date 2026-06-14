@@ -7,7 +7,7 @@ import {
 } from './lib/data.js';
 import { ToastHost, toast } from './components/primitives.jsx';
 import { Shell } from './components/Shell.jsx';
-import { LoginPage, SetupWizard } from './pages/Login.jsx';
+import { LoginPage } from './pages/Login.jsx';
 import { OverviewPage, CabinetPage, AuditPage } from './pages/Overview.jsx';
 import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
@@ -235,12 +235,11 @@ function App() {
 
   // ---- auth handlers ----
   // cookie 已由 /api/login 在登录成功时种下,这里只更新前端状态。
-  // 兼容传字符串(向导)或 {user, role}(登录)。
+  // 只接受后端登录返回的 {user, role};不再有任何前端绕过入口(演示向导已移除)。
   const login = (res) => {
-    const u = typeof res === "string" ? res : res.user;
-    const rl = typeof res === "string" ? "admin" : (res.role || "viewer");
-    setSession(u); setRole(rl); setView("console");
-    toast(`欢迎回来,${u}`);
+    if (!res || !res.user) return; // 防御:无后端返回不进入主壳
+    setSession(res.user); setRole(res.role || "viewer"); setView("console");
+    toast(`欢迎回来,${res.user}`);
   };
   const logout = async () => {
     await apiLogout();
@@ -266,8 +265,7 @@ function App() {
   return (
     <MCStore.Provider value={store}>
       <div data-screen-label={screenLabel} style={{ height: "100%" }}>
-        {view === "login" ? <LoginPage onLogin={login} onWizard={() => setView("wizard")} /> : null}
-        {view === "wizard" ? <SetupWizard onDone={login} onBack={() => setView("login")} /> : null}
+        {view === "login" ? <LoginPage onLogin={login} /> : null}
         {view === "console" ? (
           <Shell page={route.page} onNav={(p) => nav(p)} crumbs={crumbs}
             theme={t.dark ? "dark" : "light"} onTheme={() => setTweak("dark", !t.dark)}

@@ -14,6 +14,15 @@ async function login(page) {
   await expect(usernameInput(page)).toHaveCount(0, { timeout: 10000 });
 }
 
+test('登录页无任何前端绕过入口(演示向导已移除)', async ({ page }) => {
+  await page.goto('/');
+  await expect(usernameInput(page)).toBeVisible();
+  // 不存在演示初始化向导入口;用户名/密码默认不预填(不泄露默认口令)
+  await expect(page.getByText(/首次初始化向导|演示/)).toHaveCount(0);
+  await expect(usernameInput(page)).toHaveValue('');
+  await expect(page.locator('input[type="password"]')).toHaveValue('');
+});
+
 test('登录失败显示错误,不进入主壳', async ({ page }) => {
   await page.goto('/');
   await usernameInput(page).fill('admin');
