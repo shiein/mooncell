@@ -83,7 +83,7 @@ function CreateAppDialog({ open, onClose }) {
     const binPath = binPathOf(id);
     const params = new URLSearchParams({
       binPath, port: form.port || "", type,
-      runner: form.runner || (DEPLOY_TYPES[type].runners[0] || "systemd"),
+      runner: selectedRunner(),
       agent: form.agentId || "default",
     });
     const res = await precheckApp(params.toString());
@@ -104,7 +104,7 @@ function CreateAppDialog({ open, onClose }) {
     const interp = type === "python" ? (form.interp || "") : type === "node" ? (form.nodePath || "") : "";
     store.addApp({
       id: id + "-" + Math.random().toString(36).slice(2, 5),
-      name: form.name || "未命名应用", type, runner: form.runner || DEPLOY_TYPES[type].runners[0],
+      name: form.name || "未命名应用", type, runner: selectedRunner(),
       status: "stopped", version: "—", pid: null, port: +(form.port || 8080),
       path, interp, workdir: form.workdir || `/srv/apps/${id}`,
       health: form.health || "端口探活 :" + (form.port || 8080), healthType: form.health ? "HTTP 200" : "端口探活",
@@ -129,6 +129,9 @@ function CreateAppDialog({ open, onClose }) {
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : true;
   };
+  // selectedRunner:UI 显示值、预检、创建保存共用同一个 Runner——用户手选则用之,
+  // 否则取首个能力可用的 Runner(没有则首个)。杜绝「UI 显示 systemd 却提交 pm2」。
+  const selectedRunner = () => form.runner || runnersOf.find(capOk) || runnersOf[0] || "systemd";
 
   return (
     <Dialog open={open} onClose={onClose} width={620}
@@ -169,7 +172,7 @@ function CreateAppDialog({ open, onClose }) {
               <input className="input" placeholder="如:数据查询平台后端" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </Field>
             <Field label="Runner" hint="按所选 Agent 真实能力清单过滤,不可用项置灰禁用">
-              <Select value={form.runner || runnersOf.find(capOk) || runnersOf[0]} onChange={(v) => setForm({ ...form, runner: v })}
+              <Select value={selectedRunner()} onChange={(v) => setForm({ ...form, runner: v })}
                 options={runnersOf.map((r) => ({ value: r, label: capOk(r) ? r : r + "(Agent 未检测到)", disabled: !capOk(r) }))} />
             </Field>
           </div>

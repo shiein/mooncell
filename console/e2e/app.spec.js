@@ -68,6 +68,22 @@ test('新建应用 Runner 按真实能力置灰(pm2 不可用)', async ({ page }
   await expect(page.locator('option[value="systemd"]')).toBeEnabled();
 });
 
+test('Runner 不可用时预检提交首个可用 Runner(systemd 而非 pm2)', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByRole('button', { name: /新建应用/ }).click();
+  // node 的 Runner 顺序是 pm2 / systemd;假 Agent 报 pm2 不可用 → 应回落 systemd
+  await page.getByRole('button', { name: /Node\.js/ }).click();
+  await page.getByRole('button', { name: '下一步', exact: true }).click();
+  await page.getByPlaceholder(/数据查询平台后端/).fill('e2e-runner');
+  // 拦截预检请求:UI 不手选 Runner 时,提交的应是 systemd(首个可用)而非 pm2(第一个但不可用)
+  const reqPromise = page.waitForRequest((r) => r.url().includes('/api/agent/precheck'));
+  await page.getByRole('button', { name: '执行预检' }).click();
+  const req = await reqPromise;
+  expect(req.url()).toContain('runner=systemd');
+  expect(req.url()).not.toContain('runner=pm2');
+});
+
 test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ page }) => {
   await login(page);
   // 经 API 建一个真实类型应用(假 Agent 的 backups 端点会 500)

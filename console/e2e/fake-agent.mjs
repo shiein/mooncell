@@ -20,6 +20,7 @@ const srv = http.createServer((req, res) => {
     ],
   });
   if (p === '/api/system') return json(res, 200, { cpuPercent: 10, memPercent: 20, disk: { usedPercent: 30 } });
+  if (p === '/api/precheck') return json(res, 200, { checks: [{ label: '目标目录可写', ok: true, detail: '/srv/apps' }] });
   // 备份列表:故意 500,用于验证前端「备份失败态」(不回退 mock)
   if (/\/api\/apps\/.+\/backups$/.test(p)) return json(res, 500, { error: 'fake backend error' });
   // 部署流:消费完 body 后回 SSE done success
