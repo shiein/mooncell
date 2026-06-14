@@ -156,7 +156,7 @@ type Runner interface {
 
 ## 6. 登录与权限
 
-- 本地账号:用户名 + bcrypt 密码,存 SQLite。首次启动向导创建管理员。
+- 本地账号:用户名 + bcrypt 密码,存 SQLite。首次启动由后端 `seedAdmin` 据 `config.toml [admin]` 种入管理员(用户表为空时),无 UI 向导。
 - 会话:JWT(短期)+ refresh,或服务端 session(单机更简单,推荐 session + httpOnly cookie)。
 - 角色(够用即可,不过度设计):
   - `admin`:用户管理、Agent 管理、全部操作
@@ -230,10 +230,11 @@ type Runner interface {
 
 ## 11. 初始化与日常流程
 
-**首次初始化向导(Console 第一次打开):**
-1. 创建管理员账号
-2. 添加 Agent(地址 + token,连通性测试)
-3. 创建第一个应用:选部署类型 → 按 Schema 填配置(pm2 进程名 / jar 路径 / 静态目录…)→ Agent 端预检(路径是否存在、端口是否占用、pm2/java 是否可用)→ 保存
+**首次初始化(配置/脚本驱动,非 UI 向导):**
+> 实现现状:不提供「首次初始化向导」UI(早期设想的演示向导已移除,因为它是前端绕过登录的入口)。初始化由 **`config.toml` + `install.sh`** 驱动:
+> 1. 管理员账号——`[admin]` 仅在用户表为空时由后端 `seedAdmin` 种入(bcrypt);对外监听(`0.0.0.0`)前必须改默认口令,否则启动被拒。
+> 2. 默认 Agent——`[agent]` 配置地址 + token(与 Agent 端 `[security].token` 一致);多 Agent 在「Agent 管理」页注册。
+> 3. 创建应用——登录后在「应用 → 新建应用」向导:选部署类型 → 按 Schema 填配置 → Agent 端真实预检(路径白名单/可写、端口占用、运行时/Runner 能力)→ 保存。
 
 **日常部署:**
 上传制品 → 自动走流水线 → 实时看进度 → 成功/失败(失败可一键回滚)。

@@ -96,7 +96,7 @@ src/
     Shell.jsx         侧边栏 + 顶栏
     pipeline.jsx      部署流水线模拟 + 部署/还原对话框
   pages/
-    Login.jsx         登录页 + 初始化向导
+    Login.jsx         登录页(仅真实后端登录,无绕过入口)
     Overview.jsx      总览 / 文件柜 / 审计日志
     Apps.jsx          应用列表 + 新建向导
     AppDetail.jsx     应用详情(概览/记录/备份/日志/配置)
