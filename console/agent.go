@@ -290,14 +290,27 @@ func (a *api) streamAgentResp(w http.ResponseWriter, resp *http.Response, err er
 	}
 }
 
-// agentListBackups 透传 GET 历史备份列表(Agent 据已存应用配置服务端派生)。
+// agentListBackups 透传历史备份列表(Agent 据已存应用配置服务端派生)。
+// static-nginx 的历史版本是 release 软链,改查 /releases(binPath 服务端从应用配置取)。
 func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	cl, _ := a.appRouting(id)
 	if a.unknownAgent(w, cl) {
 		return
 	}
-	status, body, err := cl.get("/api/apps/" + id + "/backups")
+	path := "/api/apps/" + id + "/backups"
+	if raw, ok := a.store.getEntity("app", id); ok {
+		var app appConfig
+		json.Unmarshal(raw, &app)
+		if app.Type == "static-nginx" {
+			binPath := app.Path
+			if f := strings.Fields(app.Path); len(f) > 0 {
+				binPath = f[0]
+			}
+			path = "/api/apps/" + id + "/releases?binPath=" + url.QueryEscape(binPath)
+		}
+	}
+	status, body, err := cl.get(path)
 	relayAgent(w, status, body, err)
 }
 

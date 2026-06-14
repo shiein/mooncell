@@ -1,6 +1,6 @@
 // Mooncell — 部署流水线:计划构建 + 模拟引擎 + 视图 + 部署/还原对话框
 import React from 'react';
-import { useMC, tsDir, DEPLOY_TYPES, isProcessType, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
+import { useMC, tsDir, DEPLOY_TYPES, isProcessType, isRealType, nextVersion, randSha, AGENT, fmtClock, fmtTime } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
 import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
 
@@ -326,7 +326,7 @@ function DeployDialog({ app, open, onClose }) {
   if (!app) return null;
 
   // 进程类(go-binary/java-jar/python)且上传了真实文件 → 走 Agent 真实部署;否则(其它类型 / 示例制品)沿用模拟。
-  const isReal = isProcessType(app.type) && !!realFile;
+  const isReal = isRealType(app.type) && !!realFile;
   const ext = DEPLOY_TYPES[app.type].artifactExt;
   const chunks = up.file ? Math.ceil(up.file.sizeMB / 4) : 0;
 
@@ -515,7 +515,7 @@ function RestoreDialog({ app, backup, open, onClose }) {
   if (!app || !backup) return null;
 
   // 进程类且该备份是 Agent 上的真实备份 → 走真机还原;否则(其它类型 / mock 备份)沿用模拟。
-  const isReal = isProcessType(app.type) && !!backup.real;
+  const isReal = isRealType(app.type) && !!backup.real;
 
   const startRestore = async () => {
     setStage("pipeline");

@@ -1,6 +1,6 @@
 // Mooncell — 应用详情:概览 / 部署记录 / 备份还原 / 实时日志 / 配置
 import React from 'react';
-import { useMC, DEPLOY_TYPES, isProcessType, REL_STATUS, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
+import { useMC, DEPLOY_TYPES, isProcessType, isRealType, REL_STATUS, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
 import { Icon, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Tabs, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { Console, DeployDialog, RestoreDialog } from '../components/pipeline.jsx';
 import { listAgentBackups, streamAppLogs } from '../lib/api.js';
@@ -128,7 +128,7 @@ function BackupsTab({ app, onRestore }) {
   const [realBaks, setRealBaks] = React.useState(null);
   React.useEffect(() => {
     let alive = true;
-    if (isProcessType(app.type)) {
+    if (isRealType(app.type)) {
       listAgentBackups(app.id, app.agentId).then((arr) => {
         if (alive && arr) setRealBaks(arr.map((b) => normAgentBackup(b, app.id)));
       });

@@ -22,6 +22,11 @@ const DEPLOY_TYPES = {
 const PROCESS_TYPES = ["go-binary", "java-jar", "python", "node"];
 const isProcessType = (t) => PROCESS_TYPES.includes(t);
 
+// 所有有真机 Deployer 的类型:进程类 + static-nginx(软链)+ tomcat-war(容器)。
+// 决定真机部署/还原/备份是否走 Agent(日志另判,见 isProcessType)。
+const REAL_TYPES = [...PROCESS_TYPES, "static-nginx", "tomcat-war"];
+const isRealType = (t) => REAL_TYPES.includes(t);
+
 // fmtBytes 把字节数格式化为人类可读;非数字原样返回(兼容旧的字符串 size)。
 function fmtBytes(n) {
   if (typeof n !== "number") return n || "—";
@@ -313,7 +318,7 @@ function nextVersion(v) {
 }
 
 export {
-  MCStore, useMC, DEPLOY_TYPES, isProcessType, fmtBytes, APP_STATUS, REL_STATUS,
+  MCStore, useMC, DEPLOY_TYPES, isProcessType, isRealType, fmtBytes, APP_STATUS, REL_STATUS,
   INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
   AGENT, genSeries, genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
   NOW as MC_NOW, MIN as MC_MIN, HOUR as MC_HOUR, DAY as MC_DAY,

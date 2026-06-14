@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // RestoreRequest 是还原请求体。Agent 无状态:Console 下发全量应用配置 + 要还原到的备份目录名。
@@ -43,7 +44,7 @@ func (a *agent) backupArtifact(id, backup string) (string, error) {
 	return "", fmt.Errorf("备份制品不存在: %s", dir)
 }
 
-// prepareRestore 解析还原请求、定位备份制品并做安全校验;失败已写好响应,ok=false。
+// prepareRestore 解析还原请求并做安全校验;失败已写好响应,ok=false。返回 cfg 与备份标识(进程类=备份目录名、static=release 时间戳)。
 func (a *agent) prepareRestore(w http.ResponseWriter, r *http.Request) (DeployConfig, string, bool) {
 	var zero DeployConfig
 	id := r.PathValue("id")
@@ -54,56 +55,145 @@ func (a *agent) prepareRestore(w http.ResponseWriter, r *http.Request) (DeployCo
 	}
 	cfg := req.Config
 	cfg.ID = id // 以路径为准
-
-	// static-nginx 的历史版本是 <BinPath>-releases/<ts>/ 软链,不走 BackupDir,还原机制不同。
-	if cfg.Type == "static-nginx" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "static-nginx 暂不支持备份还原(历史版本以 release 软链保留)"})
-		return zero, "", false
-	}
-	// 安全边界:落盘路径必须在白名单根目录内(与部署同一道防穿越)。
 	if !withinRoots(cfg.BinPath, a.cfg.Paths.DeployRoots) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "制品路径不在白名单内: " + cfg.BinPath})
 		return zero, "", false
 	}
-	artifact, err := a.backupArtifact(id, req.Backup)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if b := req.Backup; b == "" || b != filepath.Base(b) || strings.Contains(b, "..") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法备份名"})
 		return zero, "", false
 	}
-	return cfg, artifact, true
+	return cfg, req.Backup, true
 }
 
-// restore 处理 POST /api/apps/{id}/restore(同步):用指定备份制品重跑部署流水线,一次性返回结果。
-func (a *agent) restore(w http.ResponseWriter, r *http.Request) {
-	cfg, artifact, ok := a.prepareRestore(w, r)
-	if !ok {
-		return
+// runRestore 按类型还原:static-nginx 切换软链到历史 release;进程类用备份制品重跑流水线。
+func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) DeployResult {
+	if emit == nil {
+		emit = func(Step) {}
 	}
-	// 先把备份制品拷到临时文件:流水线里 backupCurrent 会滚动清理备份,
-	// 还原最老备份且达保留上限时,源可能在替换前被清掉。拷出来即免疫。
+	if cfg.Type == "static-nginx" {
+		return a.restoreStatic(cfg, backup, emit)
+	}
+	artifact, err := a.backupArtifact(cfg.ID, backup)
+	if err != nil {
+		s := Step{Name: "校验备份", OK: false, Logs: []string{err.Error()}}
+		emit(s)
+		return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
+	}
+	// 拷到临时文件:流水线 backupCurrent 滚动清理可能删掉还原源,拷出来即免疫。
 	tmp, cleanup, err := copyToTemp(artifact)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "准备还原源失败"})
-		return
+		s := Step{Name: "准备还原源", OK: false, Logs: []string{err.Error()}}
+		emit(s)
+		return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
 	}
 	defer cleanup()
-	res := a.runDeployIdempotent(cfg, tmp, nil)
-	writeJSON(w, http.StatusOK, res)
+	return a.runDeployIdempotent(cfg, tmp, emit)
 }
 
-// restoreStream 处理 POST /api/apps/{id}/restore/stream(SSE):还原流水线逐步推送,前端实时呈现。
-func (a *agent) restoreStream(w http.ResponseWriter, r *http.Request) {
-	cfg, artifact, ok := a.prepareRestore(w, r)
+// restoreStatic 把静态站点软链切回指定历史 release(<BinPath>-releases/<ts>/),失败回滚软链。
+func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step)) DeployResult {
+	res := DeployResult{Version: cfg.Version}
+	add := func(name string, ok bool, logs ...string) {
+		s := Step{Name: name, OK: ok, Logs: logs}
+		res.Steps = append(res.Steps, s)
+		emit(s)
+	}
+	releaseDir := filepath.Join(cfg.BinPath+"-releases", releaseTS)
+	if !fileExists(releaseDir) {
+		add("校验 release", false, "历史 release 不存在: "+releaseDir)
+		res.Result = "failed"
+		return res
+	}
+	add("校验 release", true, releaseDir)
+
+	prevTarget, _ := os.Readlink(cfg.BinPath)
+	add("记录当前指向", true, "当前 → "+prevTarget)
+
+	if err := switchSymlink(releaseDir, cfg.BinPath); err != nil {
+		add("切换软链", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	add("切换软链", true, cfg.BinPath+" → "+releaseDir)
+	if ran, log, _ := runReload(cfg.ReloadCmd); ran {
+		add("reload", true, log)
+	}
+
+	var hlog []string
+	if healthCheck(cfg.Health, &hlog) {
+		add("健康检查", true, hlog...)
+		res.Result = "success"
+		return res
+	}
+	add("健康检查", false, hlog...)
+	// 回滚:切回原 release
+	if prevTarget == "" {
+		add("回滚", false, "无原 release 指向可回滚")
+		res.Result = "failed"
+		return res
+	}
+	switchSymlink(prevTarget, cfg.BinPath)
+	runReload(cfg.ReloadCmd)
+	var rh []string
+	ok := healthCheck(cfg.Health, &rh)
+	add("回滚 · 软链", ok, append([]string{"切回 " + prevTarget}, rh...)...)
+	if ok {
+		res.Result = "rolledback"
+	} else {
+		res.Result = "failed"
+	}
+	return res
+}
+
+// restore 处理 POST /api/apps/{id}/restore(同步)。
+func (a *agent) restore(w http.ResponseWriter, r *http.Request) {
+	cfg, backup, ok := a.prepareRestore(w, r)
 	if !ok {
 		return
 	}
-	tmp, cleanup, err := copyToTemp(artifact) // 同步端注释:保护被还原的备份源不被滚动清理删掉
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "准备还原源失败"})
+	writeJSON(w, http.StatusOK, a.runRestore(cfg, backup, nil))
+}
+
+// restoreStream 处理 POST /api/apps/{id}/restore/stream(SSE)。
+func (a *agent) restoreStream(w http.ResponseWriter, r *http.Request) {
+	cfg, backup, ok := a.prepareRestore(w, r)
+	if !ok {
 		return
 	}
-	defer cleanup()
-	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeployIdempotent(cfg, tmp, emit) })
+	runSSE(w, func(emit func(Step)) DeployResult { return a.runRestore(cfg, backup, emit) })
+}
+
+// listReleases 处理 GET /api/apps/{id}/releases?binPath= :列出静态站点历史 release(<binPath>-releases/,新→旧)。
+// binPath 经白名单校验;复用 BackupInfo 形态,Dir 为 release 时间戳(还原时回传)。
+func (a *agent) listReleases(w http.ResponseWriter, r *http.Request) {
+	binPath := r.URL.Query().Get("binPath")
+	if !withinRoots(binPath, a.cfg.Paths.DeployRoots) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "路径不在白名单内"})
+		return
+	}
+	entries, err := os.ReadDir(binPath + "-releases")
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"backups": []BackupInfo{}})
+		return
+	}
+	cur, _ := os.Readlink(binPath) // 当前指向的 release(标注用)
+	list := []BackupInfo{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		bi := BackupInfo{Dir: e.Name()}
+		if t, perr := time.Parse("20060102_150405.000000000", e.Name()); perr == nil {
+			bi.Time = t.UnixMilli()
+		}
+		if filepath.Base(cur) == e.Name() {
+			bi.Version = "当前"
+		}
+		list = append(list, bi)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Dir > list[j].Dir })
+	writeJSON(w, http.StatusOK, map[string]any{"backups": list})
 }
 
 // listBackups 处理 GET /api/apps/{id}/backups:列出该应用 BackupDir 下的真实备份(新→旧)。
