@@ -26,13 +26,16 @@ func main() {
 	if maxUpload <= 0 {
 		maxUpload = 1024 << 20
 	}
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}}
 
-	// 文件柜过期清理:启动即清一次,之后每小时一次。
+	// 文件柜过期清理 + 分块上传残留清理:启动即清一次,之后每小时一次。
 	go func() {
 		for {
 			if n := a.cleanupExpiredCabinet(); n > 0 {
 				log.Printf("[cabinet] 清理过期文件 %d 个", n)
+			}
+			if n := a.cleanupStaleUploads(); n > 0 {
+				log.Printf("[upload] 清理过期上传会话 %d 个", n)
 			}
 			time.Sleep(time.Hour)
 		}
@@ -52,6 +55,11 @@ func main() {
 	mux.HandleFunc("GET /api/agent/capabilities", a.requireAuth(a.agentProxy("/api/capabilities")))
 	mux.HandleFunc("GET /api/agent/system", a.requireAuth(a.agentProxy("/api/system")))
 	mux.HandleFunc("GET /api/agent/precheck", a.requireAuth(a.agentPrecheck))
+	// 分块上传(断点续传):大制品先分块传到 Console,完成后用 uploadId 触发部署。限 write。
+	mux.HandleFunc("POST /api/upload/start", writeRoles(a.uploadStart))
+	mux.HandleFunc("PUT /api/upload/{uploadId}", writeRoles(a.uploadChunk))
+	mux.HandleFunc("GET /api/upload/{uploadId}", writeRoles(a.uploadStatus))
+	mux.HandleFunc("DELETE /api/upload/{uploadId}", writeRoles(a.uploadAbort))
 	mux.HandleFunc("POST /api/agent/apps/{id}/deploy/stream", writeRoles(a.agentDeployStream))
 	mux.HandleFunc("GET /api/agent/apps/{id}/status", a.requireAuth(a.agentAppStatus))
 	mux.HandleFunc("POST /api/agent/apps/{id}/lifecycle", writeRoles(a.agentLifecycle))

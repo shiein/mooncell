@@ -236,18 +236,57 @@ async function consumeSSE(r, onEvent, errLabel) {
 // releaseId 提供幂等(同 id 已成功不重复部署)。onEvent(type,data) 回调;返回 {result,version,steps} 或 {error}。
 // 制品 sha256 由 Console 服务端权威计算并下发给 Agent 强校验(保证 Console→Agent 完整性),
 // 前端无需计算。
-async function deployViaAgentStream(appId, version, releaseId, file, onEvent) {
+const CHUNK_SIZE = 8 * 1024 * 1024;        // 8MB 分块
+const CHUNK_THRESHOLD = 16 * 1024 * 1024;  // 超过 16MB 走分块上传 + 断点续传
+const CHUNK_RETRY = 3;                      // 单块失败重试次数(断点续传)
+
+// uploadChunked 把大文件分块顺序传到 Console,失败按 nextIndex 续传;返回 uploadId(失败抛错)。
+// onProgress(sent,total) 用于进度展示。
+async function uploadChunked(file, onProgress) {
+  const startR = await fetch('/api/upload/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, size: file.size }), credentials: 'same-origin',
+  });
+  if (!startR.ok) { const d = await startR.json().catch(() => ({})); throw new Error(d.error || '上传初始化失败'); }
+  const { uploadId } = await startR.json();
+  const total = Math.ceil(file.size / CHUNK_SIZE);
+  let index = 0;
+  while (index < total) {
+    const blob = file.slice(index * CHUNK_SIZE, Math.min((index + 1) * CHUNK_SIZE, file.size));
+    let ok = false, lastErr = '';
+    for (let attempt = 0; attempt < CHUNK_RETRY && !ok; attempt++) {
+      try {
+        const r = await fetch(`/api/upload/${uploadId}?index=${index}`, { method: 'PUT', body: blob, credentials: 'same-origin' });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) { ok = true; if (typeof d.nextIndex === 'number') index = d.nextIndex; }
+        else if (r.status === 409 && typeof d.nextIndex === 'number') { index = d.nextIndex; ok = true; } // 续传:对齐服务端进度
+        else lastErr = d.error || ('HTTP ' + r.status);
+      } catch (e) { lastErr = e.message || String(e); }
+    }
+    if (!ok) throw new Error('分块上传失败(已重试): ' + lastErr);
+    onProgress && onProgress(Math.min(index * CHUNK_SIZE, file.size), file.size);
+  }
+  return uploadId;
+}
+
+async function deployViaAgentStream(appId, version, releaseId, file, onEvent, onUpload) {
   try {
     const fd = new FormData();
     fd.append('version', version || '');
     fd.append('releaseId', releaseId || '');
-    fd.append('artifact', file);
+    // 大制品:先分块上传(断点续传)到 Console,再用 uploadId 触发部署;小制品直接随表单上传。
+    if (file && file.size > CHUNK_THRESHOLD) {
+      const uploadId = await uploadChunked(file, onUpload);
+      fd.append('uploadId', uploadId);
+    } else {
+      fd.append('artifact', file);
+    }
     const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, {
       method: 'POST', body: fd, credentials: 'same-origin',
     });
     return await consumeSSE(r, onEvent, '部署失败');
   } catch (e) {
-    return { error: 'Agent 不可达: ' + (e.message || e) };
+    return { error: '上传/部署失败: ' + (e.message || e) };
   }
 }
 

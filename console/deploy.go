@@ -272,16 +272,34 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	defer cleanupMultipart(r)
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
+	uploadID := r.FormValue("uploadId")
 
 	appRaw, ok := a.store.getEntity("app", id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法部署"})
 		return
 	}
-	file, _, err := r.FormFile("artifact")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品"})
-		return
+	// 制品来源:uploadId(分块上传已收齐的临时文件)优先;否则取本次 multipart 的 artifact 文件。
+	var file interface {
+		io.Reader
+		io.Seeker
+		io.Closer
+	}
+	if uploadID != "" {
+		f, ok := a.openUploadArtifact(uploadID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "上传未完成或会话不存在"})
+			return
+		}
+		defer a.finishUpload(uploadID) // 部署消费后删会话与临时文件
+		file = f
+	} else {
+		f, _, err := r.FormFile("artifact")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品(或 uploadId)"})
+			return
+		}
+		file = f
 	}
 	defer file.Close()
 	// 服务端权威计算制品 sha256(不信任客户端传值),保证 Console→Agent 完整性;Agent 强校验。
