@@ -105,6 +105,7 @@ function CreateAppDialog({ open, onClose }) {
       logPaths: [form.logs || `/srv/apps/${id}/logs/app.log`],
       jvm: form.jvm || form.args || "", user: form.user || "appuser",
       agentId: form.agentId || "default",
+      reload: !!form.reload,
       backupKeep: +(form.backupKeep || 5), lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
       artifactName: id, extraFiles: [],
     });

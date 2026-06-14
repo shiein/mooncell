@@ -230,6 +230,23 @@ func TestDeployFingerprintIncludesRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestBuildAgentConfigMapsReloadFlag(t *testing.T) {
+	static := buildAgentDeployConfig(appConfig{Type: "static-nginx", Path: "/data/web/site", Reload: true}, "v1", "", "r1")
+	if static.ReloadCmd != "nginx-reload" {
+		t.Fatalf("static reload=true 应映射 nginx-reload,got %q", static.ReloadCmd)
+	}
+
+	tomcat := buildAgentDeployConfig(appConfig{Type: "tomcat-war", Path: "/opt/tomcat/webapps/a.war", Reload: true}, "v1", "", "r1")
+	if tomcat.ReloadCmd != "tomcat-restart" {
+		t.Fatalf("tomcat reload=true 应映射 tomcat-restart,got %q", tomcat.ReloadCmd)
+	}
+
+	disabled := buildAgentDeployConfig(appConfig{Type: "static-nginx", Path: "/data/web/site", Reload: false}, "v1", "", "r1")
+	if disabled.ReloadCmd != "" {
+		t.Fatalf("reload=false 不应下发 reloadCmd,got %q", disabled.ReloadCmd)
+	}
+}
+
 // 旧库(单列 release_id 主键)迁移:启动时清空旧表,以复合主键重建,迁移后可正常隔离写入。
 func TestMigrateLegacyDeploys(t *testing.T) {
 	dir := t.TempDir()
