@@ -3,7 +3,7 @@ import React from 'react';
 import { useTweaks } from './lib/tweaks.js';
 import {
   MCStore, INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
-  tsDir, MC_DAY,
+  tsDir, MC_DAY, fmtBytes,
 } from './lib/data.js';
 import { ToastHost, toast } from './components/primitives.jsx';
 import { Shell } from './components/Shell.jsx';
@@ -12,7 +12,7 @@ import { OverviewPage, CabinetPage, AuditPage } from './pages/Overview.jsx';
 import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
 import { UsersPage } from './pages/Users.jsx';
-import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity } from './lib/api.js';
+import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity, removeCabinetFile } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -181,20 +181,18 @@ function App() {
       toast("备份已删除", { icon: "trash" });
     },
 
-    addCabinetFile(name, size, anon) {
-      const code = Array.from({ length: 4 }, () => "ABCDEFGHJKMNPQRSTWXYZ123456789"[Math.random() * 30 | 0]).join("");
-      const f = {
-        id: "cf" + Date.now(), name, size,
-        uploader: anon ? "192.168.10.99(匿名)" : user, time: Date.now(),
-        expires: Date.now() + 7 * MC_DAY, code, public: false, downloads: 0,
-      };
-      setCabinet((s) => [f, ...s]); persist("cabinet", f);
-      if (!anon) addAudit("上传文件", "文件柜 · " + name, "成功");
-      toast(`上传成功 · 提取码 ${code}(7 天后过期)`);
+    // 真实上传:后端已落盘 + 写元数据,这里把返回条目插入前端状态(size 转人类可读)。
+    pushCabinetFile(meta, anon) {
+      const f = { ...meta, size: fmtBytes(meta.size), downloads: meta.downloads || 0 };
+      setCabinet((s) => [f, ...s]);
+      if (!anon) addAudit("上传文件", "文件柜 · " + f.name, "成功");
+      toast(`上传成功 · 提取码 ${f.code}(7 天后过期)`);
     },
 
-    deleteCabinetFile(f) {
-      setCabinet((s) => s.filter((x) => x.id !== f.id)); remove("cabinet", f.id);
+    async deleteCabinetFile(f) {
+      try { await removeCabinetFile(f.id); }
+      catch (e) { toast(e.message || "删除失败", { tone: "error" }); return; }
+      setCabinet((s) => s.filter((x) => x.id !== f.id));
       addAudit("删除文件", "文件柜 · " + f.name, "成功");
       toast("文件已删除", { icon: "trash" });
     },

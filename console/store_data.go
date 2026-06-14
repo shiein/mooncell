@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -82,6 +83,37 @@ func (s *Store) putEntity(kind, id string, data json.RawMessage) error {
 func (s *Store) deleteEntity(kind, id string) error {
 	_, err := s.db.Exec("DELETE FROM entities WHERE kind = ? AND id = ?", kind, id)
 	return err
+}
+
+func (s *Store) getEntity(kind, id string) (json.RawMessage, bool) {
+	var data string
+	if err := s.db.QueryRow("SELECT data FROM entities WHERE kind = ? AND id = ?", kind, id).Scan(&data); err != nil {
+		return nil, false
+	}
+	return json.RawMessage(data), true
+}
+
+// cabinetByCode 按提取码查找文件柜元数据(全表扫 cabinet 实体,数量小可接受)。
+func (s *Store) cabinetByCode(code string) (map[string]any, bool) {
+	rows, err := s.db.Query("SELECT data FROM entities WHERE kind = 'cabinet'")
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var data string
+		if rows.Scan(&data) != nil {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) != nil {
+			continue
+		}
+		if c, _ := m["code"].(string); strings.EqualFold(c, code) {
+			return m, true
+		}
+	}
+	return nil, false
 }
 
 // appendAudit 服务端权威写一条审计实体:真实操作(经 Agent 的部署/还原)由 Console 据会话与

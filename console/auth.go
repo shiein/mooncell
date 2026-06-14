@@ -13,8 +13,9 @@ const sessionCookie = "mc_sid"
 
 // api 持有依赖,挂载各 HTTP handler。
 type api struct {
-	store *Store
-	agent *agentClient
+	store      *Store
+	agent      *agentClient
+	cabinetDir string
 }
 
 func randomToken() string {

@@ -13,6 +13,12 @@ type Config struct {
 	Session  SessionConfig  `toml:"session"`
 	Admin    AdminConfig    `toml:"admin"`
 	Agent    AgentConfig    `toml:"agent"`
+	Cabinet  CabinetConfig  `toml:"cabinet"`
+}
+
+// CabinetConfig 文件柜的二进制落盘目录。
+type CabinetConfig struct {
+	Dir string `toml:"dir"`
 }
 
 // AgentConfig 是 Console 连接 Agent 的地址与共享 token(单机版默认指向本机 Agent)。
@@ -46,6 +52,7 @@ func loadConfig(path string) *Config {
 		Session:  SessionConfig{TTLHours: 168}, // 7 天
 		Admin:    AdminConfig{Username: "admin", Password: "jch@9388"},
 		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: "mc_ag_change_me"},
+		Cabinet:  CabinetConfig{Dir: "cabinet"},
 	}
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		log.Printf("[config] 未能读取 %s(%v),使用内置默认配置", path, err)

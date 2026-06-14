@@ -4,7 +4,7 @@ import { useMC, AGENT, genSeries, timeAgo, fmtTime, tsDir, MC_NOW, MC_DAY } from
 import { Btn, Icon, Badge, Progress, Sparkline, Seg, Switch, CopyChip, EmptyState, Select, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAgent } from '../lib/agent.js';
-import { getAgentPing } from '../lib/api.js';
+import { getAgentPing, uploadCabinetFile } from '../lib/api.js';
 
 function StatCard({ label, value, unit, series, color, extra }) {
   return (
@@ -175,19 +175,30 @@ function CabinetPage() {
   const [found, setFound] = React.useState(null);
   const [uploading, setUploading] = React.useState(false);
   const [prog, setProg] = React.useState(0);
+  const fileRef = React.useRef(null);
+  const canWrite = store.can("write");
 
-  const simUpload = (name, size) => {
-    setUploading(true); setProg(0);
-    const iv = setInterval(() => {
-      setProg((p) => {
-        if (p >= 100) {
-          clearInterval(iv); setUploading(false);
-          store.addCabinetFile(name, size, mode === "anon");
-          return 100;
-        }
-        return p + 8 + Math.random() * 14;
-      });
-    }, 110);
+  // 真实上传:multipart 到 Console,落盘 + 返回元数据。
+  const realUpload = async (file) => {
+    if (!file) return;
+    setUploading(true); setProg(45);
+    try {
+      const meta = await uploadCabinetFile(file, mode === "anon");
+      setProg(100);
+      store.pushCabinetFile(meta, mode === "anon");
+    } catch (e) {
+      toast(e.message || "上传失败", { tone: "error", icon: "alert" });
+    } finally {
+      setUploading(false); setProg(0);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  // 触发浏览器下载(服务端强制 attachment,不会离开当前页)。
+  const dl = (url) => {
+    const a = document.createElement("a");
+    a.href = url; a.rel = "noopener";
+    document.body.appendChild(a); a.click(); a.remove();
   };
 
   const lookup = () => {
@@ -197,9 +208,11 @@ function CabinetPage() {
   };
 
   const zone = (
-    <div className="upload-zone" onClick={() => !uploading && simUpload(
-      ["巡检报告-" + tsDir(Date.now()) + ".pdf", "hotfix-补丁包.tar.gz", "现场日志导出.zip"][Math.random() * 3 | 0],
-      (1 + Math.random() * 80).toFixed(1) + " MB")}>
+    <div className="upload-zone" data-disabled={String(!canWrite)}
+      onClick={() => canWrite && !uploading && fileRef.current && fileRef.current.click()}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => { e.preventDefault(); if (canWrite && e.dataTransfer.files[0]) realUpload(e.dataTransfer.files[0]); }}>
+      <input type="file" ref={fileRef} style={{ display: "none" }} onChange={(e) => realUpload(e.target.files[0])} />
       {uploading ? (
         <div style={{ maxWidth: 320, margin: "0 auto" }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>上传中 · {Math.min(100, prog | 0)}%</div>
@@ -208,9 +221,9 @@ function CabinetPage() {
       ) : (
         <React.Fragment>
           <Icon name="upload" size={20} style={{ color: "var(--muted-fg)" }} />
-          <div style={{ fontWeight: 600, marginTop: 7, fontSize: 13.5 }}>拖拽文件到此处上传(点击演示)</div>
+          <div style={{ fontWeight: 600, marginTop: 7, fontSize: 13.5 }}>{canWrite ? "拖拽文件到此处,或点击选择文件" : "当前角色为只读,无上传权限"}</div>
           <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 3 }}>
-            单文件 ≤ 2 GB · 默认 7 天后自动清理 · 上传后获得提取码 + 直链
+            单文件 ≤ 64 MB · 默认 7 天后自动清理 · 上传后获得提取码 + 直链
           </div>
         </React.Fragment>
       )}
@@ -239,7 +252,7 @@ function CabinetPage() {
                   <div className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{found.name}</div>
                   <div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{found.size} · {timeAgo(found.expires)}过期</div>
                 </div>
-                <Btn size="sm" variant="primary" icon="download" onClick={() => toast("开始下载(模拟)· Content-Disposition: attachment")}>下载</Btn>
+                <Btn size="sm" variant="primary" icon="download" onClick={() => dl(found.public ? `/api/pubfile/${found.code}` : `/api/cabinet/${found.id}/download`)}>下载</Btn>
               </div>
             ) : null}
             <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 10 }}>匿名用户只能凭提取码访问自己的文件,看不到完整列表。</div>
@@ -253,7 +266,7 @@ function CabinetPage() {
                     <tr key={f.id}>
                       <td><span className="mono" style={{ fontSize: 12 }}>{f.name}</span></td>
                       <td style={{ width: 90 }}><span className="mono" style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{f.size}</span></td>
-                      <td style={{ width: 80, textAlign: "right" }}><Btn size="sm" variant="ghost" icon="download" onClick={() => toast("开始下载(模拟)")}></Btn></td>
+                      <td style={{ width: 80, textAlign: "right" }}><Btn size="sm" variant="ghost" icon="download" onClick={() => dl(`/api/pubfile/${f.code}`)}></Btn></td>
                     </tr>
                   ))}
                 </tbody>
@@ -276,13 +289,14 @@ function CabinetPage() {
                     <td><span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{timeAgo(f.time)}</span></td>
                     <td><span style={{ fontSize: 12, color: f.expires - MC_NOW < 3 * MC_DAY ? "var(--warn)" : "var(--muted-fg)" }}>{timeAgo(f.expires)}</span></td>
                     <td><CopyChip text={f.code} /></td>
-                    <td><Switch on={f.public} onChange={() => store.toggleCabinetPublic(f)} /></td>
+                    <td>{canWrite ? <Switch on={f.public} onChange={() => store.toggleCabinetPublic(f)} /> : <span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.public ? "公开" : "私有"}</span>}</td>
                     <td><span className="mono" style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.downloads}</span></td>
                     <td>
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                        <Btn size="sm" variant="ghost" icon="download" title="下载" onClick={() => toast("开始下载(模拟)")}></Btn>
-                        <Btn size="sm" variant="ghost" icon="link" title="复制直链" onClick={() => toast("直链已复制: http://" + AGENT.host.split(":")[0] + "/cabinet/" + f.code)}></Btn>
-                        <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => store.deleteCabinetFile(f)}></Btn>
+                        <Btn size="sm" variant="ghost" icon="download" title="下载" onClick={() => dl(`/api/cabinet/${f.id}/download`)}></Btn>
+                        <Btn size="sm" variant="ghost" icon="link" title={f.public ? "复制公开直链" : "复制下载链接"}
+                          onClick={() => { navigator.clipboard?.writeText(location.origin + (f.public ? `/api/pubfile/${f.code}` : `/api/cabinet/${f.id}/download`)); toast("直链已复制到剪贴板"); }}></Btn>
+                        {canWrite ? <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => store.deleteCabinetFile(f)}></Btn> : null}
                       </div>
                     </td>
                   </tr>

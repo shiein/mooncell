@@ -60,6 +60,22 @@ async function deleteUser(username) {
   return d;
 }
 
+// ---------- 文件柜(真实二进制存储)----------
+async function uploadCabinetFile(file, anon) {
+  const fd = new FormData();
+  fd.append('file', file);
+  if (anon) fd.append('anon', 'true');
+  const r = await fetch('/api/cabinet', { method: 'POST', body: fd, credentials: 'same-origin' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '上传失败');
+  return d; // 后端落库后的条目元数据
+}
+
+async function removeCabinetFile(id) {
+  const r = await fetch(`/api/cabinet/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'same-origin' });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); }
+}
+
 // ---------- Agent(经 Console 代理)----------
 // 任一失败都返回 null,调用方据此回退到 mock 并把 Agent 显示为离线。
 async function agentGet(path) {
@@ -257,6 +273,7 @@ async function streamAppLogs(appId, { tail = 200, signal, onLine }) {
 export {
   login, logout, getSession,
   listUsers, createUser, deleteUser,
+  uploadCabinetFile, removeCabinetFile,
   getAgentCapabilities, getAgentSystem, getAgentPing,
   hydrateData, putEntity, deleteEntity, deployViaAgent, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,

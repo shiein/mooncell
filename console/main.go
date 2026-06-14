@@ -21,7 +21,7 @@ func main() {
 	defer store.Close()
 	store.seedAdmin(cfg.Admin.Username, cfg.Admin.Password)
 
-	a := &api{store: store, agent: newAgentClient(cfg.Agent)}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), cabinetDir: cfg.Cabinet.Dir}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
@@ -53,6 +53,12 @@ func main() {
 	mux.HandleFunc("GET /api/users", a.requireRole("admin")(a.listUsers))
 	mux.HandleFunc("POST /api/users", a.requireRole("admin")(a.createUser))
 	mux.HandleFunc("DELETE /api/users/{username}", a.requireRole("admin")(a.deleteUser))
+
+	// 文件柜:上传/删除限 write;按 id 下载需登录;公开文件凭码免登录下载。
+	mux.HandleFunc("POST /api/cabinet", writeRoles(a.uploadCabinet))
+	mux.HandleFunc("GET /api/cabinet/{id}/download", a.requireAuth(a.downloadCabinet))
+	mux.HandleFunc("DELETE /api/cabinet/{id}", writeRoles(a.deleteCabinet))
+	mux.HandleFunc("GET /api/pubfile/{code}", a.downloadByCode) // 独立前缀,避免与 /api/cabinet/{id}/... 冲突
 
 	// 其余路径交给嵌入的前端静态资源(单页应用,无 URL 路由)。
 	sub, err := fs.Sub(distFS, "dist")

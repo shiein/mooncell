@@ -22,6 +22,15 @@ const DEPLOY_TYPES = {
 const PROCESS_TYPES = ["go-binary", "java-jar", "python"];
 const isProcessType = (t) => PROCESS_TYPES.includes(t);
 
+// fmtBytes 把字节数格式化为人类可读;非数字原样返回(兼容旧的字符串 size)。
+function fmtBytes(n) {
+  if (typeof n !== "number") return n || "—";
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(2) + " GB";
+}
+
 const APP_STATUS = {
   running:   { label: "运行中", tone: "success" },
   stopped:   { label: "已停止", tone: "default" },
@@ -304,7 +313,7 @@ function nextVersion(v) {
 }
 
 export {
-  MCStore, useMC, DEPLOY_TYPES, isProcessType, APP_STATUS, REL_STATUS,
+  MCStore, useMC, DEPLOY_TYPES, isProcessType, fmtBytes, APP_STATUS, REL_STATUS,
   INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
   AGENT, genSeries, genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
   NOW as MC_NOW, MIN as MC_MIN, HOUR as MC_HOUR, DAY as MC_DAY,
