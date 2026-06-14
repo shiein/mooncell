@@ -13,21 +13,28 @@
 │  React + Tailwind(go:embed) ←→ Go(net/http) │
 │         SQLite(modernc.org/sqlite,纯 Go)    │
 └──────────────┬──────────────────────────────┘
-               │ HTTP + SSE/WebSocket(共享 Token)
+               │ HTTP + SSE(共享 Token)
                ▼
 ┌─────────────────────────────────────────────┐
 │              Agent(Go 单二进制)              │
 │  Deployer 插件  Runner 抽象  备份管理  日志流  │
-│        本地状态:bbolt 或 JSON 文件            │
+│        本地状态:文件(_deploys 去重记录)     │
 └──────────────┬──────────────────────────────┘
                ▼
-   nohup / pm2 / systemd / tomcat / nginx 目录
+   pm2 / systemd / tomcat 容器 / nginx 目录
 ```
 
 > **实现说明(v1.1)**:Console 前端最初设想 Vue3 + Element Plus、后端 Node/Fastify;实际落地改为
 > **React + Tailwind 前端 + Go 后端**,前端构建产物经 `//go:embed` 嵌入,Console 本身也成为单二进制
 > (二进制 + `config.toml` + sqlite 即可部署)。下文 §9 技术选型、§10 目录约定已按实际实现订正;
-> Agent 侧设计未变。当前仓库交付的是 **Console + 内置 mock Agent 数据**的前端 1:1 原型,真实 Agent 为后续实现。
+> Agent 侧设计未变。
+>
+> **实现现状(v2,2026-06)**:真实 Agent 已落地并经真机验证——go-binary / java-jar / python / node
+> 五类进程 Deployer(systemd / pm2 Runner)、static-nginx(软链原子切换)、tomcat-war(容器换 WAR);
+> 部署/还原/启停/日志均走真实 Agent,Console 据已存类型化配置服务端生成 Agent 请求(关闭注入面)。
+> Runner 仅 **systemd / pm2**(nohup 未实现,不暴露);实时流统一用 **SSE**(未用 WebSocket);
+> 制品传输为**单次 multipart 上传 + sha256 强校验**(分块/断点续传未实现)。
+> 仅业务展示数据(部分页面)仍可用 mock 种子,生产空库从零起即全真实。
 
 - **Console**:Web 控制台。管理应用、触发部署、查看日志、备份还原、文件柜、登录。
 - **Agent**:部署目标机上的常驻服务。执行实际的文件落盘、进程起停、备份、日志读取。
@@ -69,12 +76,14 @@ CabinetFile   文件柜文件(上传者、提取码、大小、过期策略)
 
 | 类型 | 关键配置项 | Runner |
 |---|---|---|
-| `java-jar` | jar 目标路径、JVM 参数、环境变量、启动用户、健康检查 URL/端口、日志路径 | nohup / pm2 / systemd 三选一 |
-| `tomcat-war` | Tomcat 目录、webapps 名称、是否清理解压目录、JAVA_OPTS、重启方式(脚本/systemd) | tomcat |
-| `go-binary` | 二进制目标路径、启动参数、工作目录、环境变量、健康检查 | nohup / systemd |
-| `python` | 解释器路径(支持 venv)、入口脚本、requirements 是否随包更新、启动参数 | nohup / pm2 / systemd |
-| `node` | 入口文件、pm2 进程名 / ecosystem 配置、node 路径 | pm2 / nohup / systemd |
-| `static-nginx` | 目标目录、是否保留点位(dist 内容 vs 整目录替换)、部署后是否 `nginx -s reload`、nginx 二进制路径 | 无进程(可选 reload 钩子) |
+| `java-jar` | jar 目标路径、JVM 参数、环境变量、启动用户、健康检查 URL/端口、日志路径 | systemd / pm2 |
+| `tomcat-war` | WAR 目标路径(webapps 下)、健康检查、部署后是否 `systemctl restart tomcat` | tomcat 容器 |
+| `go-binary` | 二进制目标路径、启动参数、工作目录、环境变量、健康检查 | systemd / pm2 |
+| `python` | 解释器路径(支持 venv)、入口脚本、启动参数(支持 .py 或 .tar.gz 多文件包) | systemd / pm2 |
+| `node` | 入口文件、pm2 进程名 / ecosystem 配置、node 路径(支持 .js 或 .tar.gz 多文件包) | pm2 / systemd |
+| `static-nginx` | 目标目录、是否整目录替换(vs 仅 dist 内容)、部署后是否 `nginx -s reload`、nginx 二进制路径 | 无进程(可选 reload 钩子) |
+
+> Runner 仅实现 **systemd / pm2** 两种;早期设想的 nohup + pidfile 未实现,UI 不暴露。
 
 通用配置项(所有类型共有):应用名、备份保留份数(默认 5)、部署前/后钩子(**仅限白名单内置动作**,如 reload nginx、清理缓存目录,不是自由脚本)、健康检查(端口探活 / HTTP 200 / 进程存活,超时与重试次数)。
 
@@ -89,19 +98,20 @@ type Runner interface {
 }
 ```
 
-四种实现:
+已实现的 Runner:
 
-1. **nohup + pidfile**:Agent 负责写 pidfile、检测存活、防止重复启动。比裸 nohup 可靠的点在于 pid 由 Agent 托管,stop 不靠 `ps | grep`。
-2. **pm2**:封装 `pm2 start/stop/describe/jlist`,以 JSON 输出解析状态。Agent 启动时探测 pm2 是否可用,不可用则该 Runner 置灰。
-3. **systemd**:Agent 按模板生成 unit 文件(`/etc/systemd/system/deploy-<app>.service`)→ `daemon-reload` → `systemctl start`。**推荐作为新应用默认**:崩溃自动拉起、开机自启、journald 兜底日志。
-4. **tomcat**:`shutdown.sh`/`startup.sh` 或 systemd unit,war 替换 + 可选清理解压目录。
+1. **systemd**(默认):Agent 按模板生成 unit 文件(`/etc/systemd/system/deploy-<app>.service`)→ `daemon-reload` → `systemctl start`。崩溃自动拉起、开机自启、journald 兜底日志;启停经 `systemctl start/stop`,状态查 `is-active` / 主 pid。
+2. **pm2**:落 ecosystem.json + `pm2 start/stop`,以 `pm2 pid/jlist` 解析状态。Agent 启动时探测 pm2 是否可用,不可用则该 Runner 在 UI 置灰。
+3. **tomcat 容器**:容器由运维长驻,平台只原子替换 webapps 下 WAR + 清展开目录 + 可选 `systemctl restart tomcat`,不直接起停容器进程。
+
+> 早期设想的 **nohup + pidfile** Runner 未实现:pidfile 自管理不如交给 systemd/pm2 可靠,故收敛到这两种。
 
 ### 3.3 部署流水线(状态机)
 
 每次部署是一个步骤序列,逐步执行、逐步记录、可中断、失败可自动回滚:
 
 ```
-上传制品(分块 + sha256 校验)
+上传制品(单次 multipart + sha256 强校验)
   → 备份当前版本(制品 + 可选配置文件 → backups/{app}/{ts}/)
   → 停止服务(static 类型跳过)
   → 替换制品(原子操作:先落到 tmp,校验后 rename;静态目录用软链切换,见下)
@@ -137,7 +147,7 @@ type Runner interface {
 ## 5. 日志查看
 
 - **来源**:DeployConfig 中声明的日志路径(支持通配,如 `logs/*.log`)+ Runner 自带日志(pm2 log 路径、journald)。
-- **实时**:Agent 端 tail -F 语义(处理日志轮转),通过 WebSocket/SSE 推到前端;支持暂停、关键字高亮过滤、最近 N 行回看。
+- **实时**:Agent 端 tail -F 语义(处理日志轮转),通过 **SSE** 推到前端(已实现;未用 WebSocket);支持暂停、关键字高亮过滤、最近 N 行回看。
 - **离线排查**:按时间范围打包下载日志(Agent 端 tar.gz 后回传)。
 - **部署日志**与**应用日志**分开两个入口,前者看流水线,后者看运行态。
 - 安全约束:Agent 只允许读取该应用配置中声明的路径,路径规范化后必须落在白名单目录内,防穿越。
@@ -174,11 +184,11 @@ type Runner interface {
 
 - **认证**:Agent 启动时生成/读取 token(config.yaml),Console 添加 Agent 时录入;所有请求带 `Authorization: Bearer`。内网环境这层够用;若有要求可加自签 mTLS。
 - **方向**:Console 主动调 Agent(单机/固定 IP 内网,不需要反向注册那套);Agent 提供:
-  - `POST /api/upload`(分块)、`POST /api/deploy`、`POST /api/rollback`
+  - `POST /api/apps/{id}/deploy[/stream]`(制品随 multipart 一并上传)、`POST /api/apps/{id}/restore/stream`、`POST /api/apps/{id}/lifecycle`(启停)、`DELETE /api/apps/{id}`(下线)
   - `GET /api/apps/{id}/status`、`GET /api/system`(CPU/内存/磁盘)
   - `WS /api/logs/stream`、`GET /api/logs/download`
   - `GET /api/backups`、`DELETE /api/backups/{id}`
-- **制品传输**:分块上传 + 断点续传 + sha256 校验(内网带宽不稳/大 war 包常见)。
+- **制品传输**:当前为单次 multipart 上传 + sha256 强校验(Console 服务端权威计算,Agent 强校验,格式非法即拒)。分块上传 + 断点续传仍是**待实现**项(大 war 包/不稳带宽场景)。
 - **幂等**:deploy 请求带 releaseId,Agent 对同一 releaseId 重复请求直接返回当前状态,防止前端重试导致双部署。
 - **白名单原则**:Agent 没有"执行任意命令"接口;钩子只能从内置动作列表选择。
 
@@ -235,7 +245,7 @@ type Runner interface {
 
 | 阶段 | 内容 |
 |---|---|
-| **P0** | Console 骨架 + 登录;Agent 骨架 + token 认证;`java-jar`(nohup/systemd)与 `static-nginx` 两个 Deployer;上传→部署→健康检查闭环;部署日志展示 |
+| **P0** | Console 骨架 + 登录;Agent 骨架 + token 认证;`java-jar`(systemd)与 `static-nginx` 两个 Deployer;上传→部署→健康检查闭环;部署日志展示 |
 | **P1** | 自动备份 + 一键还原;应用日志实时流(WS)+ 下载;pm2 Runner(覆盖 node/java/python) |
 | **P2** | tomcat-war、go-binary、python Deployer;系统监控面板(CPU/内存/磁盘);审计日志 |
 | **P3** | 文件柜;多 Agent 管理;角色细化;离线安装包打磨(install.sh、升级脚本) |
