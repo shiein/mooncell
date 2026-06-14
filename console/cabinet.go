@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -13,10 +14,20 @@ import (
 	"time"
 )
 
+// isMaxBytes 判断错误是否为请求体超过 MaxBytesReader 上限。
+func isMaxBytes(err error) bool {
+	var mbe *http.MaxBytesError
+	return errors.As(err, &mbe)
+}
+
 // 文件柜:内网临时文件中转。Console 落盘存二进制(cabinet 目录),元数据复用 entity(kind=cabinet)。
 // 上传/删除限 write 角色;按 id 下载需登录(任意角色);公开文件可凭提取码免登录下载。
 
 const cabinetExpiryDays = 7
+
+// cabinetMaxBytes 是单次上传请求体硬上限(64MB)。ParseMultipartForm 的参数只是内存阈值,
+// 超出会落临时盘且 io.Copy 不限大小;必须用 MaxBytesReader 在传输层截断并回 413。
+const cabinetMaxBytes = 64 << 20
 
 // genCode 生成易读的 6 位提取码(去掉易混字符)。
 func genCode() string {
@@ -36,7 +47,13 @@ func (a *api) storedPath(id string) string {
 
 // storeCabinetFile 落盘 + 写元数据的共享核心;public=true 时上传即公开(匿名场景凭码可下载)。
 func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader string, public bool) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
+	// 传输层硬上限:超过即 MaxBytesError,统一回 413,杜绝「文案 64MB、实际不限」。
+	r.Body = http.MaxBytesReader(w, r.Body, cabinetMaxBytes)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		if isMaxBytes(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "文件超过 64MB 上限"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return
 	}
@@ -61,6 +78,10 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 	dst.Close()
 	if err != nil {
 		os.Remove(a.storedPath(id))
+		if isMaxBytes(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "文件超过 64MB 上限"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入失败"})
 		return
 	}

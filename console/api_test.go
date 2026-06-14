@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -183,5 +184,29 @@ func TestMigrateLegacyDeploys(t *testing.T) {
 	s.putDeploy("deploy", "x", "new", "success")
 	if res, ok := s.getDeploy("deploy", "x", "new"); !ok || res != "success" {
 		t.Errorf("迁移后复合主键写入应可用,got %q ok=%v", res, ok)
+	}
+}
+
+// 日志文件 tail 授权:只有应用声明的 logPaths 才放行,其它一律拒绝(防越权读他应用/任意文件)。
+func TestAppDeclaresLog(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s}
+
+	app := appConfig{Name: "x", Type: "go-binary", LogPaths: []string{"/srv/apps/x/logs/app.log", "/srv/apps/x/logs/err.log"}}
+	b, _ := json.Marshal(app)
+	s.putEntity("app", "x", b)
+
+	if !a.appDeclaresLog("x", "/srv/apps/x/logs/app.log") {
+		t.Error("已声明路径应放行")
+	}
+	if a.appDeclaresLog("x", "/srv/apps/other/secret.log") {
+		t.Error("未声明路径必须拒绝")
+	}
+	if a.appDeclaresLog("x", "") {
+		t.Error("空路径必须拒绝")
+	}
+	if a.appDeclaresLog("nope", "/srv/apps/x/logs/app.log") {
+		t.Error("应用不存在必须拒绝")
 	}
 }

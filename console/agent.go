@@ -372,14 +372,21 @@ func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// agentLogFileStream tail 声明的日志文件(Agent 端 log_roots 白名单校验);Agent 据应用 agentId 服务端路由。
+// agentLogFileStream tail 声明的日志文件。除 Agent 端 log_roots 白名单外,Console 先校验
+// 请求的 path 必须属于「该应用已声明的 logPaths」——否则已登录用户可越权 tail log_roots 下
+// 任意文件(含他应用日志)。Agent 据应用 agentId 服务端路由。
 func (a *api) agentLogFileStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	reqPath := r.URL.Query().Get("path")
+	if !a.appDeclaresLog(id, reqPath) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "日志路径不属于该应用声明的 logPaths"})
+		return
+	}
 	cl, _ := a.appRouting(id)
 	if a.unknownAgent(w, cl) {
 		return
 	}
-	path := "/api/apps/" + id + "/logs/file/stream?path=" + url.QueryEscape(r.URL.Query().Get("path"))
+	path := "/api/apps/" + id + "/logs/file/stream?path=" + url.QueryEscape(reqPath)
 	if t := r.URL.Query().Get("tail"); t != "" {
 		path += "&tail=" + url.QueryEscape(t)
 	}

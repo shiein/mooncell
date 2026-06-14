@@ -29,7 +29,8 @@ type appConfig struct {
 	User       string            `json:"user"`
 	AgentID    string            `json:"agentId"`
 	BackupKeep float64           `json:"backupKeep"`
-	Reload     bool              `json:"reload"` // static/tomcat:部署后是否触发 reload 钩子
+	Reload     bool              `json:"reload"`    // static/tomcat:部署后是否触发 reload 钩子
+	LogPaths   []string          `json:"logPaths"`  // 该应用声明的日志文件路径(文件 tail 授权白名单)
 	Env        map[string]string `json:"env"`
 }
 
@@ -88,6 +89,28 @@ func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID st
 	}
 	b, err := json.Marshal(cfg)
 	return b, app.AgentID, err
+}
+
+// appDeclaresLog 校验请求的日志文件路径是否在该应用已存配置声明的 logPaths 内(精确匹配)。
+// 应用不存在或路径不在声明内即拒绝——日志文件 tail 的授权边界,防越权读他应用/任意文件。
+func (a *api) appDeclaresLog(id, path string) bool {
+	if path == "" {
+		return false
+	}
+	raw, ok := a.store.getEntity("app", id)
+	if !ok {
+		return false
+	}
+	var app appConfig
+	if json.Unmarshal(raw, &app) != nil {
+		return false
+	}
+	for _, p := range app.LogPaths {
+		if p == path {
+			return true
+		}
+	}
+	return false
 }
 
 // appRouting 据已存应用配置(authoritative)解析目标 Agent 客户端与 runner,
