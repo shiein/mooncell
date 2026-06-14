@@ -108,7 +108,8 @@ function Select({ options, value, onChange, ...rest }) {
       {options.map((o) => {
         const v = typeof o === "string" ? o : o.value;
         const l = typeof o === "string" ? o : o.label;
-        return <option key={v} value={v}>{l}</option>;
+        const d = typeof o === "object" && !!o.disabled;
+        return <option key={v} value={v} disabled={d}>{l}</option>;
       })}
     </select>
   );

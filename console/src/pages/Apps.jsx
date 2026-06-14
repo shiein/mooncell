@@ -1,10 +1,10 @@
 // Mooncell — 应用列表 + 新建应用向导(JSON Schema 动态表单 + 预检)
 import React from 'react';
-import { useMC, AGENT, DEPLOY_TYPES, timeAgo } from '../lib/data.js';
+import { useMC, DEPLOY_TYPES, timeAgo } from '../lib/data.js';
 import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, EmptyState } from '../components/primitives.jsx';
 import { DeployDialog } from '../components/pipeline.jsx';
 import { PageHead } from '../components/Shell.jsx';
-import { listAgentNodes, precheckApp } from '../lib/api.js';
+import { listAgentNodes, precheckApp, getAgentCapabilities } from '../lib/api.js';
 
 const APP_SCHEMAS = {
   "java-jar": [
@@ -50,6 +50,7 @@ function CreateAppDialog({ open, onClose }) {
   const [form, setForm] = React.useState({});
   const [checks, setChecks] = React.useState([]);
   const [agents, setAgents] = React.useState([{ id: "default", name: "本机 Agent" }]);
+  const [caps, setCaps] = React.useState(null); // 选中 Agent 的真实能力清单;null=未知(Agent 不可达)
   const timers = React.useRef([]);
   React.useEffect(() => {
     if (open) {
@@ -58,6 +59,12 @@ function CreateAppDialog({ open, onClose }) {
     }
     return () => timers.current.forEach(clearTimeout);
   }, [open]);
+  // 据选中的 Agent 拉真实能力清单(Runner 过滤用真实能力,不再用 mock AGENT.caps)。
+  React.useEffect(() => {
+    if (!open) return;
+    setCaps(null);
+    getAgentCapabilities(form.agentId).then((c) => setCaps(c && c.capabilities ? c.capabilities : null));
+  }, [open, form.agentId]);
 
   const appId = () => (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
   // 落盘路径:预检与创建共用同一计算,避免"预检校验 A 路径、实际部署落盘 B 路径"不一致。
@@ -114,7 +121,14 @@ function CreateAppDialog({ open, onClose }) {
   const typeEntries = Object.entries(DEPLOY_TYPES);
   const schema = type ? APP_SCHEMAS[type] : [];
   const runnersOf = type ? DEPLOY_TYPES[type].runners : [];
-  const capOk = (r) => r === "无进程" || r === "软链" || r === "tomcat" || (AGENT.caps.find((c) => c.key === r) || { ok: true }).ok;
+  // Runner 可用性据选中 Agent 的真实能力清单:无进程/软链/tomcat 无能力依赖恒可用;
+  // 能力未知(Agent 不可达)不禁用、留给预检/部署校验;否则按 caps 里该项 ok 判定。
+  const capOk = (r) => {
+    if (r === "无进程" || r === "软链" || r === "tomcat") return true;
+    if (!caps) return true;
+    const c = caps.find((x) => x.key === r);
+    return c ? c.ok : true;
+  };
 
   return (
     <Dialog open={open} onClose={onClose} width={620}
@@ -154,9 +168,9 @@ function CreateAppDialog({ open, onClose }) {
             <Field label="应用名 *">
               <input className="input" placeholder="如:数据查询平台后端" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </Field>
-            <Field label="Runner" hint="按 Agent 能力清单过滤,不可用项置灰">
-              <Select value={form.runner || runnersOf[0]} onChange={(v) => setForm({ ...form, runner: v })}
-                options={runnersOf.map((r) => ({ value: r, label: capOk(r) ? r : r + "(Agent 未检测到)" }))} />
+            <Field label="Runner" hint="按所选 Agent 真实能力清单过滤,不可用项置灰禁用">
+              <Select value={form.runner || runnersOf.find(capOk) || runnersOf[0]} onChange={(v) => setForm({ ...form, runner: v })}
+                options={runnersOf.map((r) => ({ value: r, label: capOk(r) ? r : r + "(Agent 未检测到)", disabled: !capOk(r) }))} />
             </Field>
           </div>
           {schema.map((f) => f.type === "switch" ? (

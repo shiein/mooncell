@@ -155,7 +155,8 @@ async function precheckApp(query) {
   } catch (e) { return null; }
 }
 
-const getAgentCapabilities = () => agentGet('/api/agent/capabilities');
+// 拉某 Agent 的能力清单(?agent 路由到指定 Agent;空/default 用内置)。失败返回 null。
+const getAgentCapabilities = (agentId) => agentGet(qa('/api/agent/capabilities', agentId));
 const getAgentSystem = () => agentGet('/api/agent/system');
 const getAgentPing = () => agentGet('/api/agent/ping');
 
