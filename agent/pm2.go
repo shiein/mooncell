@@ -40,8 +40,14 @@ func writePm2Eco(cfg DeployConfig) (string, error) {
 			app["interpreter"] = map[string]string{"python": "python3", "node": "node"}[cfg.Type]
 		}
 	case "java-jar":
+		// pm2 实际执行 `java <interpreter_args> <script>`,故 JVM 参数必须排在 -jar 之前——
+		// 否则 `java -jar -Xmx512m app.jar` 会把 -Xmx512m 当 jar 名,进程起不来。
 		app["interpreter"] = "java"
-		app["interpreter_args"] = strings.TrimSpace("-jar " + cfg.JvmArgs)
+		if j := strings.TrimSpace(cfg.JvmArgs); j != "" {
+			app["interpreter_args"] = j + " -jar"
+		} else {
+			app["interpreter_args"] = "-jar"
+		}
 	default: // go-binary:可执行文件直跑
 		app["interpreter"] = "none"
 	}

@@ -59,6 +59,30 @@ func TestWritePm2Eco(t *testing.T) {
 	}
 }
 
+// java-jar 的 JVM 参数必须排在 -jar 之前(否则 pm2 下 `java -jar -Xmx app.jar` 起不来)。
+func TestWritePm2EcoJavaArgsOrder(t *testing.T) {
+	dir := t.TempDir()
+	read := func(cfg DeployConfig) string {
+		path, err := writePm2Eco(cfg)
+		if err != nil {
+			t.Fatalf("writePm2Eco err: %v", err)
+		}
+		var eco struct {
+			Apps []map[string]any `json:"apps"`
+		}
+		b, _ := os.ReadFile(path)
+		json.Unmarshal(b, &eco)
+		s, _ := eco.Apps[0]["interpreter_args"].(string)
+		return s
+	}
+	if got := read(DeployConfig{Type: "java-jar", BinPath: filepath.Join(dir, "a"), JvmArgs: "-Xmx512m -Dfoo=bar"}); got != "-Xmx512m -Dfoo=bar -jar" {
+		t.Errorf("interpreter_args = %q, want JVM 参数在 -jar 之前", got)
+	}
+	if got := read(DeployConfig{Type: "java-jar", BinPath: filepath.Join(dir, "b")}); got != "-jar" {
+		t.Errorf("无 JVM 参数时 interpreter_args = %q, want \"-jar\"", got)
+	}
+}
+
 // runReload:白名单外动作必须被拒绝且不执行;空动作跳过。
 func TestRunReloadWhitelist(t *testing.T) {
 	if ran, _, err := runReload(""); ran || err != nil {
