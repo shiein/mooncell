@@ -376,6 +376,22 @@ func TestPlaceArtifactRejectsRootDir(t *testing.T) {
 	}
 }
 
+// static-nginx 的 BinPath 是对外软链;不能直接等于 deploy_root,否则会写 <root>-releases 并尝试替换根。
+func TestStaticDeployRejectsRootBinPath(t *testing.T) {
+	root := t.TempDir()
+	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{root}}}}
+	archive := filepath.Join(t.TempDir(), "site.tar.gz")
+	makeTarGz(t, archive, map[string]string{"index.html": "ok"})
+
+	res := a.runDeployStatic(DeployConfig{ID: "site", Type: "static-nginx", BinPath: root, Version: "v1"}, archive, func(Step) {})
+	if res.Result != "failed" {
+		t.Fatalf("BinPath 等于 deploy_root 应失败,got %q", res.Result)
+	}
+	if fileExists(root + "-releases") {
+		t.Fatal("拒绝后不应创建 deploy_root 外侧的 releases 目录")
+	}
+}
+
 // T7:HTTP 探活 2xx/3xx 通过(不再只认 200);连接失败判失败。
 func TestHttpHealthyAcceptsNon200(t *testing.T) {
 	for _, code := range []int{200, 204, 302, 401} {

@@ -1116,6 +1116,10 @@ func switchSymlink(target, link string) error {
 	return os.Rename(tmp, link)
 }
 
+func (a *agent) staticBinPathIsDeployRoot(binPath string) bool {
+	return a != nil && a.cfg != nil && dirEqualsRoot(binPath, a.cfg.Paths.DeployRoots)
+}
+
 // runDeployStatic 静态站点部署:解包到带时间戳的 release 目录,原子切换软链对外暴露,失败回滚到旧 release。
 // cfg.BinPath 是对外 web root 软链路径(如 /srv/apps/site/current);releases 存于 <BinPath>-releases/<ts>/。
 func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
@@ -1128,6 +1132,11 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 
 	// 1. 校验制品
 	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "软链 "+cfg.BinPath)
+	if a.staticBinPathIsDeployRoot(cfg.BinPath) {
+		add("校验目标", false, "static-nginx BinPath 不能等于 deploy_root: "+cfg.BinPath)
+		res.Result = "failed"
+		return res
+	}
 
 	// 2. 记录当前软链指向(用于回滚);首次部署无旧目标
 	prevTarget, _ := os.Readlink(cfg.BinPath)

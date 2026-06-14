@@ -106,6 +106,11 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 		res.Steps = append(res.Steps, s)
 		emit(s)
 	}
+	if a.staticBinPathIsDeployRoot(cfg.BinPath) {
+		add("校验目标", false, "static-nginx BinPath 不能等于 deploy_root: "+cfg.BinPath)
+		res.Result = "failed"
+		return res
+	}
 	releaseDir := filepath.Join(cfg.BinPath+"-releases", releaseTS)
 	if !fileExists(releaseDir) {
 		add("校验 release", false, "历史 release 不存在: "+releaseDir)
