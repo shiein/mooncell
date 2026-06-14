@@ -394,7 +394,7 @@ function DeployDialog({ app, open, onClose }) {
               <Icon name="upload" size={22} style={{ color: "var(--muted-fg)" }} />
               <div style={{ fontWeight: 600, marginTop: 8, fontSize: 13.5 }}>拖拽制品到此处,或点击选择文件</div>
               <div style={{ fontSize: 12, color: "var(--muted-fg)", marginTop: 3 }}>
-                {DEPLOY_TYPES[app.type].label} · 单次上传 + sha256 校验 · 上限 256MB
+                {DEPLOY_TYPES[app.type].label} · 单次上传 + sha256 校验 · 默认上限 1GB(max_upload_mb 可配)
               </div>
               <input type="file" ref={inputRef} style={{ display: "none" }} onChange={(e) => { if (e.target.files[0]) pickReal(e.target.files[0]); }} />
               <div style={{ marginTop: 12 }}>

@@ -146,7 +146,7 @@ type Runner interface {
 
 ## 5. 日志查看
 
-- **来源**:DeployConfig 中声明的日志路径(支持通配,如 `logs/*.log`)+ Runner 自带日志(pm2 log 路径、journald)。
+- **来源**:DeployConfig 中声明的日志路径(在线 tail 需**具体文件**,不支持通配/`~`——Agent `tail -F` 与 Console 精确授权都不展开)+ Runner 自带日志(pm2 log、journald)。
 - **实时**:Agent 端 tail -F 语义(处理日志轮转),通过 **SSE** 推到前端(已实现;未用 WebSocket);支持暂停、关键字高亮过滤、最近 N 行回看。
 - **离线排查**:按时间范围打包下载日志(Agent 端 tar.gz 后回传)。
 - **部署日志**与**应用日志**分开两个入口,前者看流水线,后者看运行态。
@@ -260,4 +260,4 @@ P0 把"一种后端 + 一种前端"的最短路径打穿,流水线、Runner、Sc
 3. **端口/进程冲突**:历史遗留的手工 nohup 进程可能占着端口。预检阶段做端口探测,冲突时给出 pid 与命令行,让操作者决定,**不要自动 kill 非托管进程**。
 4. **磁盘水位**:备份 + 文件柜 + 日志都是吃磁盘的,Agent 上报水位,低于阈值禁止部署并告警。
 5. **日志轮转**:tail 实现必须处理 rename/truncate(用 fsnotify + 重开文件),否则现场看着看着日志"断流"。
-6. **大文件上传**:内网 web 上传 1-2GB war/dist 很常见,分块 + 续传是必需品不是优化项。**(当前实现仍是单次 multipart 上传 + sha256 强校验,分块/续传待补;Console 侧上限 256MB。)**
+6. **大文件上传**:内网 web 上传 1-2GB war/dist 很常见,分块 + 续传是必需品不是优化项。**(当前实现仍是单次 multipart 上传 + sha256 强校验,分块/续传待补;Console/Agent 均以 `MaxBytesReader` 在传输层硬截断,默认上限 1GB,`max_upload_mb` 可配,超限回 413。)**

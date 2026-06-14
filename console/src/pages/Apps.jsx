@@ -28,7 +28,6 @@ const APP_SCHEMAS = {
   "python": [
     { key: "interp", label: "解释器路径(支持 venv)", ph: "/srv/apps/my-app/venv/bin/python", mono: true },
     { key: "entry", label: "入口脚本", ph: "main.py", mono: true },
-    { key: "reqs", label: "requirements 随包更新", type: "switch", def: false },
     { key: "args", label: "启动参数", ph: "--port 8090", mono: true },
   ],
   "node": [

@@ -388,7 +388,7 @@ function ConfigTab({ app }) {
           <Select disabled={!edit} value={app.type === "static-nginx" ? "nginx -s reload" : "无"} onChange={() => {}}
             options={["无", "nginx -s reload", "清理缓存目录", "预热请求"]} />
         </Field>
-        <Field label="日志路径(每行一条,支持通配)">
+        <Field label="日志文件路径(每行一条,在线 tail 需具体文件,不支持通配/~)">
           <textarea className="textarea mono" style={{ fontSize: 12.5 }} rows={2} disabled={!edit}
             value={(draft.logPaths || []).join("\n")} onChange={(e) => set("logPaths", e.target.value.split("\n").filter(Boolean))}></textarea>
         </Field>
