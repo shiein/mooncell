@@ -15,6 +15,13 @@ type Config struct {
 	Agent    AgentConfig    `toml:"agent"`
 	Cabinet  CabinetConfig  `toml:"cabinet"`
 	Demo     DemoConfig     `toml:"demo"`
+	Deploy   DeployUpload   `toml:"deploy"`
+}
+
+// DeployUpload:部署制品上传的传输层硬上限(MB)。仅内存阈值不足以防 DoS——
+// 必须在传输层用 MaxBytesReader 截断,否则超大制品会先落 Console 临时盘撑爆磁盘。
+type DeployUpload struct {
+	MaxUploadMB int `toml:"max_upload_mb"`
 }
 
 // DemoConfig:是否把前端 INITIAL_* 种子数据写库(演示用)。生产默认关,空库即全真实。
@@ -60,6 +67,7 @@ func loadConfig(path string) *Config {
 		Admin:    AdminConfig{Username: "admin", Password: "jch@9388"},
 		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: "mc_ag_change_me"},
 		Cabinet:  CabinetConfig{Dir: "cabinet"},
+		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 	}
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		log.Printf("[config] 未能读取 %s(%v),使用内置默认配置", path, err)

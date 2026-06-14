@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,7 +15,18 @@ import (
 func (a *agent) prepareDeploy(w http.ResponseWriter, r *http.Request) (DeployConfig, string, func(), bool) {
 	var zero DeployConfig
 	id := r.PathValue("id")
-	if err := r.ParseMultipartForm(128 << 20); err != nil {
+	// 传输层硬上限(纵深防御):超大制品会先落临时盘撑爆磁盘。ParseMultipartForm 的参数只是内存阈值。
+	limit := int64(a.cfg.Deploy.MaxUploadMB) << 20
+	if limit <= 0 {
+		limit = 1024 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("制品超过上限 %d MB", limit>>20)})
+			return zero, "", nil, false
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return zero, "", nil, false
 	}

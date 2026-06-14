@@ -182,7 +182,13 @@ func buildDeployBody(configJSON []byte, file io.Reader) (*io.PipeReader, string)
 func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	defer r.Body.Close()
-	if err := r.ParseMultipartForm(256 << 20); err != nil {
+	// 传输层硬上限:仅 ParseMultipartForm 的内存阈值不足以防 DoS,超大制品会先落临时盘撑爆磁盘。
+	r.Body = http.MaxBytesReader(w, r.Body, a.maxUpload)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		if isMaxBytes(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("制品超过上限 %d MB", a.maxUpload>>20)})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return
 	}

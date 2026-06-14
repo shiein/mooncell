@@ -21,6 +21,7 @@ type api struct {
 	cabinetDir string
 	anonUpload bool
 	demoSeed   bool
+	maxUpload  int64 // 部署制品上传硬上限(字节);超出在传输层截断回 413
 }
 
 func randomToken() string {

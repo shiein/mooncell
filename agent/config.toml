@@ -14,3 +14,7 @@ token = "mc_ag_change_me"
 deploy_roots = ["/srv/apps", "/data/web"]
 log_roots    = ["/srv/apps", "/var/log"]
 backup_dir   = "/opt/deploy-agent/backups"
+
+[deploy]
+# 制品上传传输层硬上限(MB),纵深防御(Console 已有上限,Agent 再兜一层);默认 1024MB。
+max_upload_mb = 1024

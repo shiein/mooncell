@@ -21,3 +21,8 @@ password = "jch@9388"
 # token 须与 Agent 端 config.toml 的 [security] token 一致。
 addr  = "127.0.0.1:9100"
 token = "mc_ag_change_me"
+
+[deploy]
+# 部署制品上传的传输层硬上限(MB)。超出在传输层截断并回 413,防超大制品撑爆磁盘。
+# 大 war/dist 仍建议走分块上传(待实现);默认 1024MB。
+max_upload_mb = 1024

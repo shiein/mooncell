@@ -11,6 +11,12 @@ type Config struct {
 	Server   ServerConfig   `toml:"server"`
 	Security SecurityConfig `toml:"security"`
 	Paths    PathsConfig    `toml:"paths"`
+	Deploy   DeployConfigT  `toml:"deploy"`
+}
+
+// DeployConfigT:部署制品上传的传输层硬上限(MB),纵深防御(Console 已有上限,Agent 再兜一层)。
+type DeployConfigT struct {
+	MaxUploadMB int `toml:"max_upload_mb"`
 }
 
 type ServerConfig struct {
@@ -39,6 +45,7 @@ func loadConfig(path string) *Config {
 			LogRoots:    []string{"/srv/apps", "/var/log"},
 			BackupDir:   "/opt/deploy-agent/backups",
 		},
+		Deploy: DeployConfigT{MaxUploadMB: 1024},
 	}
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		log.Printf("[config] 未能读取 %s(%v),使用内置默认配置", path, err)

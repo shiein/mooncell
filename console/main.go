@@ -22,7 +22,11 @@ func main() {
 	defer store.Close()
 	store.seedAdmin(cfg.Admin.Username, cfg.Admin.Password)
 
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, demoSeed: cfg.Demo.Seed}
+	maxUpload := int64(cfg.Deploy.MaxUploadMB) << 20
+	if maxUpload <= 0 {
+		maxUpload = 1024 << 20
+	}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload}
 
 	// 文件柜过期清理:启动即清一次,之后每小时一次。
 	go func() {
