@@ -654,3 +654,34 @@ func TestRunDeployPm2Orchestration(t *testing.T) {
 		}
 	}
 }
+
+// rotateReleases:当前软链指向的 release 永不被滚动删除(即便它是最老的)。
+func TestRotateReleasesKeepsCurrent(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "site")
+	releasesDir := binPath + "-releases"
+	names := []string{"20260101_000000.000000001", "20260102_000000.000000001", "20260103_000000.000000001", "20260104_000000.000000001", "20260105_000000.000000001"}
+	for _, n := range names {
+		if err := os.MkdirAll(filepath.Join(releasesDir, n), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 软链指向最老的 release(模拟「还原到旧版本」后的状态)
+	os.Symlink(filepath.Join(releasesDir, names[0]), binPath)
+
+	a := &agent{}
+	a.rotateReleases(releasesDir, 2) // 只保留 2 份
+
+	// 当前指向(最老)必须存活;最新的也应在
+	if !fileExists(filepath.Join(releasesDir, names[0])) {
+		t.Error("当前软链指向的 release 不应被删除")
+	}
+	if !fileExists(filepath.Join(releasesDir, names[4])) {
+		t.Error("最新 release 应保留")
+	}
+	// 总数不超过 keep+1(keep 份 + 被保护的当前)
+	left, _ := os.ReadDir(releasesDir)
+	if len(left) > 3 {
+		t.Errorf("滚动后剩余 %d 个,应 ≤ 3(2 份 + 受保护当前)", len(left))
+	}
+}

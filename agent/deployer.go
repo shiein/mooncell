@@ -1313,6 +1313,12 @@ func (a *agent) rotateReleases(releasesDir string, keep int) {
 	if err != nil {
 		return
 	}
+	// 当前软链指向的 release 永不删除——即便它不是最新(如还原到旧版本后再滚动),也不能删掉正在对外服务的目录。
+	binPath := strings.TrimSuffix(releasesDir, "-releases")
+	current := ""
+	if t, err := os.Readlink(binPath); err == nil {
+		current = filepath.Base(t)
+	}
 	var dirs []string
 	for _, e := range entries {
 		if e.IsDir() {
@@ -1321,6 +1327,15 @@ func (a *agent) rotateReleases(releasesDir string, keep int) {
 	}
 	sort.Strings(dirs)
 	for len(dirs) > keep {
+		if dirs[0] == current {
+			// 最老的恰是当前指向:跳过它,删次老的,避免误删在役 release。
+			if len(dirs) == 1 {
+				break
+			}
+			os.RemoveAll(filepath.Join(releasesDir, dirs[1]))
+			dirs = append(dirs[:1], dirs[2:]...)
+			continue
+		}
 		os.RemoveAll(filepath.Join(releasesDir, dirs[0]))
 		dirs = dirs[1:]
 	}

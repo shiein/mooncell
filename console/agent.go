@@ -398,7 +398,10 @@ func (a *api) streamAgentResp(w http.ResponseWriter, resp *http.Response, err er
 // static-nginx 的历史版本是 release 软链,改查 /releases(binPath 服务端从应用配置取)。
 func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl, _ := a.appRouting(id)
+	cl, _, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
 	if a.unknownAgent(w, cl) {
 		return
 	}
@@ -519,7 +522,10 @@ func (a *api) agentPrecheck(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl, runner := a.appRouting(id)
+	cl, runner, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
 	if a.unknownAgent(w, cl) {
 		return
 	}
@@ -601,7 +607,11 @@ func (a *api) applyLifecycleState(appID string, body []byte) {
 
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl, _ := a.appRouting(id)
+	// 必须是已落库应用:防止 write 用户对 Console 未跟踪的任意 deploy-<id> 单元执行下线。
+	cl, _, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
 	if a.unknownAgent(w, cl) {
 		return
 	}
