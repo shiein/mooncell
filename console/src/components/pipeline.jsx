@@ -352,7 +352,7 @@ function DeployDialog({ app, open, onClose }) {
       // SSE:每步完成即追加,实时呈现;done 后用最终结果替换。
       const res = await deployViaAgentStream(app.id, cfg, realFile, (type, data) => {
         if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
-      });
+      }, app.agentId);
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
       store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result === "success" ? "success" : "rolledback", real: true });
@@ -532,7 +532,7 @@ function RestoreDialog({ app, backup, open, onClose }) {
       };
       const res = await restoreViaAgentStream(app.id, cfg, backup.dir, (type, data) => {
         if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
-      });
+      }, app.agentId);
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
       if (res.result === "success") store.finishRestore(app, backup, { real: true });

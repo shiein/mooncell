@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { id: "apps", label: "应用", en: "Applications", icon: "box" },
   { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder" },
   { id: "audit", label: "审计日志", en: "Audit", icon: "shield" },
+  { id: "agents", label: "Agent 管理", en: "Agents", icon: "server", adminOnly: true },
   { id: "users", label: "用户管理", en: "Users", icon: "user", adminOnly: true },
 ];
 

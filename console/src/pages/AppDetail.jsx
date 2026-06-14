@@ -129,7 +129,7 @@ function BackupsTab({ app, onRestore }) {
   React.useEffect(() => {
     let alive = true;
     if (isProcessType(app.type)) {
-      listAgentBackups(app.id).then((arr) => {
+      listAgentBackups(app.id, app.agentId).then((arr) => {
         if (alive && arr) setRealBaks(arr.map((b) => normAgentBackup(b, app.id)));
       });
     } else setRealBaks(null);
@@ -203,7 +203,7 @@ function LogViewer({ app }) {
     const ac = new AbortController();
     let cancelled = false;
     setLines([]); // 重新拉取 tail,避免暂停后重复
-    streamAppLogs(app.id, { tail: 200, signal: ac.signal, onLine: (l) => { if (!cancelled) append(l); } })
+    streamAppLogs(app.id, { tail: 200, signal: ac.signal, agentId: app.agentId, onLine: (l) => { if (!cancelled) append(l); } })
       .then((res) => { if (res && res.error && !cancelled) setRealFailed(true); });
     return () => { cancelled = true; ac.abort(); };
   }, [useReal, follow, app.id]);

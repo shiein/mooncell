@@ -12,6 +12,7 @@ import { OverviewPage, CabinetPage, AuditPage } from './pages/Overview.jsx';
 import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
 import { UsersPage } from './pages/Users.jsx';
+import { AgentsPage } from './pages/Agents.jsx';
 import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity, removeCabinetFile } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
@@ -226,12 +227,13 @@ function App() {
     route.page === "app-detail" ? [{ label: "应用", onClick: () => nav("apps") }, { label: detailApp ? detailApp.name : "详情" }] :
     route.page === "cabinet" ? [{ label: "文件柜" }] :
     route.page === "users" ? [{ label: "用户管理" }] :
+    route.page === "agents" ? [{ label: "Agent 管理" }] :
     [{ label: "审计日志" }];
 
   const screenLabel =
     view !== "console" ? (view === "login" ? "登录" : "初始化向导") :
     route.page === "app-detail" ? `应用详情 · ${detailApp ? detailApp.name : ""}` :
-    ({ overview: "总览", apps: "应用列表", cabinet: "文件柜", audit: "审计日志", users: "用户管理" })[route.page] || route.page;
+    ({ overview: "总览", apps: "应用列表", cabinet: "文件柜", audit: "审计日志", users: "用户管理", agents: "Agent 管理" })[route.page] || route.page;
 
   return (
     <MCStore.Provider value={store}>
@@ -251,6 +253,7 @@ function App() {
             {route.page === "cabinet" ? <CabinetPage /> : null}
             {route.page === "audit" ? <AuditPage /> : null}
             {route.page === "users" ? <UsersPage /> : null}
+            {route.page === "agents" ? <AgentsPage /> : null}
           </Shell>
         ) : null}
       </div>

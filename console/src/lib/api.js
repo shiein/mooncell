@@ -60,6 +60,44 @@ async function deleteUser(username) {
   return d;
 }
 
+// ---------- 多 Agent 管理 ----------
+// qa 给路径追加 ?agent=<id>(default/空不加,走配置内置 Agent)。
+function qa(path, agentId) {
+  return agentId && agentId !== 'default' ? `${path}?agent=${encodeURIComponent(agentId)}` : path;
+}
+
+async function listAgentNodes() {
+  try {
+    const r = await fetch('/api/agents', { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return (await r.json()).agents || [];
+  } catch (e) { return null; }
+}
+
+async function addAgentNode(payload) {
+  const r = await fetch('/api/agents', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload), credentials: 'same-origin',
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '注册失败');
+  return d;
+}
+
+async function removeAgentNode(id) {
+  const r = await fetch(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'same-origin' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '删除失败');
+  return d;
+}
+
+async function pingAgentNode(id) {
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(id)}/ping`, { credentials: 'same-origin' });
+    return r.ok ? await r.json() : null;
+  } catch (e) { return null; }
+}
+
 // ---------- 文件柜(真实二进制存储)----------
 async function uploadCabinetFile(file, anon) {
   const fd = new FormData();
@@ -184,12 +222,12 @@ async function consumeSSE(r, onEvent, errLabel) {
 
 // 真实部署(SSE 实时流):multipart 上传后,Agent 每完成一步推送 step 事件,结束推送 done。
 // onEvent(type, data) 在每个事件到达时回调(type ∈ "step"|"done");返回最终结果 {result,version,steps} 或 {error}。
-async function deployViaAgentStream(appId, config, file, onEvent) {
+async function deployViaAgentStream(appId, config, file, onEvent, agentId) {
   try {
     const fd = new FormData();
     fd.append('config', JSON.stringify(config));
     fd.append('artifact', file);
-    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, {
+    const r = await fetch(qa(`/api/agent/apps/${encodeURIComponent(appId)}/deploy/stream`, agentId), {
       method: 'POST', body: fd, credentials: 'same-origin',
     });
     return await consumeSSE(r, onEvent, '部署失败');
@@ -199,9 +237,9 @@ async function deployViaAgentStream(appId, config, file, onEvent) {
 }
 
 // 列出某应用在 Agent 上的真实历史备份(新→旧);失败返回 null,调用方回退 mock。
-async function listAgentBackups(appId) {
+async function listAgentBackups(appId, agentId) {
   try {
-    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/backups`, { credentials: 'same-origin' });
+    const r = await fetch(qa(`/api/agent/apps/${encodeURIComponent(appId)}/backups`, agentId), { credentials: 'same-origin' });
     if (!r.ok) return null;
     const d = await r.json();
     return Array.isArray(d.backups) ? d.backups : null;
@@ -212,9 +250,9 @@ async function listAgentBackups(appId) {
 
 // 真实还原(SSE 实时流):用指定备份(backup=时间戳目录名)重跑部署流水线,逐步推送。
 // onEvent(type, data) 回调;返回 {result,version,steps} 或 {error}。
-async function restoreViaAgentStream(appId, config, backup, onEvent) {
+async function restoreViaAgentStream(appId, config, backup, onEvent, agentId) {
   try {
-    const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/restore/stream`, {
+    const r = await fetch(qa(`/api/agent/apps/${encodeURIComponent(appId)}/restore/stream`, agentId), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ config, backup }),
@@ -229,12 +267,12 @@ async function restoreViaAgentStream(appId, config, backup, onEvent) {
 // 订阅应用运行时日志(Agent journal SSE):先收最近 tail 行再实时跟随。
 // onLine({ts,level,text}) 每行回调;signal 用于暂停/离开时中断。
 // 返回 {ended}|{aborted}|{error}——error 时调用方回退到模拟日志。
-async function streamAppLogs(appId, { tail = 200, signal, onLine }) {
+async function streamAppLogs(appId, { tail = 200, signal, onLine, agentId }) {
   let r;
   try {
-    r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}/logs/stream?tail=${tail}`, {
-      credentials: 'same-origin', signal,
-    });
+    let url = `/api/agent/apps/${encodeURIComponent(appId)}/logs/stream?tail=${tail}`;
+    if (agentId && agentId !== 'default') url += `&agent=${encodeURIComponent(agentId)}`;
+    r = await fetch(url, { credentials: 'same-origin', signal });
   } catch (e) {
     return e.name === 'AbortError' ? { aborted: true } : { error: 'Agent 不可达: ' + (e.message || e) };
   }
@@ -273,6 +311,7 @@ async function streamAppLogs(appId, { tail = 200, signal, onLine }) {
 export {
   login, logout, getSession,
   listUsers, createUser, deleteUser,
+  listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   uploadCabinetFile, removeCabinetFile,
   getAgentCapabilities, getAgentSystem, getAgentPing,
   hydrateData, putEntity, deleteEntity, deployViaAgent, deployViaAgentStream,

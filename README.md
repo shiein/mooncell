@@ -38,6 +38,7 @@ mooncell/
 | 离线安装(install.sh:两端装为 systemd 服务 + 自动生成共享 token 打通)| ✅ 完成(真机验证:装→登录→Console↔Agent 连通→升级/卸载)|
 | 角色权限 RBAC(admin/operator/viewer)+ 用户管理| ✅ 完成(后端按角色强制鉴权 curl 验证;前端门控构建态)|
 | 文件柜真实化(二进制落盘 + 提取码 + 公开直链 + 强制 attachment 下载)| ✅ 完成(上传/下载/凭码/删除/权限 curl 验证;前端构建态)|
+| 多 Agent(注册表 + 代理按 ?agent= 路由 + 应用选目标机)| ✅ 完成(双实例真机验证路由;前端 Agent 管理页 + 新建应用选 Agent,构建态)|
 
 实施路线见方案文档 §12(P0 → P3)。
 

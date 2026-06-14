@@ -4,6 +4,7 @@ import { useMC, AGENT, DEPLOY_TYPES, timeAgo } from '../lib/data.js';
 import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, EmptyState } from '../components/primitives.jsx';
 import { DeployDialog } from '../components/pipeline.jsx';
 import { PageHead } from '../components/Shell.jsx';
+import { listAgentNodes } from '../lib/api.js';
 
 const APP_SCHEMAS = {
   "java-jar": [
@@ -50,9 +51,13 @@ function CreateAppDialog({ open, onClose }) {
   const [type, setType] = React.useState(null);
   const [form, setForm] = React.useState({});
   const [checks, setChecks] = React.useState([]);
+  const [agents, setAgents] = React.useState([{ id: "default", name: "本机 Agent" }]);
   const timers = React.useRef([]);
   React.useEffect(() => {
-    if (open) { setStep(0); setType(null); setForm({}); setChecks([]); }
+    if (open) {
+      setStep(0); setType(null); setForm({}); setChecks([]);
+      listAgentNodes().then((a) => { if (a && a.length) setAgents(a); });
+    }
     return () => timers.current.forEach(clearTimeout);
   }, [open]);
 
@@ -83,6 +88,7 @@ function CreateAppDialog({ open, onClose }) {
       health: form.health || "端口探活 :" + (form.port || 8080), healthType: form.health ? "HTTP 200" : "端口探活",
       logPaths: [form.logs || `/srv/apps/${id}/logs/*.log`],
       jvm: form.jvm || form.args || "", user: form.user || "appuser",
+      agentId: form.agentId || "default",
       backupKeep: +(form.backupKeep || 5), lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
       artifactName: id, extraFiles: [],
     });
@@ -156,6 +162,10 @@ function CreateAppDialog({ open, onClose }) {
               <input className="input mono" placeholder="5" value={form.backupKeep || ""} onChange={(e) => setForm({ ...form, backupKeep: e.target.value })} />
             </Field>
           </div>
+          <Field label="部署目标 Agent" hint="选择该应用部署到哪台 Agent">
+            <Select value={form.agentId || "default"} onChange={(v) => setForm({ ...form, agentId: v })}
+              options={agents.map((a) => ({ value: a.id, label: a.name + (a.addr ? " · " + a.addr : "") }))} />
+          </Field>
           <div style={{ fontSize: 11.5, color: "var(--muted-fg)", background: "var(--muted)", borderRadius: 8, padding: "8px 12px" }}>
             配置由部署类型的 JSON Schema 约束,前端动态渲染、后端与 Agent 双重校验;钩子仅限白名单内置动作,不支持自由脚本。
           </div>
