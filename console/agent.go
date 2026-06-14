@@ -162,7 +162,6 @@ func (a *api) unknownAgent(w http.ResponseWriter, cl *agentClient) bool {
 	return false
 }
 
-
 // streamAndAudit 透传 Agent 的 SSE 流(部署/还原),同时旁路捕获末尾 done 事件,
 // 据实际结果与会话操作人服务端写一条权威审计;releaseID 非空时记录结果用于幂等。
 // 仅用于有限流(部署/还原),日志等无限流不可用此法。
@@ -364,7 +363,10 @@ func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 // pm2 应用自动转发 runner=pm2(走 pm2 logs)。用请求 context 绑定上游,前端断开即级联取消。
 func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl, runner := a.appRouting(id)
+	cl, runner, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
 	if a.unknownAgent(w, cl) {
 		return
 	}
@@ -384,7 +386,10 @@ func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 // agentLogDownload 按时间范围导出应用日志(gzip),Agent 与 runner 服务端派生;转发 Content-Disposition。
 func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cl, runner := a.appRouting(id)
+	cl, runner, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
 	if a.unknownAgent(w, cl) {
 		return
 	}
@@ -419,12 +424,15 @@ func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
 // 任意文件(含他应用日志)。Agent 据应用 agentId 服务端路由。
 func (a *api) agentLogFileStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	cl, _, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
 	reqPath := r.URL.Query().Get("path")
 	if !a.appDeclaresLog(id, reqPath) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "日志路径不属于该应用声明的 logPaths"})
 		return
 	}
-	cl, _ := a.appRouting(id)
 	if a.unknownAgent(w, cl) {
 		return
 	}

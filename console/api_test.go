@@ -339,3 +339,28 @@ func TestAppDeclaresLog(t *testing.T) {
 		t.Error("穿越路径规范化后不在声明内,必须拒绝")
 	}
 }
+
+func TestAgentLogsRequireExistingApp(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s}
+
+	cases := []struct {
+		name string
+		call func(http.ResponseWriter, *http.Request)
+		url  string
+	}{
+		{"stream", a.agentLogStream, "/api/agent/apps/missing/logs/stream"},
+		{"download", a.agentLogDownload, "/api/agent/apps/missing/logs/download"},
+		{"file", a.agentLogFileStream, "/api/agent/apps/missing/logs/file/stream?path=/srv/apps/x/app.log"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest("GET", c.url, nil)
+		req.SetPathValue("id", "missing")
+		w := httptest.NewRecorder()
+		c.call(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s: 不存在应用应 404,got %d", c.name, w.Code)
+		}
+	}
+}

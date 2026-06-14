@@ -197,6 +197,22 @@ func (a *api) appRouting(id string) (*agentClient, string) {
 	return a.resolveAgentByID(app.AgentID), app.Runner
 }
 
+// requireAppRouting 与 appRouting 不同:应用必须已落库。运行日志这类只读接口也不能对
+// 不存在的 id 回退默认 Agent,否则 viewer 可构造 deploy-<id> 读取任意托管单元日志。
+func (a *api) requireAppRouting(w http.ResponseWriter, id string) (*agentClient, string, bool) {
+	raw, ok := a.store.getEntity("app", id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在"})
+		return nil, "", false
+	}
+	var app appConfig
+	if json.Unmarshal(raw, &app) != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "应用配置损坏"})
+		return nil, "", false
+	}
+	return a.resolveAgentByID(app.AgentID), app.Runner, true
+}
+
 // sha256Reader 流式计算 reader 的 sha256(十六进制)。
 func sha256Reader(r io.Reader) string {
 	h := sha256.New()
