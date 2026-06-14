@@ -201,6 +201,16 @@ func TestIdempotencyFingerprintConflict(t *testing.T) {
 	if res2.Result == "success" || ran != 1 {
 		t.Errorf("不同指纹复用 releaseId 应被拒绝(不执行不返回旧成功): result=%q ran=%d", res2.Result, ran)
 	}
+
+	// 同 releaseId 同制品但运行配置变化(env/args/venv 等)也必须被视为冲突。
+	cfg3 := cfg1
+	cfg3.ExpectedSha256 = cfg1.ExpectedSha256
+	cfg3.Args = "--port 9090"
+	cfg3.Env = map[string]string{"MODE": "prod"}
+	res3 := a.runIdempotent("deploy", cfg3, "", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	if res3.Result == "success" || ran != 1 {
+		t.Errorf("运行配置变化复用 releaseId 应被拒绝: result=%q ran=%d", res3.Result, ran)
+	}
 }
 
 // 还原:同 releaseId 用不同恢复源(fpExtra)不应被误判为已成功跳过。

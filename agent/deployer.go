@@ -618,12 +618,36 @@ type releaseRecord struct {
 	Result      DeployResult `json:"result"`
 }
 
-// releaseFingerprint 用足以区分一次部署/还原意图的字段构成指纹:
-// 制品 sha(部署时 Console 权威填入)+ 落盘路径 + Runner + 版本 + 类型 + 来源额外标识。
-// fpExtra 用于还原:把恢复源(static 的 releaseTS、进程类的备份目录名)纳入指纹,
-// 否则同 releaseId 用不同备份还原会被误判为「已成功,跳过」。
+// releaseFingerprint 用足以区分一次部署/还原意图的字段构成稳定指纹。
+// 除制品 sha / 目标路径 / 类型外,还必须包含会影响 unit/ecosystem/reload/health 的运行配置;
+// 否则同 releaseId 下改 env/args/venv/reload 等会被误判为已成功并跳过。
+// fpExtra 用于还原:把恢复源(static 的 releaseTS、进程类的备份目录名)纳入指纹。
 func releaseFingerprint(cfg DeployConfig, fpExtra string) string {
-	return strings.Join([]string{cfg.ExpectedSha256, cfg.BinPath, cfg.Runner, cfg.Version, cfg.Type, fpExtra}, "|")
+	payload := struct {
+		Name           string            `json:"name"`
+		Type           string            `json:"type"`
+		BinPath        string            `json:"binPath"`
+		Workdir        string            `json:"workdir"`
+		Runner         string            `json:"runner"`
+		Interpreter    string            `json:"interpreter"`
+		Args           string            `json:"args"`
+		JvmArgs        string            `json:"jvmArgs"`
+		Env            map[string]string `json:"env,omitempty"`
+		User           string            `json:"user"`
+		Health         string            `json:"health"`
+		Version        string            `json:"version"`
+		ExpectedSha256 string            `json:"expectedSha256"`
+		BackupKeep     int               `json:"backupKeep"`
+		ReloadCmd      string            `json:"reloadCmd"`
+		Extra          string            `json:"extra"`
+	}{
+		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
+		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
+		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, Extra: fpExtra,
+	}
+	b, _ := json.Marshal(payload)
+	return "v2:" + string(b)
 }
 
 // releaseDone 读取该 (op,app,releaseId) 的已成功记录(仅 success 才算幂等命中),返回结果与记录指纹。

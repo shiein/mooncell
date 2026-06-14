@@ -201,6 +201,35 @@ func TestDeployIdempotencyIsolation(t *testing.T) {
 	}
 }
 
+// 幂等指纹必须覆盖运行配置,否则同 releaseId 改 env/args/venv/reload 会被 Console 误短路。
+func TestDeployFingerprintIncludesRuntimeConfig(t *testing.T) {
+	base := appConfig{
+		Name: "app", Type: "python", Runner: "systemd", Path: "/srv/apps/app/main.py",
+		Workdir: "/srv/apps/app", Health: "http://127.0.0.1:8080/health",
+		Interp: "/srv/apps/app/venv/bin/python", Jvm: "--port 8080", User: "appuser",
+		BackupKeep: 5, Reload: false, Env: map[string]string{"MODE": "prod"},
+	}
+	fp := deployFingerprint(base, strings.Repeat("a", 64), "v1", "")
+
+	changedArgs := base
+	changedArgs.Jvm = "--port 9090"
+	if deployFingerprint(changedArgs, strings.Repeat("a", 64), "v1", "") == fp {
+		t.Fatal("启动参数变化必须改变 fingerprint")
+	}
+
+	changedEnv := base
+	changedEnv.Env = map[string]string{"MODE": "staging"}
+	if deployFingerprint(changedEnv, strings.Repeat("a", 64), "v1", "") == fp {
+		t.Fatal("环境变量变化必须改变 fingerprint")
+	}
+
+	changedInterp := base
+	changedInterp.Interp = "/srv/apps/app/venv2/bin/python"
+	if deployFingerprint(changedInterp, strings.Repeat("a", 64), "v1", "") == fp {
+		t.Fatal("解释器/venv 变化必须改变 fingerprint")
+	}
+}
+
 // 旧库(单列 release_id 主键)迁移:启动时清空旧表,以复合主键重建,迁移后可正常隔离写入。
 func TestMigrateLegacyDeploys(t *testing.T) {
 	dir := t.TempDir()

@@ -31,9 +31,30 @@ type appConfig struct {
 	User       string            `json:"user"`
 	AgentID    string            `json:"agentId"`
 	BackupKeep float64           `json:"backupKeep"`
-	Reload     bool              `json:"reload"`    // static/tomcat:部署后是否触发 reload 钩子
-	LogPaths   []string          `json:"logPaths"`  // 该应用声明的日志文件路径(文件 tail 授权白名单)
+	Reload     bool              `json:"reload"`   // static/tomcat:部署后是否触发 reload 钩子
+	LogPaths   []string          `json:"logPaths"` // 该应用声明的日志文件路径(文件 tail 授权白名单)
 	Env        map[string]string `json:"env"`
+}
+
+// agentDeployConfig 是 Console 下发给 Agent 的配置形态。fingerprint 也从同一结构派生,
+// 防止构造请求与本地幂等短路使用两套字段而漂移。
+type agentDeployConfig struct {
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	BinPath        string            `json:"binPath"`
+	Workdir        string            `json:"workdir"`
+	Runner         string            `json:"runner"`
+	Interpreter    string            `json:"interpreter"`
+	Args           string            `json:"args,omitempty"`
+	JvmArgs        string            `json:"jvmArgs,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	User           string            `json:"user"`
+	Health         string            `json:"health"`
+	Version        string            `json:"version"`
+	ReleaseID      string            `json:"releaseId"`
+	ExpectedSha256 string            `json:"expectedSha256"`
+	BackupKeep     int               `json:"backupKeep"`
+	ReloadCmd      string            `json:"reloadCmd,omitempty"`
 }
 
 // reloadActionFor 按应用类型把「是否 reload」表意映射到 Agent 白名单内的固定动作名。
@@ -59,12 +80,64 @@ func appBinPath(app appConfig) string {
 	return app.Path
 }
 
-// deployFingerprint 必须与 Agent releaseFingerprint 完全一致(字段、顺序、分隔符):
-// sha | binPath | runner | version | type | fpExtra。
+// deployFingerprint 必须与 Agent releaseFingerprint 完全一致(字段、JSON key、顺序):
+// 运行配置也进入指纹,避免同 releaseId 改 env/args/venv/reload/health 时误短路。
 // 用于 Console 层短路前比对——指纹一致才返回缓存,否则放行给 Agent 做最终裁决。
 // 部署 fpExtra 为空;还原传 "src=<backup>" 与 Agent 对齐。
 func deployFingerprint(app appConfig, sha, version, fpExtra string) string {
-	return strings.Join([]string{sha, appBinPath(app), app.Runner, version, app.Type, fpExtra}, "|")
+	cfg := buildAgentDeployConfig(app, version, sha, "")
+	payload := struct {
+		Name           string            `json:"name"`
+		Type           string            `json:"type"`
+		BinPath        string            `json:"binPath"`
+		Workdir        string            `json:"workdir"`
+		Runner         string            `json:"runner"`
+		Interpreter    string            `json:"interpreter"`
+		Args           string            `json:"args"`
+		JvmArgs        string            `json:"jvmArgs"`
+		Env            map[string]string `json:"env,omitempty"`
+		User           string            `json:"user"`
+		Health         string            `json:"health"`
+		Version        string            `json:"version"`
+		ExpectedSha256 string            `json:"expectedSha256"`
+		BackupKeep     int               `json:"backupKeep"`
+		ReloadCmd      string            `json:"reloadCmd"`
+		Extra          string            `json:"extra"`
+	}{
+		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
+		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
+		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, Extra: fpExtra,
+	}
+	b, _ := json.Marshal(payload)
+	return "v2:" + string(b)
+}
+
+func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID string) agentDeployConfig {
+	keep := int(app.BackupKeep)
+	if keep <= 0 {
+		keep = 5
+	}
+	cfg := agentDeployConfig{
+		Name: app.Name, Type: app.Type, Runner: app.Runner, Interpreter: app.Interp,
+		BinPath: appBinPath(app), Workdir: app.Workdir, User: app.User,
+		Health: healthSpec(app), Version: version, ReleaseID: releaseID,
+		ExpectedSha256: expectedSha256, BackupKeep: keep,
+	}
+	// static/tomcat 的部署后 reload 钩子:服务端按类型映射白名单动作名(空则不下发)。
+	if rc := reloadActionFor(app.Type, app.Reload); rc != "" {
+		cfg.ReloadCmd = rc
+	}
+	// jvm 字段按类型映射:java 是 JVM 参数,其余是启动参数。
+	if app.Type == "java-jar" {
+		cfg.JvmArgs = app.Jvm
+	} else {
+		cfg.Args = app.Jvm
+	}
+	if len(app.Env) > 0 {
+		cfg.Env = app.Env
+	}
+	return cfg
 }
 
 // buildAgentConfig 据已存应用配置 + 本次 version + 制品 sha256 生成下发给 Agent 的部署配置 JSON。
@@ -74,37 +147,7 @@ func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID st
 	if err := json.Unmarshal(raw, &app); err != nil {
 		return nil, "", err
 	}
-	binPath := app.Path
-	if f := strings.Fields(app.Path); len(f) > 0 {
-		binPath = f[0]
-	}
-	keep := int(app.BackupKeep)
-	if keep <= 0 {
-		keep = 5
-	}
-	cfg := map[string]any{
-		"name": app.Name, "type": app.Type, "runner": app.Runner,
-		"interpreter": app.Interp,
-		"binPath":     binPath, "workdir": app.Workdir, "user": app.User,
-		"health":         healthSpec(app),
-		"version":        version,
-		"releaseId":      releaseID,
-		"expectedSha256": expectedSha256,
-		"backupKeep":     keep,
-	}
-	// static/tomcat 的部署后 reload 钩子:服务端按类型映射白名单动作名(空则不下发)。
-	if rc := reloadActionFor(app.Type, app.Reload); rc != "" {
-		cfg["reloadCmd"] = rc
-	}
-	// jvm 字段按类型映射:java 是 JVM 参数,其余是启动参数。
-	if app.Type == "java-jar" {
-		cfg["jvmArgs"] = app.Jvm
-	} else {
-		cfg["args"] = app.Jvm
-	}
-	if len(app.Env) > 0 {
-		cfg["env"] = app.Env
-	}
+	cfg := buildAgentDeployConfig(app, version, expectedSha256, releaseID)
 	b, err := json.Marshal(cfg)
 	return b, app.AgentID, err
 }
