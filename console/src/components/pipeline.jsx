@@ -346,7 +346,9 @@ function DeployDialog({ app, open, onClose }) {
       setStage("pipeline"); setReal({ streaming: true, steps: [] });
       const cfg = {
         name: app.name, type: app.type, runner: app.runner, interpreter: app.interp || "",
-        binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
+        binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "", user: app.user || "",
+        jvmArgs: app.type === "java-jar" ? (app.jvm || "") : "",
+        args: app.type === "java-jar" ? "" : (app.jvm || ""),
         health: /^https?:\/\//.test(app.health || "") ? app.health : "",
         version, backupKeep: app.backupKeep || 5,
       };
@@ -528,7 +530,9 @@ function RestoreDialog({ app, backup, open, onClose }) {
       setReal({ streaming: true, steps: [] });
       const cfg = {
         name: app.name, type: app.type, runner: app.runner, interpreter: app.interp || "",
-        binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "",
+        binPath: (app.path || "").split(" ")[0], workdir: app.workdir || "", user: app.user || "",
+        jvmArgs: app.type === "java-jar" ? (app.jvm || "") : "",
+        args: app.type === "java-jar" ? "" : (app.jvm || ""),
         health: /^https?:\/\//.test(app.health || "") ? app.health : "",
         version: backup.version, backupKeep: app.backupKeep || 5,
       };

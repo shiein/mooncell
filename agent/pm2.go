@@ -59,6 +59,16 @@ func writePm2Eco(cfg DeployConfig) (string, error) {
 	return path, os.WriteFile(path, b, 0644)
 }
 
+// pm2Online 查进程是否在 pm2 中运行(pid 非空且非 0)。
+func pm2Online(id string) bool {
+	out, err := pm2("pid", unitName(id))
+	if err != nil {
+		return false
+	}
+	p := strings.TrimSpace(out)
+	return p != "" && p != "0"
+}
+
 // pm2Start 以 ecosystem 文件启动(先 delete 再 start,保证用最新配置),返回 pid。
 func pm2Start(cfg DeployConfig, eco string) (string, error) {
 	name := unitName(cfg.ID)
@@ -118,8 +128,9 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	}
 	time.Sleep(time.Second)
 
+	// 健康检查:HTTP 探活;未配置 HTTP 时退化为查 pm2 进程状态,避免启动失败被判成功。
 	var hlog []string
-	if healthCheck(cfg.Health, &hlog) {
+	if processHealthy(cfg.Health, pm2Online(cfg.ID), &hlog) {
 		add("健康检查", true, hlog...)
 		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
 		res.Result = "success"

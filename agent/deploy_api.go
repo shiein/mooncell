@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 // prepareDeploy 解析部署请求公共部分:multipart(config + artifact)+ 安全边界校验 + 制品暂存。
@@ -108,9 +109,19 @@ func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
 	sse("done", res)
 }
 
-// appStatus 处理 GET /api/apps/{id}/status:返回 systemd 托管状态。
+// appStatus 处理 GET /api/apps/{id}/status?runner=<systemd|pm2>:返回进程托管状态。
 func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if r.URL.Query().Get("runner") == "pm2" {
+		online := pm2Online(id)
+		pid, _ := pm2("pid", unitName(id))
+		state := "stopped"
+		if online {
+			state = "online"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": strings.TrimSpace(pid)})
+		return
+	}
 	state, _ := sysctl("is-active", unitName(id))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":     id,

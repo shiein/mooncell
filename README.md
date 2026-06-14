@@ -41,8 +41,17 @@ mooncell/
 | 多 Agent(注册表 + 代理按 ?agent= 路由 + 应用选目标机)| ✅ 完成(双实例真机验证路由;前端 Agent 管理页 + 新建应用选 Agent,构建态)|
 | pm2 Runner(systemd 之外的进程托管,ecosystem 配置 + 回滚配置还原)| ✅ 完成(真机 stand-in 验证:部署→回滚还原 ecosystem 闭环)|
 | pm2 应用日志流(`pm2 logs --raw`)+ python venv 解释器| ✅ 完成(真机验证:venv 解释器实际生效 + pm2 日志增量到达)|
+| 安全/正确性加固(review 修复)| ✅ 完成(reload 钩子白名单、启动失败不再判成功、还原源防误删、审计仅服务端追加;Go 单测覆盖)|
 
 实施路线见方案文档 §12(P0 → P3)。
+
+## 已知边界 / 待办(诚实声明)
+
+- **配置保真**:真机部署的 Agent 配置目前由前端组装(已带 type/runner/interpreter/user/jvmArgs/args/health)。更稳妥的做法是 Console 基于已保存的类型化配置在服务端生成 Agent 请求、前端只提交制品 + releaseId;env 等字段尚未端到端贯通。**待重构。**
+- **demo/真实混用**:非进程类(static/tomcat/node)在前端仍走模拟并写本地 release/backup/app 状态;新建应用预检为定时器模拟。生产模式应禁用模拟写库或明确标记演示。**待切分。**
+- **业务实体写入**:release/backup/app 仍可经通用 `PUT /api/data/{kind}` 前端直写(审计已锁服务端只追加)。应拆为类型化、服务端权威的 API。**待收口。**
+- **stand-in 验证**:tomcat-war / pm2 用替身验证了平台职责(文件替换/编排/回滚),未验容器/pm2 运行时本身。
+- 前端多为构建态 + 关键页无头浏览器回归,未做全量 E2E。
 
 ## 离线部署
 

@@ -65,6 +65,11 @@ func (a *api) putEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法 kind 或 id"})
 		return
 	}
+	// 审计为权威记录,只允许服务端在真实操作时 append(appendAudit),禁止前端直接写入伪造。
+	if kind == "audit" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "审计日志为服务端只追加,不可前端写入"})
+		return
+	}
 	var data json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -82,6 +87,10 @@ func (a *api) deleteEntity(w http.ResponseWriter, r *http.Request) {
 	kind, id := r.PathValue("kind"), r.PathValue("id")
 	if !entityKinds[kind] || id == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法 kind 或 id"})
+		return
+	}
+	if kind == "audit" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "审计日志不可前端删除"})
 		return
 	}
 	if err := a.store.deleteEntity(kind, id); err != nil {

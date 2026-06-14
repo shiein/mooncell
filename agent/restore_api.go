@@ -75,7 +75,15 @@ func (a *agent) restore(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res := a.runDeploy(cfg, artifact, nil)
+	// 先把备份制品拷到临时文件:流水线里 backupCurrent 会滚动清理备份,
+	// 还原最老备份且达保留上限时,源可能在替换前被清掉。拷出来即免疫。
+	tmp, cleanup, err := copyToTemp(artifact)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "准备还原源失败"})
+		return
+	}
+	defer cleanup()
+	res := a.runDeploy(cfg, tmp, nil)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -85,7 +93,13 @@ func (a *agent) restoreStream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeploy(cfg, artifact, emit) })
+	tmp, cleanup, err := copyToTemp(artifact) // 同步端注释:保护被还原的备份源不被滚动清理删掉
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "准备还原源失败"})
+		return
+	}
+	defer cleanup()
+	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeploy(cfg, tmp, emit) })
 }
 
 // listBackups 处理 GET /api/apps/{id}/backups:列出该应用 BackupDir 下的真实备份(新→旧)。

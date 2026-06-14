@@ -31,7 +31,7 @@ type DeployConfig struct {
 	Health     string            `json:"health"` // HTTP 健康检查 URL,空则跳过
 	Version    string            `json:"version"`
 	BackupKeep int               `json:"backupKeep"`
-	ReloadCmd  string            `json:"reloadCmd"` // static-nginx:部署后可选钩子(如 nginx -s reload),空则跳过
+	ReloadCmd  string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
 }
 
 // Step 是流水线一步的执行记录;Result 为整体结果。
@@ -312,6 +312,58 @@ func healthCheck(url string, logs *[]string) bool {
 	return false
 }
 
+// processHealthy 进程类健康判定:配置了 HTTP 健康检查走 HTTP;否则退化为「进程是否真的在托管运行」。
+// 杜绝「启动失败 + 未配健康检查」被误判为成功——alive 由各 Runner 传入(systemd is-active / pm2 online)。
+func processHealthy(healthURL string, alive bool, logs *[]string) bool {
+	if strings.TrimSpace(healthURL) != "" {
+		return healthCheck(healthURL, logs)
+	}
+	if alive {
+		*logs = append(*logs, "未配置 HTTP 健康检查 · 进程托管状态正常(active/online)")
+		return true
+	}
+	*logs = append(*logs, "未配置 HTTP 健康检查 · 进程未处于运行态(启动失败)")
+	return false
+}
+
+// reloadActions 是 static/tomcat 部署后可选 reload 钩子的白名单:动作名 → 固定 argv(不经 shell)。
+// 杜绝把前端/Console 下发的字符串当 shell 执行(任意命令执行)。
+var reloadActions = map[string][]string{
+	"nginx-reload":   {"nginx", "-s", "reload"},
+	"nginx-restart":  {"systemctl", "reload", "nginx"},
+	"tomcat-restart": {"systemctl", "restart", "tomcat"},
+}
+
+// runReload 执行白名单内的 reload 动作。空动作跳过(ran=false);白名单外动作拒绝执行并报错。
+func runReload(action string) (ran bool, log string, err error) {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return false, "", nil
+	}
+	argv, ok := reloadActions[action]
+	if !ok {
+		return true, "拒绝执行白名单外的 reload 动作: " + action, fmt.Errorf("disallowed reload action %q", action)
+	}
+	out, e := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+	return true, strings.Join(argv, " ") + " → " + strings.TrimSpace(string(out)), e
+}
+
+// copyToTemp 把 src 复制到独立临时文件,返回路径与清理函数。
+// 还原时用它保护「被还原的备份制品」:流水线里 backupCurrent 会滚动清理备份,
+// 若直接拿最老备份当源,可能在 atomicReplace 前被清掉——先拷出来就不受影响。
+func copyToTemp(src string) (string, func(), error) {
+	f, err := os.CreateTemp("", "mc-restore-*")
+	if err != nil {
+		return "", nil, err
+	}
+	f.Close()
+	if err := copyFile(src, f.Name(), 0755); err != nil {
+		os.Remove(f.Name())
+		return "", nil, err
+	}
+	return f.Name(), func() { os.Remove(f.Name()) }, nil
+}
+
 // ---------- 部署流水线 ----------
 
 // runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
@@ -388,9 +440,9 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	}
 	time.Sleep(time.Second)
 
-	// 6. 健康检查
+	// 6. 健康检查:HTTP 探活;未配置 HTTP 时退化为查 systemd 进程状态,避免启动失败被判成功。
 	var hlog []string
-	if healthCheck(cfg.Health, &hlog) {
+	if processHealthy(cfg.Health, isActive(cfg.ID), &hlog) {
 		add("健康检查", true, hlog...)
 		// 记录当前落盘版本到旁车,供下次部署/还原备份时正确标注被备份的版本。
 		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
@@ -502,14 +554,9 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	}
 	add("切换软链", true, cfg.BinPath+" → "+newRelease)
 
-	// 5. 可选 reload 钩子(如 nginx -s reload)
-	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
-		out, err := exec.Command("sh", "-c", rc).CombinedOutput()
-		if err != nil {
-			add("reload", false, rc+" → "+strings.TrimSpace(string(out)))
-		} else {
-			add("reload", true, rc)
-		}
+	// 5. 可选 reload 钩子(白名单动作,如 nginx-reload)
+	if ran, log, err := runReload(cfg.ReloadCmd); ran {
+		add("reload", err == nil, log)
 	}
 
 	// 6. 健康检查
@@ -536,9 +583,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 		res.Result = "failed"
 		return res
 	}
-	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
-		exec.Command("sh", "-c", rc).Run()
-	}
+	runReload(cfg.ReloadCmd)
 	var rh []string
 	ok := healthCheck(cfg.Health, &rh)
 	rlog = append(rlog, rh...)
@@ -617,10 +662,9 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	}
 	add("替换 WAR", true, "原子替换 "+cfg.BinPath, "清理展开目录 "+exploded)
 
-	// 4. 可选 reload 钩子(如 touch WAR 触发热部署 / 重启 Tomcat / 调 manager API)
-	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
-		out, err := exec.Command("sh", "-c", rc).CombinedOutput()
-		add("reload", err == nil, rc+" → "+strings.TrimSpace(string(out)))
+	// 4. 可选 reload 钩子(白名单动作,如 tomcat-restart / nginx-reload)
+	if ran, log, err := runReload(cfg.ReloadCmd); ran {
+		add("reload", err == nil, log)
 	}
 
 	// 5. 健康检查(容器重部署需时间,沿用重试)
@@ -649,9 +693,7 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	if exploded != cfg.BinPath {
 		os.RemoveAll(exploded)
 	}
-	if rc := strings.TrimSpace(cfg.ReloadCmd); rc != "" {
-		exec.Command("sh", "-c", rc).Run()
-	}
+	runReload(cfg.ReloadCmd)
 	var rh []string
 	ok := healthCheck(cfg.Health, &rh)
 	rlog = append(rlog, rh...)
