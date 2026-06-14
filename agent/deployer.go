@@ -13,11 +13,30 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// nameRe 是 应用 id / releaseId 的合法字符集:字母数字打头,后续允许 . _ -,长度 1–64。
+// 这些值会进入 systemd/pm2 unit 名与备份/记录路径,必须白名单拒绝非法值——
+// 而非用 filepath.Base 归一化(归一化会把不同非法输入折叠成同名,反而制造碰撞)。
+var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func validName(s string) bool { return nameRe.MatchString(s) }
+
+// validIDAndRelease 校验应用 id(必填)与 releaseId(选填,非空则校验)是否合法。
+func validIDAndRelease(id, rid string) (string, bool) {
+	if !validName(id) {
+		return "非法应用 id(仅允许字母数字 . _ -,1–64 位): " + id, false
+	}
+	if rid != "" && !validName(rid) {
+		return "非法 releaseId(仅允许字母数字 . _ -,1–64 位): " + rid, false
+	}
+	return "", true
+}
 
 // DeployConfig 是 Console 随每次部署下发的应用配置。
 // Agent 无状态:Console 持有期望状态,每次部署带全量配置,Agent 只负责执行。
@@ -520,23 +539,36 @@ func (a *agent) releaseRecPath(op, appID, rid string) string {
 	return filepath.Join(a.cfg.Paths.BackupDir, "_deploys", filepath.Base(op), filepath.Base(appID), filepath.Base(rid))
 }
 
-// releaseDone 读取该 (op,app,releaseId) 的已成功记录(仅 success 才算幂等命中)。
-func (a *agent) releaseDone(op, appID, rid string) (DeployResult, bool) {
-	b, err := os.ReadFile(a.releaseRecPath(op, appID, rid))
-	if err != nil {
-		return DeployResult{}, false
-	}
-	var res DeployResult
-	if json.Unmarshal(b, &res) != nil || res.Result != "success" {
-		return DeployResult{}, false
-	}
-	return res, true
+// releaseRecord 是一条幂等记录:除结果外还存「本次请求指纹」,
+// 用于命中时核对——同 releaseId 复用于不同制品/配置时拒绝返回旧结果,防碰撞。
+type releaseRecord struct {
+	Fingerprint string       `json:"fp"`
+	Result      DeployResult `json:"result"`
 }
 
-func (a *agent) recordRelease(op, appID, rid string, res DeployResult) {
+// releaseFingerprint 用足以区分一次部署/还原意图的字段构成指纹:
+// 制品 sha(部署时 Console 权威填入)+ 落盘路径 + Runner + 版本 + 类型。
+func releaseFingerprint(cfg DeployConfig) string {
+	return strings.Join([]string{cfg.ExpectedSha256, cfg.BinPath, cfg.Runner, cfg.Version, cfg.Type}, "|")
+}
+
+// releaseDone 读取该 (op,app,releaseId) 的已成功记录(仅 success 才算幂等命中),返回结果与记录指纹。
+func (a *agent) releaseDone(op, appID, rid string) (DeployResult, string, bool) {
+	b, err := os.ReadFile(a.releaseRecPath(op, appID, rid))
+	if err != nil {
+		return DeployResult{}, "", false
+	}
+	var rec releaseRecord
+	if json.Unmarshal(b, &rec) != nil || rec.Result.Result != "success" {
+		return DeployResult{}, "", false
+	}
+	return rec.Result, rec.Fingerprint, true
+}
+
+func (a *agent) recordRelease(op, appID, rid, fp string, res DeployResult) {
 	p := a.releaseRecPath(op, appID, rid)
 	os.MkdirAll(filepath.Dir(p), 0755)
-	b, _ := json.Marshal(res)
+	b, _ := json.Marshal(releaseRecord{Fingerprint: fp, Result: res})
 	os.WriteFile(p, b, 0644)
 }
 
@@ -548,24 +580,37 @@ func (a *agent) lockApp(id string) func() {
 	return m.Unlock
 }
 
-// runDeployIdempotent 包裹 runDeploy:按 op/appId 隔离的 releaseId 幂等 + 同应用串行锁。
-// op ∈ "deploy"|"restore";releaseId 已成功则跳过返回缓存,成功后记录。
-func (a *agent) runDeployIdempotent(op string, cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
+// runIdempotent 是幂等执行骨架:按 op/appId 隔离的 releaseId 幂等 + 同应用串行锁。
+// 命中已成功记录时核对指纹——指纹一致才返回缓存;不一致(同 releaseId 复用于不同制品/配置)
+// 直接拒绝,既不返回旧结果也不执行,杜绝「换了制品却复用 releaseId 拿到旧成功」。
+// run 是实际流水线(部署/还原),由调用方注入。
+func (a *agent) runIdempotent(op string, cfg DeployConfig, emit func(Step), run func(func(Step)) DeployResult) DeployResult {
 	if emit == nil {
 		emit = func(Step) {}
 	}
 	defer a.lockApp(cfg.ID)() // 同应用串行,临界区内做幂等检查 + 执行 + 记录
+	fp := releaseFingerprint(cfg)
 	if cfg.ReleaseID != "" {
-		if cached, ok := a.releaseDone(op, cfg.ID, cfg.ReleaseID); ok {
+		if cached, cfp, ok := a.releaseDone(op, cfg.ID, cfg.ReleaseID); ok {
+			if cfp != fp {
+				s := Step{Name: "幂等冲突", OK: false, Logs: []string{"同 releaseId 被复用于不同制品/配置,拒绝执行(防碰撞): " + cfg.ReleaseID}}
+				emit(s)
+				return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
+			}
 			emit(Step{Name: "幂等跳过", OK: true, Logs: []string{"releaseId 已成功" + op + ",跳过重复执行"}})
 			return cached
 		}
 	}
-	res := a.runDeploy(cfg, artifact, emit)
+	res := run(emit)
 	if cfg.ReleaseID != "" && res.Result == "success" {
-		a.recordRelease(op, cfg.ID, cfg.ReleaseID, res)
+		a.recordRelease(op, cfg.ID, cfg.ReleaseID, fp, res)
 	}
 	return res
+}
+
+// runDeployIdempotent 包裹进程类部署/还原流水线(runDeploy)。op ∈ "deploy"|"restore"。
+func (a *agent) runDeployIdempotent(op string, cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
+	return a.runIdempotent(op, cfg, emit, func(e func(Step)) DeployResult { return a.runDeploy(cfg, artifact, e) })
 }
 
 // runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
@@ -1001,9 +1046,13 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 		res.Result = "failed"
 		return res
 	}
-	runReload(cfg.ReloadCmd)
+	// 回滚的 reload 同样可能失败——失败则旧版本未确认重新生效,回滚不算成功。
+	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
+	if rloadLog != "" {
+		rlog = append(rlog, rloadLog)
+	}
 	var rh []string
-	ok := healthCheck(cfg.Health, &rh)
+	ok := rerr == nil && healthCheck(cfg.Health, &rh)
 	rlog = append(rlog, rh...)
 	add("回滚 · 软链", ok, rlog...)
 	os.RemoveAll(newRelease) // 失效 release 清理
@@ -1116,9 +1165,12 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	if exploded != cfg.BinPath {
 		os.RemoveAll(exploded)
 	}
-	runReload(cfg.ReloadCmd)
+	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
+	if rloadLog != "" {
+		rlog = append(rlog, rloadLog)
+	}
 	var rh []string
-	ok := healthCheck(cfg.Health, &rh)
+	ok := rerr == nil && healthCheck(cfg.Health, &rh)
 	rlog = append(rlog, rh...)
 	add("回滚 · 还原 WAR", ok, rlog...)
 	if ok {

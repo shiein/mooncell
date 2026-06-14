@@ -130,25 +130,49 @@ func TestValidateUnitFields(t *testing.T) {
 
 // processHealthy + rollback:验证空健康检查 + 进程未存活判失败的逻辑(回滚路径同样适用)。
 
-// Agent 侧 releaseId 幂等:记录成功后,同 releaseId 命中缓存;失败不记录。
+// Agent 侧 releaseId 幂等:记录成功后,同 releaseId + 同指纹命中缓存;失败不记录;指纹不一致不命中。
 func TestReleaseIdempotency(t *testing.T) {
 	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: t.TempDir()}}}
-	a.recordRelease("deploy", "app1", "R1", DeployResult{Result: "success", Version: "v1"})
-	if cached, ok := a.releaseDone("deploy", "app1", "R1"); !ok || cached.Version != "v1" {
-		t.Fatalf("记录后应命中: ok=%v ver=%q", ok, cached.Version)
+	a.recordRelease("deploy", "app1", "R1", "fp-v1", DeployResult{Result: "success", Version: "v1"})
+	if cached, fp, ok := a.releaseDone("deploy", "app1", "R1"); !ok || cached.Version != "v1" || fp != "fp-v1" {
+		t.Fatalf("记录后应命中: ok=%v ver=%q fp=%q", ok, cached.Version, fp)
 	}
 	// 不同应用不应互相命中
-	if _, ok := a.releaseDone("deploy", "app2", "R1"); ok {
+	if _, _, ok := a.releaseDone("deploy", "app2", "R1"); ok {
 		t.Error("不同应用同 releaseId 不应命中")
 	}
 	// 还原与部署独立命名空间,不应互相命中
-	if _, ok := a.releaseDone("restore", "app1", "R1"); ok {
+	if _, _, ok := a.releaseDone("restore", "app1", "R1"); ok {
 		t.Error("还原不应命中部署的幂等记录")
 	}
 	// 失败结果不记为命中
-	a.recordRelease("deploy", "app1", "R2", DeployResult{Result: "failed"})
-	if _, ok := a.releaseDone("deploy", "app1", "R2"); ok {
+	a.recordRelease("deploy", "app1", "R2", "fp-x", DeployResult{Result: "failed"})
+	if _, _, ok := a.releaseDone("deploy", "app1", "R2"); ok {
 		t.Error("失败结果不应被当作幂等命中")
+	}
+}
+
+// 同 releaseId 复用于不同制品/配置(指纹变化)必须被拒绝,不返回旧 success、不执行。
+func TestIdempotencyFingerprintConflict(t *testing.T) {
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: t.TempDir()}}}
+	cfg1 := DeployConfig{ID: "app1", ReleaseID: "R1", Type: "go-binary", BinPath: "/srv/apps/app1/app", Runner: "systemd", Version: "v1", ExpectedSha256: "aaa"}
+	// 首次:执行并记录成功
+	ran := 0
+	res := a.runIdempotent("deploy", cfg1, nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success", Version: "v1"} })
+	if res.Result != "success" || ran != 1 {
+		t.Fatalf("首次应执行成功: %q ran=%d", res.Result, ran)
+	}
+	// 同 releaseId 同指纹:幂等跳过,不再执行
+	a.runIdempotent("deploy", cfg1, nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	if ran != 1 {
+		t.Errorf("同指纹应幂等跳过,不应再执行,ran=%d", ran)
+	}
+	// 同 releaseId 不同制品(sha 变):拒绝,既不返回旧 success 也不执行
+	cfg2 := cfg1
+	cfg2.ExpectedSha256 = "bbb"
+	res2 := a.runIdempotent("deploy", cfg2, nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success"} })
+	if res2.Result == "success" || ran != 1 {
+		t.Errorf("不同指纹复用 releaseId 应被拒绝(不执行不返回旧成功): result=%q ran=%d", res2.Result, ran)
 	}
 }
 

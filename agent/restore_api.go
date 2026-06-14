@@ -55,6 +55,10 @@ func (a *agent) prepareRestore(w http.ResponseWriter, r *http.Request) (DeployCo
 	}
 	cfg := req.Config
 	cfg.ID = id // 以路径为准
+	if msg, ok := validIDAndRelease(cfg.ID, cfg.ReleaseID); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return zero, "", false
+	}
 	if !withinRoots(cfg.BinPath, a.cfg.Paths.DeployRoots) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "制品路径不在白名单内: " + cfg.BinPath})
 		return zero, "", false
@@ -72,8 +76,8 @@ func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) Dep
 		emit = func(Step) {}
 	}
 	if cfg.Type == "static-nginx" {
-		defer a.lockApp(cfg.ID)() // 同应用串行
-		return a.restoreStatic(cfg, backup, emit)
+		// static 还原也走 releaseId 幂等(防重复切软链/reload);runIdempotent 内部已加同应用串行锁。
+		return a.runIdempotent("restore", cfg, emit, func(e func(Step)) DeployResult { return a.restoreStatic(cfg, backup, e) })
 	}
 	artifact, err := a.backupArtifact(cfg.ID, backup)
 	if err != nil {
@@ -141,10 +145,14 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 		return res
 	}
 	switchSymlink(prevTarget, cfg.BinPath)
-	runReload(cfg.ReloadCmd)
+	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
 	var rh []string
-	ok := healthCheck(cfg.Health, &rh)
-	add("回滚 · 软链", ok, append([]string{"切回 " + prevTarget}, rh...)...)
+	ok := rerr == nil && healthCheck(cfg.Health, &rh)
+	rlogs := []string{"切回 " + prevTarget}
+	if rloadLog != "" {
+		rlogs = append(rlogs, rloadLog)
+	}
+	add("回滚 · 软链", ok, append(rlogs, rh...)...)
 	if ok {
 		res.Result = "rolledback"
 	} else {

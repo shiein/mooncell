@@ -25,6 +25,10 @@ func (a *agent) prepareDeploy(w http.ResponseWriter, r *http.Request) (DeployCon
 		return zero, "", nil, false
 	}
 	cfg.ID = id // 以路径为准,避免 body 与路径不一致
+	if msg, ok := validIDAndRelease(cfg.ID, cfg.ReleaseID); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return zero, "", nil, false
+	}
 
 	// 安全边界:制品落盘路径必须在白名单根目录内(防穿越)。
 	if !withinRoots(cfg.BinPath, a.cfg.Paths.DeployRoots) {
