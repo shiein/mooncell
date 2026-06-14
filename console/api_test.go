@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testStore(t *testing.T) *Store {
@@ -96,5 +99,32 @@ func TestRequireRole(t *testing.T) {
 	}
 	if c := hit(a.requireRole("admin", "operator")(ok), vwTok); c != http.StatusForbidden {
 		t.Errorf("viewer 访问 write 路由应 403,得 %d", c)
+	}
+}
+
+// 文件柜过期清理:过期条目(元数据 + 字节)删除,未过期保留。
+func TestCabinetExpiryCleanup(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	dir := t.TempDir()
+	a := &api{store: s, cabinetDir: dir}
+	now := time.Now().UnixMilli()
+
+	os.WriteFile(filepath.Join(dir, "cf_old"), []byte("x"), 0644)
+	s.putEntity("cabinet", "cf_old", []byte(fmt.Sprintf(`{"id":"cf_old","expires":%d}`, now-1000)))
+	os.WriteFile(filepath.Join(dir, "cf_new"), []byte("y"), 0644)
+	s.putEntity("cabinet", "cf_new", []byte(fmt.Sprintf(`{"id":"cf_new","expires":%d}`, now+100000)))
+
+	if n := a.cleanupExpiredCabinet(); n != 1 {
+		t.Fatalf("应清理 1 个过期文件,得 %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cf_old")); !os.IsNotExist(err) {
+		t.Error("过期文件字节应被删除")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cf_new")); err != nil {
+		t.Error("未过期文件应保留")
+	}
+	if _, ok := s.getEntity("cabinet", "cf_old"); ok {
+		t.Error("过期条目元数据应被删除")
 	}
 }

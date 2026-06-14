@@ -19,6 +19,7 @@ type api struct {
 	clients    map[string]*agentClient // 注册的远端 Agent 客户端缓存(按 id)
 	clientsMu  sync.Mutex
 	cabinetDir string
+	anonUpload bool
 }
 
 func randomToken() string {

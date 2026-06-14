@@ -93,6 +93,29 @@ func (s *Store) getEntity(kind, id string) (json.RawMessage, bool) {
 	return json.RawMessage(data), true
 }
 
+// expiredCabinet 返回已过期(expires < nowMs)的文件柜条目 id,供后台清理。
+func (s *Store) expiredCabinet(nowMs int64) []string {
+	rows, err := s.db.Query("SELECT id, data FROM entities WHERE kind = 'cabinet'")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id, data string
+		if rows.Scan(&id, &data) != nil {
+			continue
+		}
+		var m struct {
+			Expires int64 `json:"expires"`
+		}
+		if json.Unmarshal([]byte(data), &m) == nil && m.Expires > 0 && m.Expires < nowMs {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // cabinetByCode 按提取码查找文件柜元数据(全表扫 cabinet 实体,数量小可接受)。
 func (s *Store) cabinetByCode(code string) (map[string]any, bool) {
 	rows, err := s.db.Query("SELECT data FROM entities WHERE kind = 'cabinet'")

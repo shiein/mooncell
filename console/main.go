@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"time"
 )
 
 // 编译期把 vite 构建产物嵌入二进制。运行时从内存映像直接服务,无磁盘 IO。
@@ -21,7 +22,17 @@ func main() {
 	defer store.Close()
 	store.seedAdmin(cfg.Admin.Username, cfg.Admin.Password)
 
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload}
+
+	// 文件柜过期清理:启动即清一次,之后每小时一次。
+	go func() {
+		for {
+			if n := a.cleanupExpiredCabinet(); n > 0 {
+				log.Printf("[cabinet] 清理过期文件 %d 个", n)
+			}
+			time.Sleep(time.Hour)
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
@@ -66,6 +77,7 @@ func main() {
 	mux.HandleFunc("GET /api/cabinet/{id}/download", a.requireAuth(a.downloadCabinet))
 	mux.HandleFunc("DELETE /api/cabinet/{id}", writeRoles(a.deleteCabinet))
 	mux.HandleFunc("GET /api/pubfile/{code}", a.downloadByCode) // 独立前缀,避免与 /api/cabinet/{id}/... 冲突
+	mux.HandleFunc("POST /api/pub/cabinet", a.uploadCabinetAnon) // 匿名上传(需 cabinet.anon_upload=true)
 
 	// 其余路径交给嵌入的前端静态资源(单页应用,无 URL 路由)。
 	sub, err := fs.Sub(distFS, "dist")

@@ -16,9 +16,10 @@ type Config struct {
 	Cabinet  CabinetConfig  `toml:"cabinet"`
 }
 
-// CabinetConfig 文件柜的二进制落盘目录。
+// CabinetConfig 文件柜:二进制落盘目录 + 是否允许匿名(免登录)上传。
 type CabinetConfig struct {
-	Dir string `toml:"dir"`
+	Dir        string `toml:"dir"`
+	AnonUpload bool   `toml:"anon_upload"`
 }
 
 // AgentConfig 是 Console 连接 Agent 的地址与共享 token(单机版默认指向本机 Agent)。

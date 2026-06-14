@@ -102,8 +102,8 @@ async function pingAgentNode(id) {
 async function uploadCabinetFile(file, anon) {
   const fd = new FormData();
   fd.append('file', file);
-  if (anon) fd.append('anon', 'true');
-  const r = await fetch('/api/cabinet', { method: 'POST', body: fd, credentials: 'same-origin' });
+  // 匿名走免登录公开端点(需 cabinet.anon_upload=true,否则后端 403);否则走登录端点。
+  const r = await fetch(anon ? '/api/pub/cabinet' : '/api/cabinet', { method: 'POST', body: fd, credentials: 'same-origin' });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || '上传失败');
   return d; // 后端落库后的条目元数据

@@ -34,8 +34,8 @@ func (a *api) storedPath(id string) string {
 	return filepath.Join(a.cabinetDir, filepath.Base(id))
 }
 
-// uploadCabinet 处理 POST /api/cabinet(write):接收 multipart 文件,落盘 + 写元数据,返回条目。
-func (a *api) uploadCabinet(w http.ResponseWriter, r *http.Request) {
+// storeCabinetFile 落盘 + 写元数据的共享核心;public=true 时上传即公开(匿名场景凭码可下载)。
+func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader string, public bool) {
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
 		return
@@ -65,15 +65,11 @@ func (a *api) uploadCabinet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uploader, _, _ := a.currentUser(r)
-	if r.FormValue("anon") == "true" {
-		uploader = "匿名"
-	}
 	now := time.Now()
 	meta := map[string]any{
 		"id": id, "name": hdr.Filename, "size": n, "uploader": uploader,
 		"time": now.UnixMilli(), "expires": now.Add(cabinetExpiryDays * 24 * time.Hour).UnixMilli(),
-		"code": genCode(), "public": false, "downloads": 0,
+		"code": genCode(), "public": public, "downloads": 0,
 	}
 	b, _ := json.Marshal(meta)
 	if err := a.store.putEntity("cabinet", id, b); err != nil {
@@ -82,6 +78,32 @@ func (a *api) uploadCabinet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, meta)
+}
+
+// uploadCabinet 处理 POST /api/cabinet(write):登录用户上传。
+func (a *api) uploadCabinet(w http.ResponseWriter, r *http.Request) {
+	uploader, _, _ := a.currentUser(r)
+	a.storeCabinetFile(w, r, uploader, false)
+}
+
+// uploadCabinetAnon 处理 POST /api/pub/cabinet(免登录,需 cabinet.anon_upload=true):
+// 匿名上传,文件即公开(凭返回的提取码下载)。
+func (a *api) uploadCabinetAnon(w http.ResponseWriter, r *http.Request) {
+	if !a.anonUpload {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "匿名上传未开启"})
+		return
+	}
+	a.storeCabinetFile(w, r, "匿名", true)
+}
+
+// cleanupExpiredCabinet 删除已过期的文件柜条目(元数据 + 落盘字节);由后台定时任务调用。
+func (a *api) cleanupExpiredCabinet() int {
+	ids := a.store.expiredCabinet(time.Now().UnixMilli())
+	for _, id := range ids {
+		a.store.deleteEntity("cabinet", id)
+		os.Remove(a.storedPath(id))
+	}
+	return len(ids)
 }
 
 // serveFile 流式回传文件并强制 attachment(防 XSS),顺带把下载计数 +1 落库。
