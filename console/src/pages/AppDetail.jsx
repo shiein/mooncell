@@ -250,7 +250,7 @@ function LogViewer({ app }) {
   const append = (line) => setLines((s) => { const n = [...s, line]; return n.length > 400 ? n.slice(-400) : n; });
 
   // 真实日志:订阅 Agent SSE。logSrc=journal 跟随进程日志;否则跟随选中的声明日志文件。
-  // 暂停/切源/离开时 abort,不可达则标记回退模拟。
+  // 暂停/切源/离开时 abort;真实应用流失败标记 realFailed → 显示错误态 + 重试(不伪造模拟)。
   React.useEffect(() => {
     if (!useReal || !follow) return;
     const ac = new AbortController();
@@ -266,6 +266,8 @@ function LogViewer({ app }) {
 
   // 真实应用日志流失败:显示错误态 + 重试,绝不伪造模拟行(日志是排障核心,假日志会误导)。
   const realStreamFailed = isReal && realFailed;
+  // 真实应用但无任何可跟随的日志源(无 journal/pm2、未声明具体日志文件):显示空态,而非「演示」态。
+  const noRealSource = isReal && logOptions.length === 0;
 
   // 模拟日志:仅非真实类型(演示数据)使用;真实应用永不模拟。
   React.useEffect(() => {
@@ -306,8 +308,9 @@ function LogViewer({ app }) {
           <Switch on={onlyMatch} onChange={setOnlyMatch} />仅匹配行
         </label>
         <div style={{ flex: 1 }}></div>
-        <Badge tone={realStreamFailed ? "error" : follow ? "success" : "default"} dot={follow && !realStreamFailed}>
+        <Badge tone={realStreamFailed ? "error" : noRealSource ? "default" : follow ? "success" : "default"} dot={follow && !realStreamFailed && !noRealSource}>
           {realStreamFailed ? "Agent 日志流不可用"
+            : noRealSource ? "无可跟随的日志源"
             : useReal ? (follow ? (followingFile ? "文件 tail -F 实时" : "Agent journal 实时") : "已暂停")
             : genActive ? (follow ? "tail -F 实时跟随(演示)" : "已暂停") : "进程未运行 · 历史日志"}
         </Badge>
@@ -325,11 +328,17 @@ function LogViewer({ app }) {
       {realStreamFailed
         ? <EmptyState icon="alert" title="无法读取实时日志" desc="Agent 不可达或日志流中断。真实应用不展示模拟日志,请确认 Agent 在线后重试。"
             action={<Btn icon="rotate" onClick={() => { setRealFailed(false); setLines([]); }}>重试</Btn>} />
-        : <Console lines={shown} filter={filter} height={460} />}
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>
-        <span className="mono">{useReal ? (followingFile ? `tail -F ${logSrc}` : (app.runner === "pm2" ? `pm2 logs deploy-${app.id}` : `journalctl -u deploy-${app.id}`)) : (app.logPaths && app.logPaths[0]) || "—"}</span>
-        <span>缓冲 {lines.length} / 400 行 · {useReal ? (followingFile ? "tail -F 跟随(轮转安全)" : "journald 跟随(轮转安全)") : "轮转安全(fsnotify 重开文件)"}</span>
-      </div>
+        : noRealSource
+          ? <EmptyState icon="terminal" title="无可跟随的日志源" desc={app.type === "static-nginx" || app.type === "tomcat-war"
+              ? "该类型无进程 journal;在「配置」声明具体日志文件路径(不支持通配/~)后即可在线 tail。"
+              : "未声明具体日志文件,且进程日志暂不可用。可在「配置」补充日志文件路径。"} />
+          : <Console lines={shown} filter={filter} height={460} />}
+      {!noRealSource ? (
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>
+          <span className="mono">{useReal ? (followingFile ? `tail -F ${logSrc}` : (app.runner === "pm2" ? `pm2 logs deploy-${app.id}` : `journalctl -u deploy-${app.id}`)) : (app.logPaths && app.logPaths[0]) || "—"}</span>
+          <span>缓冲 {lines.length} / 400 行 · {useReal ? (followingFile ? "tail -F 跟随(轮转安全)" : "journald 跟随(轮转安全)") : "轮转安全(fsnotify 重开文件)"}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
