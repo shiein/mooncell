@@ -131,6 +131,42 @@ func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// appLifecycle 处理 POST /api/apps/{id}/lifecycle?action=start|stop&runner=<systemd|pm2>:
+// 真机启停已托管的进程(不重新部署),返回启停后的真实状态。前端不再前端伪造启停/pid。
+func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	action := r.URL.Query().Get("action")
+	if action != "start" && action != "stop" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
+		return
+	}
+	pm := r.URL.Query().Get("runner") == "pm2"
+	var out string
+	var err error
+	if pm {
+		out, err = pm2(action, unitName(id))
+	} else {
+		out, err = sysctl(action, unitName(id))
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": action + " 失败: " + strings.TrimSpace(out+" "+err.Error())})
+		return
+	}
+	// 返回启停后的真实托管状态(与 appStatus 同形),供前端权威刷新。
+	if pm {
+		online := pm2Online(id)
+		pid, _ := pm2("pid", unitName(id))
+		state := "stopped"
+		if online {
+			state = "online"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": strings.TrimSpace(pid)})
+		return
+	}
+	state, _ := sysctl("is-active", unitName(id))
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": isActive(id), "state": state, "pid": mainPID(id)})
+}
+
 // undeploy 处理 DELETE /api/apps/{id}:停止并移除 systemd unit(保留制品与备份)。
 func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

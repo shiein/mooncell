@@ -21,14 +21,22 @@ func (a *agent) precheck(w http.ResponseWriter, r *http.Request) {
 		if !withinRoots(binPath, a.cfg.Paths.DeployRoots) {
 			add("目标路径在白名单内", false, binPath+" 不在 deploy_roots")
 		} else {
+			// 纯检查:不创建业务目录,只探测「最近已存在祖先」是否可写(部署时再 MkdirAll)。
 			dir := filepath.Dir(binPath)
-			os.MkdirAll(dir, 0755)
-			probe := filepath.Join(dir, ".mc-precheck")
+			anc := dir
+			for anc != "/" && anc != "." && !fileExists(anc) {
+				anc = filepath.Dir(anc)
+			}
+			probe := filepath.Join(anc, ".mc-precheck")
 			if err := os.WriteFile(probe, []byte("x"), 0644); err != nil {
-				add("目标目录可写", false, dir+" : "+err.Error())
+				add("目标目录可写", false, anc+" 不可写: "+err.Error())
 			} else {
 				os.Remove(probe)
-				add("目标目录可写", true, dir)
+				detail := anc
+				if anc != dir {
+					detail = anc + "(将创建 " + dir + ")"
+				}
+				add("目标目录可写", true, detail)
 			}
 		}
 	}

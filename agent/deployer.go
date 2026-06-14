@@ -235,22 +235,50 @@ func atomicReplace(src, dst string) error {
 	return os.Rename(tmp, dst)
 }
 
-// withinRoots 是安全边界:目标路径规范化后必须落在某个白名单根目录内(防穿越)。
+// withinRoots 是安全边界:目标路径解析真实路径(EvalSymlinks)后必须落在某个白名单根目录内。
+// 仅 Abs+Clean 不够——白名单目录内的软链可指向白名单外;必须解析符号链接的真实落点再比对。
+// 目标可能尚不存在(部署会创建),故解析「最长存在祖先」的真实路径再拼接剩余不存在部分。
 func withinRoots(p string, roots []string) bool {
-	ap, err := filepath.Abs(filepath.Clean(p))
+	ap, err := filepath.Abs(p)
 	if err != nil {
 		return false
 	}
+	real := resolveExisting(ap)
 	for _, r := range roots {
-		ar, err := filepath.Abs(filepath.Clean(r))
+		ar, err := filepath.Abs(r)
 		if err != nil {
 			continue
 		}
-		if ap == ar || strings.HasPrefix(ap, ar+string(os.PathSeparator)) {
+		rr, err := filepath.EvalSymlinks(ar)
+		if err != nil {
+			rr = filepath.Clean(ar) // 根目录通常存在;解析失败退回 Clean
+		}
+		if real == rr || strings.HasPrefix(real, rr+string(os.PathSeparator)) {
 			return true
 		}
 	}
 	return false
+}
+
+// resolveExisting 解析 p 的真实路径:对「最长已存在祖先」做 EvalSymlinks(消解路径中的所有软链),
+// 再拼上尚不存在的剩余段并 Clean。不存在的剩余段本身不可能是软链,故无穿越风险。
+func resolveExisting(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			if rest == "" {
+				return resolved
+			}
+			return filepath.Clean(filepath.Join(resolved, rest))
+		}
+		parent := filepath.Dir(p)
+		if parent == p { // 到根仍无存在祖先(理论不至于),退回 Clean
+			return filepath.Clean(filepath.Join(p, rest))
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // ---------- 备份 ----------
@@ -701,7 +729,7 @@ func sniffArchive(path string) string {
 	}
 }
 
-const maxEntryBytes = 4 << 30 // 单文件解包上限 4GB,防 zip/tar 炸弹
+var maxEntryBytes int64 = 4 << 30 // 单文件解包上限 4GB,防 zip/tar 炸弹(var 便于测试覆写)
 
 // safeJoin 校验压缩包条目名安全:拒绝绝对路径与 ../ 穿越,确保解析后落在 dest 内。
 func safeJoin(dest, name string) (string, error) {
@@ -823,8 +851,15 @@ func writeExtracted(target string, src io.Reader) error {
 		return err
 	}
 	defer out.Close()
-	_, err = io.Copy(out, io.LimitReader(src, maxEntryBytes))
-	return err
+	// 多读 1 字节探测是否超限:若写满上限仍有数据,说明被截断/疑似炸弹,报错而非静默落一个残缺文件。
+	n, err := io.Copy(out, io.LimitReader(src, maxEntryBytes+1))
+	if err != nil {
+		return err
+	}
+	if n > maxEntryBytes {
+		return fmt.Errorf("单文件超出解包上限 %d 字节(疑似压缩炸弹或截断): %s", maxEntryBytes, filepath.Base(target))
+	}
+	return nil
 }
 
 // nonHiddenEntries 过滤掉点文件与 __MACOSX(zip 元数据),用于判断压缩包真实顶层结构。
@@ -931,19 +966,25 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	}
 	add("切换软链", true, cfg.BinPath+" → "+newRelease)
 
-	// 5. 可选 reload 钩子(白名单动作,如 nginx-reload)
+	// 5. 可选 reload 钩子(白名单动作,如 nginx-reload):失败即视为部署失败,触发回滚——
+	//    reload 没成功就意味着新版本没真正生效,不能报成功。
+	reloadOK := true
 	if ran, log, err := runReload(cfg.ReloadCmd); ran {
-		add("reload", err == nil, log)
+		reloadOK = err == nil
+		add("reload", reloadOK, log)
 	}
 
-	// 6. 健康检查
+	// 6. 健康检查(reload 失败则直接进回滚,不再探活)
 	var hlog []string
-	if healthCheck(cfg.Health, &hlog) {
+	if reloadOK && healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
 		// 软链 release 也按份数滚动清理
 		a.rotateReleases(releasesDir, cfg.BackupKeep)
 		res.Result = "success"
 		return res
+	}
+	if !reloadOK {
+		hlog = append(hlog, "reload 失败,跳过健康检查直接回滚")
 	}
 	add("健康检查", false, hlog...)
 
@@ -1039,18 +1080,23 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	}
 	add("替换 WAR", true, "原子替换 "+cfg.BinPath, "清理展开目录 "+exploded)
 
-	// 4. 可选 reload 钩子(白名单动作,如 tomcat-restart / nginx-reload)
+	// 4. 可选 reload 钩子(白名单动作,如 tomcat-restart / nginx-reload):失败即视为部署失败,回滚 WAR。
+	reloadOK := true
 	if ran, log, err := runReload(cfg.ReloadCmd); ran {
-		add("reload", err == nil, log)
+		reloadOK = err == nil
+		add("reload", reloadOK, log)
 	}
 
-	// 5. 健康检查(容器重部署需时间,沿用重试)
+	// 5. 健康检查(容器重部署需时间,沿用重试;reload 失败则直接进回滚)
 	var hlog []string
-	if healthCheck(cfg.Health, &hlog) {
+	if reloadOK && healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
 		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
 		res.Result = "success"
 		return res
+	}
+	if !reloadOK {
+		hlog = append(hlog, "reload 失败,跳过健康检查直接回滚")
 	}
 	add("健康检查", false, hlog...)
 

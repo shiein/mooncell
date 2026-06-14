@@ -45,6 +45,7 @@ func main() {
 	mux.HandleFunc("POST /api/apps/{id}/deploy", a.tokenAuth(a.deploy))
 	mux.HandleFunc("POST /api/apps/{id}/deploy/stream", a.tokenAuth(a.deployStream)) // SSE 实时日志流
 	mux.HandleFunc("GET /api/apps/{id}/status", a.tokenAuth(a.appStatus))
+	mux.HandleFunc("POST /api/apps/{id}/lifecycle", a.tokenAuth(a.appLifecycle))
 	mux.HandleFunc("DELETE /api/apps/{id}", a.tokenAuth(a.undeploy))
 
 	// 一键还原:列出历史备份,用指定备份制品重跑部署流水线(还原前自动备份当前版本,失败自动回滚)

@@ -295,3 +295,67 @@ func TestWithinRoots(t *testing.T) {
 		t.Error("白名单外路径应被拒绝")
 	}
 }
+
+// withinRoots:白名单目录内的软链指向白名单外,必须被识破(EvalSymlinks 真实路径边界)。
+func TestWithinRootsSymlinkEscape(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{root}
+
+	// 1. 白名单内的普通(尚不存在的)目标:通过
+	if !withinRoots(filepath.Join(root, "app", "bin"), roots) {
+		t.Error("白名单内普通路径应通过")
+	}
+	// 2. root 内有个软链 evil → 白名单外目录;经它的路径必须被拒
+	link := filepath.Join(root, "evil")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("建软链失败: %v", err)
+	}
+	if withinRoots(filepath.Join(link, "payload"), roots) {
+		t.Error("经白名单内软链逃逸到白名单外的路径必须被拒绝")
+	}
+	// 3. 直接写到软链目标真实路径(白名单外):拒绝
+	if withinRoots(filepath.Join(outside, "x"), roots) {
+		t.Error("白名单外真实路径应被拒绝")
+	}
+}
+
+// static 部署:reload 失败必须阻断部署(不报 success)。测试环境无 nginx,nginx-reload 必失败。
+func TestStaticDeployReloadFailureBlocks(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "site")
+	arch := filepath.Join(dir, "site.tar.gz")
+	makeTarGz(t, arch, map[string]string{"index.html": "<h1>v1</h1>"})
+	a := &agent{}
+	cfg := DeployConfig{ID: "t-static", Type: "static-nginx", BinPath: binPath, Version: "v1", BackupKeep: 3, ReloadCmd: "nginx-reload"}
+	res := a.runDeployStatic(cfg, arch, func(Step) {})
+	if res.Result == "success" {
+		t.Fatalf("reload 失败时部署不应报 success,got %q", res.Result)
+	}
+}
+
+// writeExtracted:单文件超出解包上限必须报错,不允许静默截断落一个残缺文件。
+func TestExtractRejectsOversizeEntry(t *testing.T) {
+	old := maxEntryBytes
+	maxEntryBytes = 16 // 临时缩小上限便于测试
+	defer func() { maxEntryBytes = old }()
+
+	dir := t.TempDir()
+	arch := filepath.Join(dir, "big.tar.gz")
+	makeTarGzCustom(t, arch, func(tw *tar.Writer) {
+		data := strings.Repeat("A", 64) // 64B > 16B 上限
+		tw.WriteHeader(&tar.Header{Name: "huge.bin", Mode: 0644, Size: int64(len(data))})
+		tw.Write([]byte(data))
+	})
+	err := extractArchive(arch, filepath.Join(dir, "out"), "gzip")
+	if err == nil || !strings.Contains(err.Error(), "超出解包上限") {
+		t.Fatalf("超限文件应报错,got err=%v", err)
+	}
+}

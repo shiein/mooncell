@@ -117,15 +117,21 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 		return res
 	}
 	add("切换软链", true, cfg.BinPath+" → "+releaseDir)
-	if ran, log, _ := runReload(cfg.ReloadCmd); ran {
-		add("reload", true, log)
+	// reload 失败即视为还原失败,触发回滚——不再丢弃错误、不再无条件标成功。
+	reloadOK := true
+	if ran, log, err := runReload(cfg.ReloadCmd); ran {
+		reloadOK = err == nil
+		add("reload", reloadOK, log)
 	}
 
 	var hlog []string
-	if healthCheck(cfg.Health, &hlog) {
+	if reloadOK && healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
 		res.Result = "success"
 		return res
+	}
+	if !reloadOK {
+		hlog = append(hlog, "reload 失败,跳过健康检查直接回滚")
 	}
 	add("健康检查", false, hlog...)
 	// 回滚:切回原 release
