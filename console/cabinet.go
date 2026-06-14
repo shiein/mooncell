@@ -77,6 +77,7 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写元数据失败"})
 		return
 	}
+	a.store.appendAudit(uploader, "上传文件", "文件柜 · "+hdr.Filename, "成功")
 	writeJSON(w, http.StatusOK, meta)
 }
 
@@ -161,6 +162,7 @@ func (a *api) deleteCabinet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.store.deleteEntity("cabinet", id)
 	os.Remove(a.storedPath(id))
+	a.store.appendAudit(a.sessionUser(r), "删除文件", "文件柜 · "+id, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

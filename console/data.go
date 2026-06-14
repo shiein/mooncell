@@ -104,5 +104,8 @@ func (a *api) deleteEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "删除失败"})
 		return
 	}
+	if kind == "app" {
+		a.store.appendAudit(a.sessionUser(r), "删除应用", id, "成功")
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

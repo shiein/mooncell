@@ -40,6 +40,7 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "创建失败:用户名可能已存在"})
 		return
 	}
+	a.store.appendAudit(a.sessionUser(r), "创建用户", body.Username+"("+body.Role+")", "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -60,5 +61,6 @@ func (a *api) deleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "删除失败"})
 		return
 	}
+	a.store.appendAudit(me, "删除用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
