@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -81,6 +83,13 @@ func (a *api) appRouting(id string) (*agentClient, string) {
 	return a.resolveAgentByID(app.AgentID), app.Runner
 }
 
+// sha256Reader 流式计算 reader 的 sha256(十六进制)。
+func sha256Reader(r io.Reader) string {
+	h := sha256.New()
+	io.Copy(h, r)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // httpHealthURL 仅放行 http(s) 健康检查 URL;其它(如「端口探活 :8080」)视为未配置。
 func httpHealthURL(h string) string {
 	if strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") {
@@ -120,7 +129,6 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	}
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
-	sha := r.FormValue("sha256")
 
 	// 幂等:同 releaseId 已成功部署则直接返回缓存结果,不重复执行。
 	if releaseID != "" {
@@ -135,6 +143,19 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法部署"})
 		return
 	}
+	file, _, err := r.FormFile("artifact")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品"})
+		return
+	}
+	defer file.Close()
+	// 服务端权威计算制品 sha256(不信任客户端传值),保证 Console→Agent 完整性;Agent 强校验。
+	sha := sha256Reader(file)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "制品读取失败"})
+		return
+	}
+
 	cfgJSON, agentID, err := buildAgentConfig(appRaw, version, sha, releaseID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "生成部署配置失败"})
@@ -144,12 +165,6 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	if a.unknownAgent(w, cl) {
 		return
 	}
-	file, _, err := r.FormFile("artifact")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品"})
-		return
-	}
-	defer file.Close()
 
 	body, ct := buildDeployBody(cfgJSON, file)
 	resp, perr := cl.postStream("/api/apps/"+id+"/deploy/stream", ct, body)

@@ -72,6 +72,7 @@ func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) Dep
 		emit = func(Step) {}
 	}
 	if cfg.Type == "static-nginx" {
+		defer a.lockApp(cfg.ID)() // 同应用串行
 		return a.restoreStatic(cfg, backup, emit)
 	}
 	artifact, err := a.backupArtifact(cfg.ID, backup)
@@ -88,7 +89,7 @@ func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) Dep
 		return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
 	}
 	defer cleanup()
-	return a.runDeployIdempotent(cfg, tmp, emit)
+	return a.runDeployIdempotent("restore", cfg, tmp, emit)
 }
 
 // restoreStatic 把静态站点软链切回指定历史 release(<BinPath>-releases/<ts>/),失败回滚软链。

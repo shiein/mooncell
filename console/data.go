@@ -25,25 +25,28 @@ func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	items := map[string][]seedItem{}
-	for key, arr := range seed {
-		kind, ok := kindOfKey[key]
-		if !ok {
-			continue
-		}
-		for _, raw := range arr {
-			var probe struct {
-				ID string `json:"id"`
-			}
-			if err := json.Unmarshal(raw, &probe); err != nil || probe.ID == "" {
+	// 仅 demo 模式才把前端 mock 种子写库;生产(默认)空库即全真实,不污染权威数据。
+	if a.demoSeed {
+		items := map[string][]seedItem{}
+		for key, arr := range seed {
+			kind, ok := kindOfKey[key]
+			if !ok {
 				continue
 			}
-			items[kind] = append(items[kind], seedItem{id: probe.ID, data: raw})
+			for _, raw := range arr {
+				var probe struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(raw, &probe); err != nil || probe.ID == "" {
+					continue
+				}
+				items[kind] = append(items[kind], seedItem{id: probe.ID, data: raw})
+			}
 		}
-	}
-	if _, err := a.store.seedEntities(items); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "种子写入失败"})
-		return
+		if _, err := a.store.seedEntities(items); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "种子写入失败"})
+			return
+		}
 	}
 
 	grouped, err := a.store.loadEntities()

@@ -8,13 +8,15 @@ const NOW = Date.now();
 const MIN = 60e3, HOUR = 3600e3, DAY = 24 * HOUR;
 const ago = (ms) => NOW - ms;
 
+// Runner 与 Agent 实际支持对齐:进程类仅 systemd / pm2(不暴露未实现的 nohup);
+// static 软链托管、tomcat 容器托管。
 const DEPLOY_TYPES = {
-  "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "nohup", "pm2"], artifactExt: ".jar" },
+  "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "pm2"], artifactExt: ".jar" },
   "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war" },
-  "go-binary":    { label: "Go Binary",    tone: "cyan",    runners: ["systemd", "nohup"], artifactExt: "" },
-  "python":       { label: "Python",       tone: "info",    runners: ["systemd", "nohup", "pm2"], artifactExt: ".py" },
-  "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".js" },
-  "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["无进程"], artifactExt: ".tar.gz" },
+  "go-binary":    { label: "Go Binary",    tone: "cyan",    runners: ["systemd", "pm2"], artifactExt: "" },
+  "python":       { label: "Python",       tone: "info",    runners: ["systemd", "pm2"], artifactExt: ".py / .tar.gz" },
+  "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd"], artifactExt: ".js / .tar.gz" },
+  "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["软链"], artifactExt: ".tar.gz / .zip" },
 };
 
 // 进程类应用:走 systemd / pm2 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。

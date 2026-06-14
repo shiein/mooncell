@@ -14,6 +14,12 @@ type Config struct {
 	Admin    AdminConfig    `toml:"admin"`
 	Agent    AgentConfig    `toml:"agent"`
 	Cabinet  CabinetConfig  `toml:"cabinet"`
+	Demo     DemoConfig     `toml:"demo"`
+}
+
+// DemoConfig:是否把前端 INITIAL_* 种子数据写库(演示用)。生产默认关,空库即全真实。
+type DemoConfig struct {
+	Seed bool `toml:"seed"`
 }
 
 // CabinetConfig 文件柜:二进制落盘目录 + 是否允许匿名(免登录)上传。

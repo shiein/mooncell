@@ -62,7 +62,7 @@ func (a *agent) deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanup()
-	res := a.runDeployIdempotent(cfg, tmpPath, nil)
+	res := a.runDeployIdempotent("deploy", cfg, tmpPath, nil)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -74,7 +74,7 @@ func (a *agent) deployStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanup()
-	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeployIdempotent(cfg, tmpPath, emit) })
+	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeployIdempotent("deploy", cfg, tmpPath, emit) })
 }
 
 // sseHeader 写好 SSE 响应头并返回一个推送闭包 sse(event, payload);不支持 Flusher 时返回 ok=false。

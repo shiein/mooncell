@@ -22,7 +22,7 @@ func main() {
 	defer store.Close()
 	store.seedAdmin(cfg.Admin.Username, cfg.Admin.Password)
 
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, demoSeed: cfg.Demo.Seed}
 
 	// 文件柜过期清理:启动即清一次,之后每小时一次。
 	go func() {

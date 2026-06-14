@@ -20,6 +20,7 @@ type api struct {
 	clientsMu  sync.Mutex
 	cabinetDir string
 	anonUpload bool
+	demoSeed   bool
 }
 
 func randomToken() string {

@@ -133,18 +133,22 @@ func TestValidateUnitFields(t *testing.T) {
 // Agent 侧 releaseId 幂等:记录成功后,同 releaseId 命中缓存;失败不记录。
 func TestReleaseIdempotency(t *testing.T) {
 	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: t.TempDir()}}}
-	if _, ok := a.releaseDone("R1"); ok {
-		t.Fatal("未记录前不应命中")
+	a.recordRelease("deploy", "app1", "R1", DeployResult{Result: "success", Version: "v1"})
+	if cached, ok := a.releaseDone("deploy", "app1", "R1"); !ok || cached.Version != "v1" {
+		t.Fatalf("记录后应命中: ok=%v ver=%q", ok, cached.Version)
 	}
-	a.recordRelease("R1", DeployResult{Result: "success", Version: "v1"})
-	cached, ok := a.releaseDone("R1")
-	if !ok || cached.Version != "v1" {
-		t.Fatalf("记录后应命中并返回缓存: ok=%v ver=%q", ok, cached.Version)
+	// 不同应用不应互相命中
+	if _, ok := a.releaseDone("deploy", "app2", "R1"); ok {
+		t.Error("不同应用同 releaseId 不应命中")
 	}
-	// 失败结果不算幂等命中(允许重试)
-	a.recordRelease("R2", DeployResult{Result: "failed"})
-	if _, ok := a.releaseDone("R2"); ok {
-		t.Fatal("失败结果不应被当作幂等命中")
+	// 还原与部署独立命名空间,不应互相命中
+	if _, ok := a.releaseDone("restore", "app1", "R1"); ok {
+		t.Error("还原不应命中部署的幂等记录")
+	}
+	// 失败结果不记为命中
+	a.recordRelease("deploy", "app1", "R2", DeployResult{Result: "failed"})
+	if _, ok := a.releaseDone("deploy", "app1", "R2"); ok {
+		t.Error("失败结果不应被当作幂等命中")
 	}
 }
 
@@ -200,6 +204,65 @@ func TestExtractArchiveSmart(t *testing.T) {
 	if !fileExists(filepath.Join(dest, "main.py")) || !fileExists(filepath.Join(dest, "lib", "util.py")) {
 		t.Error("解包后应智能去掉顶层 release/,入口直达 dest")
 	}
+}
+
+// 安全解包:拒绝路径穿越(zip-slip)与链接条目。
+func TestExtractRejectsTraversalAndLinks(t *testing.T) {
+	dir := t.TempDir()
+	// 穿越条目
+	slip := filepath.Join(dir, "slip.tar.gz")
+	makeTarGz(t, slip, map[string]string{"../evil.txt": "pwned"})
+	if err := extractArchive(slip, filepath.Join(dir, "out1"), "gzip"); err == nil {
+		t.Error("含 ../ 穿越的压缩包应被拒绝")
+	}
+	if fileExists(filepath.Join(dir, "evil.txt")) {
+		t.Fatal("穿越文件不应被写到 dest 外")
+	}
+	// 软链接条目
+	link := filepath.Join(dir, "link.tar.gz")
+	makeTarGzCustom(t, link, func(tw *tar.Writer) {
+		tw.WriteHeader(&tar.Header{Name: "bad", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"})
+	})
+	if err := extractArchive(link, filepath.Join(dir, "out2"), "gzip"); err == nil {
+		t.Error("含符号链接的压缩包应被拒绝")
+	}
+}
+
+// 失败安全:多文件部署解包失败(缺入口)时旧目录不被破坏。
+func TestSwapDirFailureKeepsOld(t *testing.T) {
+	dir := t.TempDir()
+	appDir := filepath.Join(dir, "app")
+	os.MkdirAll(appDir, 0755)
+	os.WriteFile(filepath.Join(appDir, "main.py"), []byte("OLD"), 0644)
+	os.WriteFile(filepath.Join(appDir, "keep.txt"), []byte("data"), 0644)
+	// 包里没有入口 main.py
+	pkg := filepath.Join(dir, "pkg.tar.gz")
+	makeTarGz(t, pkg, map[string]string{"other.py": "x"})
+	if err := swapDirFromArchive(appDir, pkg, "gzip", "main.py"); err == nil {
+		t.Fatal("缺入口应失败")
+	}
+	// 旧目录与内容必须完好
+	if b, _ := os.ReadFile(filepath.Join(appDir, "main.py")); string(b) != "OLD" {
+		t.Error("解包失败后旧入口应保留")
+	}
+	if !fileExists(filepath.Join(appDir, "keep.txt")) {
+		t.Error("解包失败后旧目录其它文件应保留")
+	}
+	// 不应残留 staging/.old
+	if fileExists(appDir+".staging") || fileExists(appDir+".old") {
+		t.Error("不应残留 staging/.old")
+	}
+}
+
+func makeTarGzCustom(t *testing.T, path string, fn func(*tar.Writer)) {
+	t.Helper()
+	f, _ := os.Create(path)
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	fn(tw)
+	tw.Close()
+	gz.Close()
 }
 
 func makeTarGz(t *testing.T, path string, files map[string]string) {

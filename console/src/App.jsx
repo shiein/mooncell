@@ -115,8 +115,10 @@ function App() {
         patchApp(app.id, {
           version, lastDeploy: now,
           status: app.type === "static-nginx" ? "static" : "running",
-          pid: app.type === "static-nginx" ? null : 20000 + (Math.random() * 9000 | 0),
-          uptime: "刚刚", cpu: "1.0%", mem: app.mem === "—" ? "320 MB" : app.mem,
+          // 真实部署:运行态(pid/cpu/mem/uptime)由 Agent status 查询,前端不伪造随机值;模拟部署才填演示值。
+          ...(real
+            ? { pid: null, uptime: "—", cpu: "—", mem: "—" }
+            : { pid: app.type === "static-nginx" ? null : 20000 + (Math.random() * 9000 | 0), uptime: "刚刚", cpu: "1.0%", mem: app.mem === "—" ? "320 MB" : app.mem }),
         });
         addAudit("部署", `${app.name} ${version}`, "成功");
         toast(`${app.name} · ${version} 部署成功`);
@@ -145,8 +147,10 @@ function App() {
       patchApp(app.id, {
         version: backup.version, lastDeploy: now,
         status: app.type === "static-nginx" ? "static" : "running",
-        pid: app.type === "static-nginx" ? null : 20000 + (Math.random() * 9000 | 0),
-        uptime: "刚刚",
+        // 真实还原:运行态由 Agent status 查询,不前端伪造。
+        ...(real
+          ? { pid: null, uptime: "—", cpu: "—", mem: "—" }
+          : { pid: app.type === "static-nginx" ? null : 20000 + (Math.random() * 9000 | 0), uptime: "刚刚" }),
       });
       addAudit("还原", `${app.name} → 备份 ${backup.dir}(${backup.version})`, "成功");
       toast(`${app.name} 已还原至 ${backup.version}`);

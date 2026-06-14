@@ -1,6 +1,9 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -269,23 +273,6 @@ func scriptArchived(cfg DeployConfig, artifact string) bool {
 	return (cfg.Type == "python" || cfg.Type == "node") && sniffArchive(artifact) != ""
 }
 
-// clearDir 清空目录内容但保留目录本身(多文件解包前清旧版本)。
-func clearDir(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return os.MkdirAll(dir, 0755)
-		}
-		return err
-	}
-	for _, e := range entries {
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // tarDir 把目录打成 tar.gz(用系统 tar)。
 func tarDir(src, dest string) error {
 	out, err := exec.Command("tar", "-czf", dest, "-C", src, ".").CombinedOutput()
@@ -295,21 +282,52 @@ func tarDir(src, dest string) error {
 	return nil
 }
 
-// placeArtifact 落盘制品:python/node 压缩包 → 清空应用目录后智能解包(多文件);否则单文件原子替换。
+// swapDirFromArchive 失败安全地把压缩包解到应用目录:先解到独立 staging 目录(同父),
+// 校验入口存在后才原子替换旧目录(旧目录始终保留到切换成功前);解包/校验失败旧目录不动。
+// entry 为必须存在的入口相对名(空则不校验)。
+func swapDirFromArchive(appDir, archive, format, entry string) error {
+	staging := appDir + ".staging"
+	os.RemoveAll(staging)
+	if err := extractArchiveSmart(archive, staging, format); err != nil {
+		os.RemoveAll(staging)
+		return err
+	}
+	if entry != "" {
+		if _, err := os.Stat(filepath.Join(staging, entry)); err != nil {
+			os.RemoveAll(staging)
+			return fmt.Errorf("解包后未找到入口 %s(检查包内路径)", entry)
+		}
+	}
+	old := appDir + ".old"
+	os.RemoveAll(old)
+	hadOld := false
+	if _, err := os.Stat(appDir); err == nil {
+		if err := os.Rename(appDir, old); err != nil {
+			os.RemoveAll(staging)
+			return err
+		}
+		hadOld = true
+	}
+	if err := os.Rename(staging, appDir); err != nil {
+		if hadOld {
+			os.Rename(old, appDir) // 尽量恢复旧目录
+		}
+		os.RemoveAll(staging)
+		return err
+	}
+	os.RemoveAll(old)
+	return nil
+}
+
+// placeArtifact 落盘制品:python/node 压缩包 → 解到 staging 校验后原子切换(失败旧目录不动);否则单文件原子替换。
 func placeArtifact(cfg DeployConfig, artifact string) (string, error) {
 	if scriptArchived(cfg, artifact) {
 		appDir := filepath.Dir(cfg.BinPath)
 		format := sniffArchive(artifact)
-		if err := clearDir(appDir); err != nil {
+		if err := swapDirFromArchive(appDir, artifact, format, filepath.Base(cfg.BinPath)); err != nil {
 			return "", err
 		}
-		if err := extractArchiveSmart(artifact, appDir, format); err != nil {
-			return "", err
-		}
-		if _, err := os.Stat(cfg.BinPath); err != nil {
-			return "", fmt.Errorf("解包后未找到入口脚本 %s(检查包内路径)", filepath.Base(cfg.BinPath))
-		}
-		return "多文件包(" + format + ")智能解包 → " + appDir, nil
+		return "多文件包(" + format + ")安全解包 + 原子切换 → " + appDir, nil
 	}
 	os.MkdirAll(filepath.Dir(cfg.BinPath), 0755)
 	if err := atomicReplace(artifact, cfg.BinPath); err != nil {
@@ -318,14 +336,10 @@ func placeArtifact(cfg DeployConfig, artifact string) (string, error) {
 	return "tmp 落盘 → rename 原子替换 " + cfg.BinPath, nil
 }
 
-// restoreArtifactFrom 从备份还原制品:含 app.tar.gz → 清目录后解包(多文件);否则单文件原子替换。
+// restoreArtifactFrom 从备份还原制品:含 app.tar.gz → 解到 staging 后原子切换;否则单文件原子替换。
 func restoreArtifactFrom(cfg DeployConfig, bkDir string) error {
 	if tarPath := filepath.Join(bkDir, "app.tar.gz"); fileExists(tarPath) {
-		appDir := filepath.Dir(cfg.BinPath)
-		if err := clearDir(appDir); err != nil {
-			return err
-		}
-		return extractArchiveSmart(tarPath, appDir, "gzip")
+		return swapDirFromArchive(filepath.Dir(cfg.BinPath), tarPath, "gzip", "")
 	}
 	return atomicReplace(filepath.Join(bkDir, "app"), cfg.BinPath)
 }
@@ -472,14 +486,15 @@ func copyToTemp(src string) (string, func(), error) {
 
 // ---------- 部署流水线 ----------
 
-// releaseRecPath 是某 releaseId 的本地成功记录路径(filepath.Base 防穿越)。
-func (a *agent) releaseRecPath(rid string) string {
-	return filepath.Join(a.cfg.Paths.BackupDir, "_deploys", filepath.Base(rid))
+// releaseRecPath 是某 (操作, 应用, releaseId) 的本地成功记录路径——按 op/appId 隔离,
+// 避免不同应用或部署/还原互相命中;各段 filepath.Base 防穿越。
+func (a *agent) releaseRecPath(op, appID, rid string) string {
+	return filepath.Join(a.cfg.Paths.BackupDir, "_deploys", filepath.Base(op), filepath.Base(appID), filepath.Base(rid))
 }
 
-// releaseDone 读取 releaseId 的已成功记录(仅 success 才算幂等命中)。
-func (a *agent) releaseDone(rid string) (DeployResult, bool) {
-	b, err := os.ReadFile(a.releaseRecPath(rid))
+// releaseDone 读取该 (op,app,releaseId) 的已成功记录(仅 success 才算幂等命中)。
+func (a *agent) releaseDone(op, appID, rid string) (DeployResult, bool) {
+	b, err := os.ReadFile(a.releaseRecPath(op, appID, rid))
 	if err != nil {
 		return DeployResult{}, false
 	}
@@ -490,27 +505,37 @@ func (a *agent) releaseDone(rid string) (DeployResult, bool) {
 	return res, true
 }
 
-func (a *agent) recordRelease(rid string, res DeployResult) {
-	os.MkdirAll(filepath.Join(a.cfg.Paths.BackupDir, "_deploys"), 0755)
+func (a *agent) recordRelease(op, appID, rid string, res DeployResult) {
+	p := a.releaseRecPath(op, appID, rid)
+	os.MkdirAll(filepath.Dir(p), 0755)
 	b, _ := json.Marshal(res)
-	os.WriteFile(a.releaseRecPath(rid), b, 0644)
+	os.WriteFile(p, b, 0644)
 }
 
-// runDeployIdempotent 包裹 runDeploy 做 Agent 侧幂等:releaseId 已成功则直接返回缓存结果,
-// 不重复执行(防 Console 重试 / Agent 直连导致重复部署);成功后记录。
-func (a *agent) runDeployIdempotent(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
+// lockApp 串行化对同一应用的部署/还原(防并发同 ID 同时执行、防共用 unit/binPath 冲突)。返回解锁函数。
+func (a *agent) lockApp(id string) func() {
+	mu, _ := a.locks.LoadOrStore(id, &sync.Mutex{})
+	m := mu.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
+}
+
+// runDeployIdempotent 包裹 runDeploy:按 op/appId 隔离的 releaseId 幂等 + 同应用串行锁。
+// op ∈ "deploy"|"restore";releaseId 已成功则跳过返回缓存,成功后记录。
+func (a *agent) runDeployIdempotent(op string, cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
 	if emit == nil {
 		emit = func(Step) {}
 	}
+	defer a.lockApp(cfg.ID)() // 同应用串行,临界区内做幂等检查 + 执行 + 记录
 	if cfg.ReleaseID != "" {
-		if cached, ok := a.releaseDone(cfg.ReleaseID); ok {
-			emit(Step{Name: "幂等跳过", OK: true, Logs: []string{"releaseId 已成功部署,跳过重复执行"}})
+		if cached, ok := a.releaseDone(op, cfg.ID, cfg.ReleaseID); ok {
+			emit(Step{Name: "幂等跳过", OK: true, Logs: []string{"releaseId 已成功" + op + ",跳过重复执行"}})
 			return cached
 		}
 	}
 	res := a.runDeploy(cfg, artifact, emit)
 	if cfg.ReleaseID != "" && res.Result == "success" {
-		a.recordRelease(cfg.ReleaseID, res)
+		a.recordRelease(op, cfg.ID, cfg.ReleaseID, res)
 	}
 	return res
 }
@@ -522,12 +547,18 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 	if emit == nil {
 		emit = func(Step) {}
 	}
-	// 制品完整性:期望 sha256 不匹配则直接失败,不进任何部署路径(防传输损坏 / 制品被替换)。
+	// 制品完整性:期望 sha256 非空则强校验——格式非法(非 64 位 hex)或不匹配都直接失败,不进部署路径。
 	if exp := strings.TrimSpace(cfg.ExpectedSha256); exp != "" {
-		if actual := sha256File(artifact); !strings.EqualFold(exp, actual) {
-			s := Step{Name: "校验制品", OK: false, Logs: []string{"sha256 不匹配 · 期望 " + short(exp) + " 实得 " + short(actual)}}
+		fail := func(msg string) DeployResult {
+			s := Step{Name: "校验制品", OK: false, Logs: []string{msg}}
 			emit(s)
 			return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
+		}
+		if !isHex64(exp) {
+			return fail("expectedSha256 格式非法(需 64 位十六进制)")
+		}
+		if actual := sha256File(artifact); !strings.EqualFold(exp, actual) {
+			return fail("sha256 不匹配 · 期望 " + short(exp) + " 实得 " + short(actual))
 		}
 	}
 	switch cfg.Type {
@@ -670,26 +701,130 @@ func sniffArchive(path string) string {
 	}
 }
 
-// extractArchive 按格式解包到 dest(已建)。用系统 tar/unzip。
+const maxEntryBytes = 4 << 30 // 单文件解包上限 4GB,防 zip/tar 炸弹
+
+// safeJoin 校验压缩包条目名安全:拒绝绝对路径与 ../ 穿越,确保解析后落在 dest 内。
+func safeJoin(dest, name string) (string, error) {
+	if name == "" || filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, "\\") {
+		return "", fmt.Errorf("压缩包含绝对路径: %q", name)
+	}
+	clean := filepath.Clean(name)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("压缩包含穿越路径: %q", name)
+	}
+	target := filepath.Join(dest, clean)
+	if target != dest && !strings.HasPrefix(target, dest+string(os.PathSeparator)) {
+		return "", fmt.Errorf("压缩包含非法路径: %q", name)
+	}
+	return target, nil
+}
+
+// extractArchive 用 Go 标准库安全解包到 dest:逐条校验路径在 dest 内,
+// 拒绝软链接/硬链接/设备等(防 zip-slip / symlink 穿越),只接受普通文件与目录。
 func extractArchive(archive, dest, format string) error {
 	if err := os.MkdirAll(dest, 0755); err != nil {
 		return err
 	}
-	var cmd *exec.Cmd
 	switch format {
-	case "gzip":
-		cmd = exec.Command("tar", "-xzf", archive, "-C", dest)
-	case "tar":
-		cmd = exec.Command("tar", "-xf", archive, "-C", dest)
 	case "zip":
-		cmd = exec.Command("unzip", "-oq", archive, "-d", dest)
+		return extractZipSafe(archive, dest)
+	case "gzip", "tar":
+		return extractTarSafe(archive, dest, format == "gzip")
 	default:
 		return fmt.Errorf("不支持的压缩格式")
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("解包失败: %s", strings.TrimSpace(string(out)))
+}
+
+func extractTarSafe(archive, dest string, gzipped bool) error {
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var r io.Reader = f
+	if gzipped {
+		gz, gerr := gzip.NewReader(f)
+		if gerr != nil {
+			return gerr
+		}
+		defer gz.Close()
+		r = gz
+	}
+	tr := tar.NewReader(r)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("解包失败: %w", err)
+		}
+		target, err := safeJoin(dest, h.Name)
+		if err != nil {
+			return err
+		}
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := writeExtracted(target, tr); err != nil {
+				return err
+			}
+		case tar.TypeSymlink, tar.TypeLink:
+			return fmt.Errorf("拒绝压缩包内的链接条目(防穿越): %s", h.Name)
+		default:
+			// 跳过 fifo/设备等非常规条目
+		}
 	}
 	return nil
+}
+
+func extractZipSafe(archive, dest string) error {
+	zr, err := zip.OpenReader(archive)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	for _, zf := range zr.File {
+		if zf.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("拒绝 zip 内的符号链接(防穿越): %s", zf.Name)
+		}
+		target, err := safeJoin(dest, zf.Name)
+		if err != nil {
+			return err
+		}
+		if zf.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
+			continue
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return err
+		}
+		err = writeExtracted(target, rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeExtracted(target string, src io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0755)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, io.LimitReader(src, maxEntryBytes))
+	return err
 }
 
 // nonHiddenEntries 过滤掉点文件与 __MACOSX(zip 元数据),用于判断压缩包真实顶层结构。
@@ -951,6 +1086,19 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// isHex64 校验是否为 64 位十六进制(sha256 文本形态)。
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func short(s string) string {

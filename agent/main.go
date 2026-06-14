@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,7 @@ type agent struct {
 	cfg     *Config
 	caps    []Capability
 	started time.Time
+	locks   sync.Map // appId → *sync.Mutex,同应用部署/还原串行
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
