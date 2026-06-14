@@ -32,9 +32,11 @@ pnpm dist
 
 ### 配置 `config.toml`
 
+> ⚠️ 安全:默认监听 `127.0.0.1`(仅本机)。**对外监听(`0.0.0.0`/`::`)前必须先改掉默认管理员密码与 Agent token**——否则 Console 会拒绝启动(`拒绝以不安全配置对外启动`)。
+
 ```toml
 [server]
-addr = "0.0.0.0"        # 监听地址,127.0.0.1 仅本机
+addr = "127.0.0.1"      # 监听地址,默认仅本机;对外请改 0.0.0.0 并务必先改下方默认密码/token
 port = 8787
 
 [database]
@@ -45,11 +47,11 @@ ttl_hours = 168         # 会话有效期(小时),168 = 7 天
 
 [admin]
 username = "admin"
-password = "jch@9388"
+password = "jch@9388"      # 默认口令;对外监听必须改,否则启动被拒
 
 [agent]                  # Console 主动连接的默认 Agent(单机版指向本机)
 addr  = "127.0.0.1:9100"
-token = "mc_ag_change_me"   # 须与 Agent 端 token 一致
+token = "mc_ag_change_me"   # 须与 Agent 端 token 一致;对外监听必须改,否则启动被拒
 
 [cabinet]
 dir         = "cabinet"  # 文件柜二进制落盘目录

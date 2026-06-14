@@ -33,7 +33,7 @@
 > 五类进程 Deployer(systemd / pm2 Runner)、static-nginx(软链原子切换)、tomcat-war(容器换 WAR);
 > 部署/还原/启停/日志均走真实 Agent,Console 据已存类型化配置服务端生成 Agent 请求(关闭注入面)。
 > Runner 仅 **systemd / pm2**(nohup 未实现,不暴露);实时流统一用 **SSE**(未用 WebSocket);
-> 制品传输为**单次 multipart 上传 + sha256 强校验**(分块/断点续传未实现)。
+> 制品传输:浏览器→Console 已实现**分块上传 + 断点续传**(>16MB 自动分块,乱序/重试可续传);Console→Agent 为单次 multipart;全程 sha256 强校验。
 > 仅业务展示数据(部分页面)仍可用 mock 种子,生产空库从零起即全真实。
 
 - **Console**:Web 控制台。管理应用、触发部署、查看日志、备份还原、文件柜、登录。
@@ -188,7 +188,7 @@ type Runner interface {
   - `GET /api/apps/{id}/status`、`GET /api/system`(CPU/内存/磁盘)、`GET /api/precheck`(新建预检)
   - `GET /api/apps/{id}/logs/stream`(进程 journal/pm2,SSE)、`GET /api/apps/{id}/logs/file/stream`(声明日志文件 tail,SSE)、`GET /api/apps/{id}/logs/download`(gzip)
   - `GET /api/apps/{id}/backups`、`GET /api/apps/{id}/releases`
-- **制品传输**:当前为单次 multipart 上传 + sha256 强校验(Console 服务端权威计算,Agent 强校验,格式非法即拒)。分块上传 + 断点续传仍是**待实现**项(大 war 包/不稳带宽场景)。
+- **制品传输**:浏览器→Console **分块上传 + 断点续传已实现**(>16MB 自动分块,失败按 nextIndex 续传、重复块幂等、`MaxBytesReader` 控总量、过期会话清理);Console→Agent 仍单次 multipart(LAN 可靠)。全程 sha256 强校验(Console 服务端权威计算,Agent 强校验,格式非法即拒)。
 - **幂等**:deploy/restore 请求带 releaseId,Agent 按 `op/appId/releaseId` 隔离记录;命中已成功记录时核对请求指纹(制品 sha + 落盘路径 + runner + 版本 + 类型),一致才返回缓存,复用于不同制品/配置则拒绝,防碰撞与重试双部署。
 - **白名单原则**:Agent 没有"执行任意命令"接口;钩子只能从内置动作列表选择。
 
@@ -260,4 +260,4 @@ P0 把"一种后端 + 一种前端"的最短路径打穿,流水线、Runner、Sc
 3. **端口/进程冲突**:历史遗留的手工 nohup 进程可能占着端口。预检阶段做端口探测,冲突时给出 pid 与命令行,让操作者决定,**不要自动 kill 非托管进程**。
 4. **磁盘水位**:备份 + 文件柜 + 日志都是吃磁盘的,Agent 上报水位,低于阈值禁止部署并告警。
 5. **日志轮转**:tail 实现必须处理 rename/truncate(用 fsnotify + 重开文件),否则现场看着看着日志"断流"。
-6. **大文件上传**:内网 web 上传 1-2GB war/dist 很常见,分块 + 续传是必需品不是优化项。**(当前实现仍是单次 multipart 上传 + sha256 强校验,分块/续传待补;Console/Agent 均以 `MaxBytesReader` 在传输层硬截断,默认上限 1GB,`max_upload_mb` 可配,超限回 413。)**
+6. **大文件上传**:内网 web 上传 1-2GB war/dist 很常见,分块 + 续传是必需品不是优化项。**(已实现:浏览器→Console 分块上传 + 断点续传,>16MB 自动分块;Console/Agent 均以 `MaxBytesReader` 传输层硬截断,默认上限 1GB,`max_upload_mb` 可配,超限回 413。)**
