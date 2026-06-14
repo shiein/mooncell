@@ -226,6 +226,32 @@ func isActive(id string) bool {
 	return out == "active"
 }
 
+// installPyRequirements 对 python 应用:若部署目录(入口脚本同级)含 requirements.txt,
+// 用配置的解释器(venv 优先,否则 python3)的 pip 安装依赖。返回 ran/日志/错误;失败由调用方回滚。
+// 仅 python 生效;无 requirements.txt 时 ran=false(跳过)。
+func installPyRequirements(cfg DeployConfig) (bool, string, error) {
+	if cfg.Type != "python" {
+		return false, "", nil
+	}
+	dir := filepath.Dir(cfg.BinPath)
+	req := filepath.Join(dir, "requirements.txt")
+	if !fileExists(req) {
+		return false, "", nil
+	}
+	py := strings.TrimSpace(cfg.Interpreter)
+	if py == "" {
+		py = "python3"
+	}
+	cmd := exec.Command(py, "-m", "pip", "install", "-r", req)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	tail := strings.TrimSpace(string(out))
+	if i := strings.LastIndex(tail, "\n"); i >= 0 {
+		tail = tail[i+1:] // 只取末行,避免日志爆量
+	}
+	return true, py + " -m pip install -r requirements.txt → " + tail, err
+}
+
 // procStats 据 pid 用 ps 读取进程的 CPU% 与常驻内存(RSS),格式化为展示字符串。
 // pid 空/0(未运行)返回 "—"。CPU% 为 ps 给出的进程生命周期平均占用,作展示近似足够。
 func procStats(pid string) (cpu, mem string) {
@@ -822,6 +848,17 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 		return res
 	}
 	add("替换制品", true, plog)
+
+	// 4.5 python 多文件包:部署目录含 requirements.txt 则用解释器的 pip 安装依赖;失败回滚。
+	if ran, ilog, ierr := installPyRequirements(cfg); ran {
+		if ierr != nil {
+			add("安装依赖", false, ilog)
+			rlog, ok := a.rollbackSystemd(cfg, bkDir)
+			res.Result = rollbackResult(rlog, ok, add)
+			return res
+		}
+		add("安装依赖", true, ilog)
+	}
 
 	// 5. 生成 unit + 启动
 	if err := writeUnit(cfg); err != nil {

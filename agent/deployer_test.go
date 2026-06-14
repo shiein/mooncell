@@ -589,3 +589,26 @@ func TestExtractRejectsOversizeEntry(t *testing.T) {
 		t.Fatalf("超限文件应报错,got err=%v", err)
 	}
 }
+
+// installPyRequirements:非 python / 无 requirements.txt 跳过;有则尝试执行。
+func TestInstallPyRequirements(t *testing.T) {
+	// 非 python:跳过
+	if ran, _, _ := installPyRequirements(DeployConfig{Type: "go-binary", BinPath: "/x/app"}); ran {
+		t.Error("非 python 应跳过")
+	}
+	// python 但无 requirements.txt:跳过
+	dir := t.TempDir()
+	if ran, _, _ := installPyRequirements(DeployConfig{Type: "python", BinPath: filepath.Join(dir, "app.py")}); ran {
+		t.Error("无 requirements.txt 应跳过")
+	}
+	// python + requirements.txt 存在:ran=true(用不存在的解释器使其确定性失败,只验证「会执行」)
+	os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("nonexistent-pkg-xyz==0.0.0\n"), 0644)
+	ran, log, err := installPyRequirements(DeployConfig{Type: "python", BinPath: filepath.Join(dir, "app.py"), Interpreter: "/nonexistent/python"})
+	if !ran {
+		t.Fatal("有 requirements.txt 应执行")
+	}
+	if err == nil {
+		t.Log("注:本机有可用 pip 时可能成功;CI 无 /nonexistent/python 必失败")
+	}
+	_ = log
+}

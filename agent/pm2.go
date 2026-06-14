@@ -123,6 +123,17 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	}
 	add("替换制品", true, plog)
 
+	// python 多文件包:有 requirements.txt 则装依赖,失败回滚(与 systemd 路径一致)。
+	if ran, ilog, ierr := installPyRequirements(cfg); ran {
+		if ierr != nil {
+			add("安装依赖", false, ilog)
+			rlog, ok := a.rollbackPm2(cfg, bkDir)
+			res.Result = rollbackResult(rlog, ok, add)
+			return res
+		}
+		add("安装依赖", true, ilog)
+	}
+
 	eco, err := writePm2Eco(cfg)
 	if err != nil {
 		add("启动服务", false, "写 ecosystem 失败: "+err.Error())
