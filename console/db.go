@@ -199,7 +199,8 @@ func (s *Store) seedAdmin(username, password string) {
 		log.Printf("[db] 种子管理员失败: %v", err)
 		return
 	}
-	log.Printf("[db] 已创建默认管理员: %s / %s", username, password)
+	// 不打印明文口令:journal 会长期留存;初始密码由 install.sh 首次安装摘要一次性输出。
+	log.Printf("[db] 已创建默认管理员: %s(初始口令见安装摘要 / config.toml)", username)
 }
 
 // UserInfo 是用户列表对外形态(不含口令哈希)。
