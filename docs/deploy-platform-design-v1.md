@@ -182,14 +182,14 @@ type Runner interface {
 
 ## 8. Console ↔ Agent 通信与安全
 
-- **认证**:Agent 启动时生成/读取 token(config.yaml),Console 添加 Agent 时录入;所有请求带 `Authorization: Bearer`。内网环境这层够用;若有要求可加自签 mTLS。
-- **方向**:Console 主动调 Agent(单机/固定 IP 内网,不需要反向注册那套);Agent 提供:
+- **认证**:Agent 启动时生成/读取 token(`config.toml`),Console 添加 Agent 时录入;所有请求带 `Authorization: Bearer`。内网环境这层够用;若有要求可加自签 mTLS。
+- **方向**:Console 主动调 Agent(单机/固定 IP 内网,不需要反向注册那套);Agent 提供(实际实现):
   - `POST /api/apps/{id}/deploy[/stream]`(制品随 multipart 一并上传)、`POST /api/apps/{id}/restore/stream`、`POST /api/apps/{id}/lifecycle`(启停)、`DELETE /api/apps/{id}`(下线)
-  - `GET /api/apps/{id}/status`、`GET /api/system`(CPU/内存/磁盘)
-  - `WS /api/logs/stream`、`GET /api/logs/download`
-  - `GET /api/backups`、`DELETE /api/backups/{id}`
+  - `GET /api/apps/{id}/status`、`GET /api/system`(CPU/内存/磁盘)、`GET /api/precheck`(新建预检)
+  - `GET /api/apps/{id}/logs/stream`(进程 journal/pm2,SSE)、`GET /api/apps/{id}/logs/file/stream`(声明日志文件 tail,SSE)、`GET /api/apps/{id}/logs/download`(gzip)
+  - `GET /api/apps/{id}/backups`、`GET /api/apps/{id}/releases`
 - **制品传输**:当前为单次 multipart 上传 + sha256 强校验(Console 服务端权威计算,Agent 强校验,格式非法即拒)。分块上传 + 断点续传仍是**待实现**项(大 war 包/不稳带宽场景)。
-- **幂等**:deploy 请求带 releaseId,Agent 对同一 releaseId 重复请求直接返回当前状态,防止前端重试导致双部署。
+- **幂等**:deploy/restore 请求带 releaseId,Agent 按 `op/appId/releaseId` 隔离记录;命中已成功记录时核对请求指纹(制品 sha + 落盘路径 + runner + 版本 + 类型),一致才返回缓存,复用于不同制品/配置则拒绝,防碰撞与重试双部署。
 - **白名单原则**:Agent 没有"执行任意命令"接口;钩子只能从内置动作列表选择。
 
 ---
@@ -203,7 +203,7 @@ type Runner interface {
 | DB | `modernc.org/sqlite`(纯 Go,无 CGO) | 无 CGO 利于交叉编译与单文件部署;备份 = 拷文件;写串行,连接数限 1 |
 | 会话/认证 | 服务端 session + httpOnly cookie + bcrypt | 见 §6;token 由 `crypto/rand` 生成,落 `sessions` 表 |
 | 配置 | TOML(`github.com/BurntSushi/toml`)| `config.toml`:监听地址/端口、db 路径、会话 TTL、默认管理员;缺省字段用内置默认值 |
-| Agent | Go 1.22+,chi 或标准库 mux | 静态编译,`GOARCH=arm64/amd64` 双发;本地状态 bbolt |
+| Agent | Go 1.22+,标准库 mux(1.22 方法路由) | 静态编译,`GOARCH=arm64/amd64` 双发;本地状态用文件(`backups/_deploys/` 下的幂等记录),无嵌入式 KV |
 | 进程内调度 | Console:Go ticker(清理过期文件等);Agent:自带 ticker | 不引入 Redis/BullMQ,单机没必要 |
 | 打包交付 | Console:`vite build` → `go build` 产出**单二进制**(前端已嵌入),配 `config.toml` 即可跑;Agent:单二进制 + install.sh(注册 systemd) | |
 
@@ -213,12 +213,11 @@ type Runner interface {
 
 ```
 /opt/deploy-agent/
-├── agent                  # Go 二进制
-├── config.yaml            # token、监听端口、白名单根目录
-├── data/                  # bbolt 状态
-├── backups/{app}/{ts}/    # 备份
-├── tmp/                   # 上传暂存(校验通过才移入目标)
-└── units/                 # 生成的 systemd unit 模板副本
+├── mc-agent               # Go 二进制
+├── config.toml            # token、监听端口、白名单根目录(deploy_roots/log_roots)
+├── backups/{app}/{ts}/    # 备份(单文件 app / 多文件 app.tar.gz)
+├── backups/_deploys/{op}/{app}/{releaseId}  # 幂等记录(结果 + 请求指纹)
+└── (上传暂存走系统临时目录,校验通过才移入目标)
 
 /opt/deploy-console/
 ├── mooncell               # Go 单二进制(前端已 go:embed 嵌入)
@@ -246,7 +245,7 @@ type Runner interface {
 | 阶段 | 内容 |
 |---|---|
 | **P0** | Console 骨架 + 登录;Agent 骨架 + token 认证;`java-jar`(systemd)与 `static-nginx` 两个 Deployer;上传→部署→健康检查闭环;部署日志展示 |
-| **P1** | 自动备份 + 一键还原;应用日志实时流(WS)+ 下载;pm2 Runner(覆盖 node/java/python) |
+| **P1** | 自动备份 + 一键还原;应用日志实时流(SSE)+ 下载;pm2 Runner(覆盖 node/java/python) |
 | **P2** | tomcat-war、go-binary、python Deployer;系统监控面板(CPU/内存/磁盘);审计日志 |
 | **P3** | 文件柜;多 Agent 管理;角色细化;离线安装包打磨(install.sh、升级脚本) |
 
