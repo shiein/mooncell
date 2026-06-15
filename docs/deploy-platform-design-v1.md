@@ -29,7 +29,7 @@
 > (二进制 + `config.toml` + sqlite 即可部署)。下文 §9 技术选型、§10 目录约定已按实际实现订正;
 > Agent 侧设计未变。
 >
-> **实现现状(v2,2026-06)**:真实 Agent 已落地并经真机验证——go-binary / java-jar / python / node
+> **实现现状(v2,2026-06)**:真实 Agent 已落地并经真机验证——native-binary / java-jar / python / node
 > 五类进程 Deployer(systemd / pm2 Runner)、static-nginx(软链原子切换)、tomcat-war(容器换 WAR);
 > 部署/还原/启停/日志均走真实 Agent,Console 据已存类型化配置服务端生成 Agent 请求(关闭注入面)。
 > Runner 仅 **systemd / pm2**(nohup 未实现,不暴露);实时流统一用 **SSE**(未用 WebSocket);
@@ -78,7 +78,7 @@ CabinetFile   文件柜文件(上传者、提取码、大小、过期策略)
 |---|---|---|
 | `java-jar` | jar 目标路径、JVM 参数、环境变量、启动用户、健康检查 URL/端口、日志路径 | systemd / pm2 |
 | `tomcat-war` | WAR 目标路径(webapps 下)、健康检查、部署后是否 `systemctl restart tomcat` | tomcat 容器 |
-| `go-binary` | 二进制目标路径、启动参数、工作目录、环境变量、健康检查 | systemd / pm2 |
+| `native-binary` | 二进制目标路径、启动参数、工作目录、环境变量、健康检查 | systemd / pm2 |
 | `python` | 解释器路径(支持 venv)、入口脚本、启动参数(支持 .py 或 .tar.gz 多文件包) | systemd / pm2 |
 | `node` | 入口文件、pm2 进程名 / ecosystem 配置、node 路径(支持 .js 或 .tar.gz 多文件包) | pm2 / systemd |
 | `static-nginx` | 目标目录、是否整目录替换(vs 仅 dist 内容)、部署后是否 `nginx -s reload`、nginx 二进制路径 | 无进程(可选 reload 钩子) |
@@ -100,7 +100,7 @@ type Runner interface {
 
 三种托管模式(术语区分,避免混用「Runner」):
 
-**A. 进程 Runner**(go-binary / java-jar / python / node):平台直接托管应用进程。
+**A. 进程 Runner**(native-binary / java-jar / python / node):平台直接托管应用进程。
 1. **systemd**(默认):按模板生成 unit(`/etc/systemd/system/deploy-<app>.service`)→ `daemon-reload` → `systemctl start`。崩溃自动拉起、开机自启、journald 日志;启停 `systemctl start/stop`,状态查 `is-active` / 主 pid。
 2. **pm2**:落 ecosystem.json + `pm2 start/stop`,`pm2 pid/jlist` 解析状态。Agent 启动探测 pm2 是否可用,不可用则该 Runner 在 UI 置灰。
 
@@ -251,7 +251,7 @@ type Runner interface {
 |---|---|
 | **P0** | Console 骨架 + 登录;Agent 骨架 + token 认证;`java-jar`(systemd)与 `static-nginx` 两个 Deployer;上传→部署→健康检查闭环;部署日志展示 |
 | **P1** | 自动备份 + 一键还原;应用日志实时流(SSE)+ 下载;pm2 Runner(覆盖 node/java/python) |
-| **P2** | tomcat-war、go-binary、python Deployer;系统监控面板(CPU/内存/磁盘);审计日志 |
+| **P2** | tomcat-war、native-binary、python Deployer;系统监控面板(CPU/内存/磁盘);审计日志 |
 | **P3** | 文件柜;多 Agent 管理;角色细化;离线安装包打磨(install.sh、升级脚本) |
 
 P0 把"一种后端 + 一种前端"的最短路径打穿,流水线、Runner、Schema 三个抽象立住之后,P2 的新增 Deployer 都是填表式工作量。

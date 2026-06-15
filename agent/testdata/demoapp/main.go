@@ -1,4 +1,4 @@
-// 集成测试用的极小制品:一个 HTTP 服务,用于在真机上验证 go-binary Deployer 的部署闭环。
+// 集成测试用的极小制品:一个 HTTP 服务,用于在真机上验证 native-binary Deployer 的部署闭环。
 // 放在 testdata/ 下,Go 工具链构建 agent 时会忽略本目录。
 package main
 

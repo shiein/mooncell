@@ -317,7 +317,7 @@ function DeployDialog({ app, open, onClose }) {
   const [simulateFail, setSimulateFail] = React.useState(false);
   const [version, setVersion] = React.useState("");
   const [drag, setDrag] = React.useState(false);
-  const [realFile, setRealFile] = React.useState(null); // 真实上传的 File(go-binary 走真机部署)
+  const [realFile, setRealFile] = React.useState(null); // 真实上传的 File(native-binary 走真机部署)
   const [real, setReal] = React.useState(null);         // 真实部署结果:{loading}|{error}|{result,steps}
   const up = useUploadSim();
   const pipe = usePipeline();

@@ -57,7 +57,7 @@ func validIDAndRelease(id, rid string) (string, bool) {
 type DeployConfig struct {
 	ID             string            `json:"id"`
 	Name           string            `json:"name"`
-	Type           string            `json:"type"`    // go-binary | java-jar | static-nginx;空默认 go-binary
+	Type           string            `json:"type"`    // native-binary | java-jar | static-nginx;空默认 native-binary
 	BinPath        string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
 	Workdir        string            `json:"workdir"`
 	Runner         string            `json:"runner"`      // systemd(默认)| pm2;决定进程托管方式
@@ -129,7 +129,7 @@ func execStart(cfg DeployConfig) (string, error) {
 			parts = append(parts, a)
 		}
 		return strings.Join(parts, " "), nil
-	default: // go-binary
+	default: // native-binary
 		es := cfg.BinPath
 		if a := strings.TrimSpace(cfg.Args); a != "" {
 			es += " " + a
@@ -775,7 +775,7 @@ func (a *agent) runDeployIdempotent(op string, cfg DeployConfig, artifact string
 }
 
 // runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
-// 其余(go-binary/java-jar/python)复用 systemd 进程流水线。
+// 其余(native-binary/java-jar/python)复用 systemd 进程流水线。
 // emit 在每步完成时回调(用于 SSE 实时流);同步 JSON 端点传 nil 即可。
 func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
 	if emit == nil {
@@ -795,9 +795,9 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 			return fail("sha256 不匹配 · 期望 " + short(exp) + " 实得 " + short(actual))
 		}
 	}
-	// "go-binary" 实为「为目标机编译的原生可执行文件」——Go/Rust/C++/Zig 等皆可。
+	// "native-binary" 实为「为目标机编译的原生可执行文件」——Go/Rust/C++/Zig 等皆可。
 	// 校验"符合条件":ELF 架构须与本机一致;明显的他平台可执行(Mach-O/PE)给清晰错误;脚本/未知放行。
-	if cfg.Type == "go-binary" {
+	if cfg.Type == "native-binary" {
 		if msg := checkNativeBinary(artifact); msg != "" {
 			s := Step{Name: "校验制品", OK: false, Logs: []string{msg}}
 			emit(s)
@@ -818,7 +818,7 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 }
 
 // runDeployProcess 执行已验证的进程类部署闭环:备份 → 停 → 原子替换 → 生成 unit + 启动 → 健康检查;失败自动回滚。
-// go-binary 与 java-jar 共用此流水线,差异只在 execStart 与制品落盘(jar 同样按文件原子替换)。
+// native-binary 与 java-jar 共用此流水线,差异只在 execStart 与制品落盘(jar 同样按文件原子替换)。
 func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
 	res := DeployResult{Version: cfg.Version}
 	add := func(name string, ok bool, logs ...string) {

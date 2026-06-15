@@ -19,7 +19,7 @@ const APP_SCHEMAS = {
     { key: "health", label: "健康检查 URL / 端口", ph: "http://127.0.0.1:8081/report/ 或 端口探活 :8081", mono: true },
     { key: "reload", label: "部署后 systemctl restart tomcat", type: "switch", def: false },
   ],
-  "go-binary": [
+  "native-binary": [
     { key: "path", label: "二进制目标路径", ph: "/srv/apps/my-app/server", mono: true, hint: "任意语言(Go/Rust/C++…)为目标机编译的自包含可执行文件;部署前校验架构匹配" },
     { key: "args", label: "启动参数", ph: "--config config.toml", mono: true },
     { key: "workdir", label: "工作目录", ph: "/srv/apps/my-app", mono: true },

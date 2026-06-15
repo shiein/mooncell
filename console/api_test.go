@@ -81,7 +81,7 @@ func TestPutAppConfigValidation(t *testing.T) {
 		a.putAppConfig(w, req)
 		return w.Code
 	}
-	good := `{"name":"ok","type":"go-binary","runner":"systemd","path":"/srv/apps/x/app","port":8080,"backupKeep":5,"agentId":"default"}`
+	good := `{"name":"ok","type":"native-binary","runner":"systemd","path":"/srv/apps/x/app","port":8080,"backupKeep":5,"agentId":"default"}`
 	if c := put(good); c != http.StatusOK {
 		t.Fatalf("合法配置应 200,得 %d", c)
 	}
@@ -89,14 +89,14 @@ func TestPutAppConfigValidation(t *testing.T) {
 		name, body string
 	}{
 		{"未知类型", `{"name":"a","type":"weird","runner":"systemd","path":"/x","agentId":"default","backupKeep":5}`},
-		{"Runner 不属于类型", `{"name":"a","type":"go-binary","runner":"tomcat","path":"/x","agentId":"default","backupKeep":5}`},
-		{"端口越界", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","port":70000,"agentId":"default","backupKeep":5}`},
-		{"空名", `{"name":"","type":"go-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":5}`},
-		{"空路径", `{"name":"a","type":"go-binary","runner":"systemd","path":"","agentId":"default","backupKeep":5}`},
-		{"未知 Agent", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"ghost","backupKeep":5}`},
-		{"备份份数越界", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":999}`},
-		{"port 为字符串(类型不符)", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","port":"8080","agentId":"default","backupKeep":5}`},
-		{"backupKeep 为字符串(类型不符)", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":"5"}`},
+		{"Runner 不属于类型", `{"name":"a","type":"native-binary","runner":"tomcat","path":"/x","agentId":"default","backupKeep":5}`},
+		{"端口越界", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","port":70000,"agentId":"default","backupKeep":5}`},
+		{"空名", `{"name":"","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":5}`},
+		{"空路径", `{"name":"a","type":"native-binary","runner":"systemd","path":"","agentId":"default","backupKeep":5}`},
+		{"未知 Agent", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"ghost","backupKeep":5}`},
+		{"备份份数越界", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":999}`},
+		{"port 为字符串(类型不符)", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","port":"8080","agentId":"default","backupKeep":5}`},
+		{"backupKeep 为字符串(类型不符)", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":"5"}`},
 	} {
 		if c := put(tc.body); c != http.StatusBadRequest {
 			t.Errorf("%s 应 400,得 %d", tc.name, c)
@@ -357,7 +357,7 @@ func TestAppDeclaresLog(t *testing.T) {
 	defer s.Close()
 	a := &api{store: s}
 
-	app := appConfig{Name: "x", Type: "go-binary", LogPaths: []string{"/srv/apps/x/logs/app.log", "/srv/apps/x/logs/err.log"}}
+	app := appConfig{Name: "x", Type: "native-binary", LogPaths: []string{"/srv/apps/x/logs/app.log", "/srv/apps/x/logs/err.log"}}
 	b, _ := json.Marshal(app)
 	s.putEntity("app", "x", b)
 
@@ -427,7 +427,7 @@ func TestApplyAppRuntimeState(t *testing.T) {
 		return m
 	}
 	// 部署成功:版本切到 v2,状态 running,pid 清空
-	put(map[string]any{"id": "x", "type": "go-binary", "version": "v1", "status": "stopped", "pid": float64(123)})
+	put(map[string]any{"id": "x", "type": "native-binary", "version": "v1", "status": "stopped", "pid": float64(123)})
 	a.applyAppRuntimeState("x", "v2", "success")
 	if m := get(); m["version"] != "v2" || m["status"] != "running" || m["pid"] != nil {
 		t.Fatalf("success 应切 v2/running/pid空,got %v", m)
@@ -454,7 +454,7 @@ func TestApplyLifecycleState(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()
 	a := &api{store: s}
-	b, _ := json.Marshal(map[string]any{"id": "x", "type": "go-binary", "status": "stopped"})
+	b, _ := json.Marshal(map[string]any{"id": "x", "type": "native-binary", "status": "stopped"})
 	s.putEntity("app", "x", b)
 	// stop 返回 active=false
 	a.applyLifecycleState("x", []byte(`{"active":false,"pid":"0"}`))

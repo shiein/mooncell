@@ -60,7 +60,7 @@ test('新建应用 Runner 按真实能力置灰(pm2 不可用)', async ({ page }
   await page.getByRole('button', { name: '应用 Applications' }).click();
   await page.getByRole('button', { name: /新建应用/ }).click();
   await expect(page.getByText('第 1 步 · 选择部署类型')).toBeVisible();
-  // 选 go-binary(runners: systemd / pm2)→ 下一步到表单
+  // 选 native-binary(runners: systemd / pm2)→ 下一步到表单
   await page.getByRole('button', { name: /原生二进制/ }).click();
   await page.getByRole('button', { name: '下一步', exact: true }).click();
   // 假 Agent 报 pm2 不可用 → 该 option 置灰禁用;systemd 可用
@@ -98,7 +98,7 @@ test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ p
   await login(page);
   await page.getByRole('button', { name: '应用 Applications' }).click();
   await page.getByRole('button', { name: /新建应用/ }).click();
-  // 先选 go-binary,手动选 systemd(可用)
+  // 先选 native-binary,手动选 systemd(可用)
   await page.getByRole('button', { name: /原生二进制/ }).click();
   await page.getByRole('button', { name: '下一步', exact: true }).click();
   const runnerSel = page.locator('select').filter({ has: page.locator('option[value="systemd"]') });
@@ -115,7 +115,7 @@ test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ p
 test('真实应用部署弹窗无"示例制品演示"入口(必须真实文件)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/apps/e2e-dep/config', {
-    data: { id: 'e2e-dep', name: 'E2E 部署测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-dep/app', backupKeep: 5, logPaths: [] },
+    data: { id: 'e2e-dep', name: 'E2E 部署测试', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-dep/app', backupKeep: 5, logPaths: [] },
   });
   await page.reload();
   await page.getByRole('button', { name: '应用 Applications' }).click();
@@ -128,7 +128,7 @@ test('真实应用部署弹窗无"示例制品演示"入口(必须真实文件)'
 test('配置页 Runner 按 Agent 能力置灰(pm2 不可用)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/apps/e2e-cfg/config', {
-    data: { id: 'e2e-cfg', name: 'E2E 配置测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-cfg/app', backupKeep: 5, logPaths: [] },
+    data: { id: 'e2e-cfg', name: 'E2E 配置测试', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-cfg/app', backupKeep: 5, logPaths: [] },
   });
   await page.reload();
   await page.getByRole('button', { name: '应用 Applications' }).click();
@@ -141,7 +141,7 @@ test('配置页 Runner 按 Agent 能力置灰(pm2 不可用)', async ({ page }) 
 test('配置页编辑数值字段保存成功(port/backupKeep 归一化,不再 400)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/apps/e2e-save/config', {
-    data: { id: 'e2e-save', name: 'E2E 保存测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-save/app', port: 8080, backupKeep: 5, logPaths: [] },
+    data: { id: 'e2e-save', name: 'E2E 保存测试', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-save/app', port: 8080, backupKeep: 5, logPaths: [] },
   });
   await page.reload();
   await page.getByRole('button', { name: '应用 Applications' }).click();
@@ -173,7 +173,7 @@ test('tomcat 不显示启停按钮(容器托管,无 systemd 单元)', async ({ p
 test('真实应用日志流失败显示错误态(不伪造模拟日志)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/apps/e2e-log/config', {
-    data: { id: 'e2e-log', name: 'E2E 日志测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-log/app', backupKeep: 5, logPaths: [] },
+    data: { id: 'e2e-log', name: 'E2E 日志测试', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-log/app', backupKeep: 5, logPaths: [] },
   });
   await page.reload();
   await page.getByRole('button', { name: '应用 Applications' }).click();
@@ -189,7 +189,7 @@ test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ p
   // 经 API 建一个真实类型应用(假 Agent 的 backups 端点会 500)
   await page.request.put('/api/apps/e2e-bak/config', {
     data: {
-      id: 'e2e-bak', name: 'E2E 备份测试', type: 'go-binary', runner: 'systemd',
+      id: 'e2e-bak', name: 'E2E 备份测试', type: 'native-binary', runner: 'systemd',
       status: 'running', version: 'v1', path: '/srv/apps/e2e-bak/app',
       backupKeep: 5, logPaths: ['/srv/apps/e2e-bak/logs/app.log'],
     },

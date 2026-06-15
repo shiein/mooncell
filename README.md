@@ -93,7 +93,7 @@ Agent 按**文件魔数**自动判断单文件 / 压缩包;压缩包智能解包
 
 | 类型 | 制品格式 | 托管方式 |
 |---|---|---|
-| 原生二进制(`go-binary`) | 单个可执行文件 —— **任意语言**(Go/Rust/C++/Zig…)**为目标机 OS/架构编译**的自包含二进制;部署前校验 ELF 架构匹配、拦截 Mach-O/PE | systemd / pm2,原子替换 |
+| 原生二进制(`native-binary`) | 单个可执行文件 —— **任意语言**(Go/Rust/C++/Zig…)**为目标机 OS/架构编译**的自包含二进制;部署前校验 ELF 架构匹配、拦截 Mach-O/PE | systemd / pm2,原子替换 |
 | java-jar | 单个 `.jar` | systemd / pm2,原子替换 |
 | python | `.py` 或 压缩包(多文件 + `requirements.txt` 自动装依赖) | systemd / pm2,venv 优先 |
 | node | `.js` 或 压缩包 | pm2 / systemd |

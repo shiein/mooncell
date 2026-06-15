@@ -14,12 +14,12 @@ import (
 	"testing"
 )
 
-// execStart:go-binary / python(venv 解释器)的命令生成。
+// execStart:native-binary / python(venv 解释器)的命令生成。
 func TestExecStart(t *testing.T) {
-	// go-binary:直跑二进制 + 启动参数
-	got, err := execStart(DeployConfig{Type: "go-binary", BinPath: "/srv/apps/x/app", Args: "--port 80"})
+	// native-binary:直跑二进制 + 启动参数
+	got, err := execStart(DeployConfig{Type: "native-binary", BinPath: "/srv/apps/x/app", Args: "--port 80"})
 	if err != nil || got != "/srv/apps/x/app --port 80" {
-		t.Fatalf("go-binary execStart = %q, err=%v", got, err)
+		t.Fatalf("native-binary execStart = %q, err=%v", got, err)
 	}
 	// python:指定 venv 解释器时用之,不查 PATH
 	got, err = execStart(DeployConfig{Type: "python", Interpreter: "/srv/apps/x/venv/bin/python", BinPath: "/srv/apps/x/app.py"})
@@ -40,7 +40,7 @@ func TestWritePm2Eco(t *testing.T) {
 		cfg        DeployConfig
 		wantInterp string
 	}{
-		{DeployConfig{Type: "go-binary", BinPath: filepath.Join(dir, "a")}, "none"},
+		{DeployConfig{Type: "native-binary", BinPath: filepath.Join(dir, "a")}, "none"},
 		{DeployConfig{Type: "python", BinPath: filepath.Join(dir, "b"), Interpreter: "/venv/bin/python"}, "/venv/bin/python"},
 		{DeployConfig{Type: "python", BinPath: filepath.Join(dir, "c")}, "python3"},
 		{DeployConfig{Type: "java-jar", BinPath: filepath.Join(dir, "d")}, "java"},
@@ -199,7 +199,7 @@ func TestReleaseIdempotency(t *testing.T) {
 // 同 releaseId 复用于不同制品/配置(指纹变化)必须被拒绝,不返回旧 success、不执行。
 func TestIdempotencyFingerprintConflict(t *testing.T) {
 	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: t.TempDir()}}}
-	cfg1 := DeployConfig{ID: "app1", ReleaseID: "R1", Type: "go-binary", BinPath: "/srv/apps/app1/app", Runner: "systemd", Version: "v1", ExpectedSha256: "aaa"}
+	cfg1 := DeployConfig{ID: "app1", ReleaseID: "R1", Type: "native-binary", BinPath: "/srv/apps/app1/app", Runner: "systemd", Version: "v1", ExpectedSha256: "aaa"}
 	// 首次:执行并记录成功
 	ran := 0
 	res := a.runIdempotent("deploy", cfg1, "", nil, func(func(Step)) DeployResult { ran++; return DeployResult{Result: "success", Version: "v1"} })
@@ -594,7 +594,7 @@ func TestExtractRejectsOversizeEntry(t *testing.T) {
 // installPyRequirements:非 python / 无 requirements.txt 跳过;有则尝试执行。
 func TestInstallPyRequirements(t *testing.T) {
 	// 非 python:跳过
-	if ran, _, _ := installPyRequirements(DeployConfig{Type: "go-binary", BinPath: "/x/app"}); ran {
+	if ran, _, _ := installPyRequirements(DeployConfig{Type: "native-binary", BinPath: "/x/app"}); ran {
 		t.Error("非 python 应跳过")
 	}
 	// python 但无 requirements.txt:跳过
@@ -637,7 +637,7 @@ func TestRunDeployPm2Orchestration(t *testing.T) {
 	os.WriteFile(artifact, []byte("#!/bin/true\n"), 0755)
 
 	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(work, "backups")}}}
-	cfg := DeployConfig{ID: "fakepm2", Type: "go-binary", Runner: "pm2", BinPath: binPath, Workdir: work, Version: "v1"}
+	cfg := DeployConfig{ID: "fakepm2", Type: "native-binary", Runner: "pm2", BinPath: binPath, Workdir: work, Version: "v1"}
 	res := a.runDeployPm2(cfg, artifact, func(Step) {})
 	if res.Result != "success" {
 		t.Fatalf("假 pm2 在线应判 success,got %q · steps=%v", res.Result, res.Steps)

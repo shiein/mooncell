@@ -6,6 +6,7 @@ dist/
 
 # Go 编译产物(单二进制)
 /console/mooncell
+/console/console
 /agent/agent
 
 # 发布打包产物(由 deploy/build-release.sh 生成)

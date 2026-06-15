@@ -19,7 +19,7 @@ import (
 
 // appTypeRunners 是各部署类型允许的 Runner(服务端校验用,须与前端 DEPLOY_TYPES 对齐)。
 var appTypeRunners = map[string][]string{
-	"go-binary":    {"systemd", "pm2"},
+	"native-binary":    {"systemd", "pm2"},
 	"java-jar":     {"systemd", "pm2"},
 	"python":       {"systemd", "pm2"},
 	"node":         {"pm2", "systemd"},

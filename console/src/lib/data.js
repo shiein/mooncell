@@ -13,7 +13,7 @@ const ago = (ms) => NOW - ms;
 const DEPLOY_TYPES = {
   "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "pm2"], artifactExt: ".jar" },
   "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war" },
-  "go-binary":    { label: "原生二进制",    tone: "cyan",    runners: ["systemd", "pm2"], artifactExt: "" },
+  "native-binary":    { label: "原生二进制",    tone: "cyan",    runners: ["systemd", "pm2"], artifactExt: "" },
   "python":       { label: "Python",       tone: "info",    runners: ["systemd", "pm2"], artifactExt: ".py / .tar.gz" },
   "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd"], artifactExt: ".js / .tar.gz" },
   "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["软链"], artifactExt: ".tar.gz / .zip" },
@@ -21,7 +21,7 @@ const DEPLOY_TYPES = {
 
 // 进程类应用:走 systemd / pm2 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。
 // static-nginx 走软链切换、tomcat-war 走容器,不在内。
-const PROCESS_TYPES = ["go-binary", "java-jar", "python", "node"];
+const PROCESS_TYPES = ["native-binary", "java-jar", "python", "node"];
 const isProcessType = (t) => PROCESS_TYPES.includes(t);
 
 // 所有有真机 Deployer 的类型:进程类 + static-nginx(软链)+ tomcat-war(容器)。
@@ -75,7 +75,7 @@ const INITIAL_APPS = [
     artifactName: "report-svc", extraFiles: [],
   },
   {
-    id: "gateway", name: "内网网关服务", type: "go-binary", runner: "systemd",
+    id: "gateway", name: "内网网关服务", type: "native-binary", runner: "systemd",
     status: "running", version: "v3.1.0", pid: 1204, port: 80,
     path: "/srv/apps/gateway/gateway", workdir: "/srv/apps/gateway",
     health: "http://127.0.0.1:80/healthz", healthType: "HTTP 200",
@@ -248,7 +248,7 @@ const LOG_GEN = {
     return { level: "INFO", text: acts[Math.random() * acts.length | 0] };
   },
   "tomcat-war": (app) => LOG_GEN["java-jar"](app),
-  "go-binary": (app) => {
+  "native-binary": (app) => {
     const r = Math.random();
     if (r < 0.05) return { level: "WARN", text: `proxy: upstream 127.0.0.1:8090 unhealthy, removed from pool` };
     const acts = [

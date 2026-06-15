@@ -11,7 +11,7 @@ import (
 )
 
 // pm2 Runner:用 pm2 托管进程(node 生态常见)。与 systemd Runner 平行,不改已验证的 systemd 路径。
-// 进程类型(go-binary/java-jar/python)通过 ecosystem 的 interpreter 区分;env/args 写进 ecosystem 文件,
+// 进程类型(native-binary/java-jar/python)通过 ecosystem 的 interpreter 区分;env/args 写进 ecosystem 文件,
 // 与 systemd 一样在回滚时连配置一起还原(ecosystem 文件随制品一并备份)。
 
 func pm2EcoPath(binPath string) string { return binPath + ".pm2.json" }
@@ -48,7 +48,7 @@ func writePm2Eco(cfg DeployConfig) (string, error) {
 		} else {
 			app["interpreter_args"] = "-jar"
 		}
-	default: // go-binary:可执行文件直跑
+	default: // native-binary:可执行文件直跑
 		app["interpreter"] = "none"
 	}
 	if a := strings.TrimSpace(cfg.Args); a != "" {

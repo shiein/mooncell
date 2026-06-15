@@ -18,7 +18,7 @@ labels: bug
 - Mooncell 版本 / commit:
 - 部署方式:离线安装 / 开发模式
 - 目标机系统(如 UOS / 麒麟 / Ubuntu,arch):
-- 部署类型(go-binary / java-jar / python / node / static-nginx / tomcat-war):
+- 部署类型(native-binary / java-jar / python / node / static-nginx / tomcat-war):
 
 **日志 / 截图**
 相关 Console / Agent 日志(`journalctl -u mooncell-agent` 等)或截图。

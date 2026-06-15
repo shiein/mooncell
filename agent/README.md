@@ -34,7 +34,7 @@ backup_dir   = "/opt/deploy-agent/backups"
 
 | 类型 | 制品形态 | Runner | 备份/回滚 |
 |---|---|---|---|
-| go-binary | 单二进制 | systemd / pm2 | 单文件 |
+| native-binary | 单二进制 | systemd / pm2 | 单文件 |
 | java-jar | `.jar` | systemd / pm2 | 单文件 |
 | python | 单文件 `.py` 或压缩包(多文件) | systemd / pm2 | 单文件 / 整目录 |
 | node | 单文件 `.js` 或压缩包(多文件) | systemd / pm2 | 单文件 / 整目录 |
