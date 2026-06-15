@@ -47,14 +47,58 @@ func TestPutDeleteEntityRejectsAudit(t *testing.T) {
 		}
 	}
 
-	// 非 audit 实体仍可写
+	// app 不再走通用写入口(必须用类型化 /api/apps/{id}/config),通用入口应 403
 	req := httptest.NewRequest("PUT", "/api/data/app/a1", strings.NewReader(`{"id":"a1"}`))
 	req.SetPathValue("kind", "app")
 	req.SetPathValue("id", "a1")
 	w := httptest.NewRecorder()
 	a.putEntity(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("kind=app 通用写入口应 403,得 %d", w.Code)
+	}
+
+	// 非 app/audit 实体(如 backup)仍可走通用入口
+	req = httptest.NewRequest("PUT", "/api/data/backup/b1", strings.NewReader(`{"id":"b1"}`))
+	req.SetPathValue("kind", "backup")
+	req.SetPathValue("id", "b1")
+	w = httptest.NewRecorder()
+	a.putEntity(w, req)
 	if w.Code != http.StatusOK {
-		t.Errorf("kind=app 应 200,得 %d", w.Code)
+		t.Errorf("kind=backup 应 200,得 %d", w.Code)
+	}
+}
+
+// 类型化应用配置写入:合法落库,坏类型/坏 Runner/越界端口/未知 Agent 等拒绝。
+func TestPutAppConfigValidation(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s, agent: &agentClient{}, clients: map[string]*agentClient{}}
+
+	put := func(body string) int {
+		req := httptest.NewRequest("PUT", "/api/apps/x/config", strings.NewReader(body))
+		req.SetPathValue("id", "x")
+		w := httptest.NewRecorder()
+		a.putAppConfig(w, req)
+		return w.Code
+	}
+	good := `{"name":"ok","type":"go-binary","runner":"systemd","path":"/srv/apps/x/app","port":8080,"backupKeep":5,"agentId":"default"}`
+	if c := put(good); c != http.StatusOK {
+		t.Fatalf("合法配置应 200,得 %d", c)
+	}
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{"未知类型", `{"name":"a","type":"weird","runner":"systemd","path":"/x","agentId":"default","backupKeep":5}`},
+		{"Runner 不属于类型", `{"name":"a","type":"go-binary","runner":"tomcat","path":"/x","agentId":"default","backupKeep":5}`},
+		{"端口越界", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","port":70000,"agentId":"default","backupKeep":5}`},
+		{"空名", `{"name":"","type":"go-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":5}`},
+		{"空路径", `{"name":"a","type":"go-binary","runner":"systemd","path":"","agentId":"default","backupKeep":5}`},
+		{"未知 Agent", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"ghost","backupKeep":5}`},
+		{"备份份数越界", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":999}`},
+	} {
+		if c := put(tc.body); c != http.StatusBadRequest {
+			t.Errorf("%s 应 400,得 %d", tc.name, c)
+		}
 	}
 }
 

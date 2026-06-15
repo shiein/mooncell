@@ -178,6 +178,7 @@ async function hydrateData(seed) {
 }
 
 // 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅告警,不打断 UI)。
+// 注:kind=app 不走此通用入口(后端 403);应用配置改用 saveAppConfig(带服务端校验)。
 async function putEntity(kind, obj) {
   try {
     await fetch(`/api/data/${kind}/${encodeURIComponent(obj.id)}`, {
@@ -187,6 +188,19 @@ async function putEntity(kind, obj) {
       credentials: 'same-origin',
     });
   } catch (e) { console.error('[persist] put', kind, e); }
+}
+
+// 应用配置类型化写入:经服务端校验(类型/Runner/路径/范围/agentId)后落库。
+// 返回 {ok} 或 {error};校验失败返回 error 供调用方按需提示。
+async function saveAppConfig(app) {
+  try {
+    const r = await fetch(`/api/apps/${encodeURIComponent(app.id)}/config`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(app), credentials: 'same-origin',
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); return { error: d.error || ('保存失败 (' + r.status + ')') }; }
+    return { ok: true };
+  } catch (e) { return { error: 'Console 不可达: ' + (e.message || e) }; }
 }
 
 async function deleteEntity(kind, id) {
@@ -376,6 +390,6 @@ export {
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   uploadCabinetFile, removeCabinetFile,
   getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus, setAppLifecycle,
-  hydrateData, putEntity, deleteEntity, deployViaAgentStream,
+  hydrateData, putEntity, saveAppConfig, deleteEntity, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };

@@ -13,7 +13,7 @@ import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
 import { UsersPage } from './pages/Users.jsx';
 import { AgentsPage } from './pages/Agents.jsx';
-import { logout as apiLogout, getSession, hydrateData, putEntity, deleteEntity, removeCabinetFile, setAppLifecycle } from './lib/api.js';
+import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, removeCabinetFile, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -81,7 +81,16 @@ function App() {
   }, [session]);
 
   // 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅 console 告警,不打断 UI)。
-  const persist = (kind, obj) => putEntity(kind, obj);
+  // app 走类型化校验入口(saveAppConfig),其余走通用 putEntity。
+  const persist = (kind, obj) => {
+    if (kind === "app") {
+      return saveAppConfig(obj).then((res) => {
+        if (res && res.error) { console.error("[persist] app", res.error); toast("配置落库被拒:" + res.error, { tone: "error", icon: "alert" }); }
+        return res;
+      });
+    }
+    return putEntity(kind, obj);
+  };
   const remove = (kind, id) => deleteEntity(kind, id);
 
   // 审计为服务端只追加(真实操作经 Agent 时由 Console 权威 appendAudit;后端已禁止前端写 kind=audit)。

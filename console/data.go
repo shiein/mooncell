@@ -77,6 +77,12 @@ func (a *api) putEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "该实体为服务端权威记录,不可前端写入"})
 		return
 	}
+	// 应用配置不走通用 JSON 写入口:必须经 PUT /api/apps/{id}/config 做服务端 schema/能力/范围校验,
+	// 否则可绕过配置页预检写入坏 path/runner/agentId 等。
+	if kind == "app" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "应用配置请用 PUT /api/apps/{id}/config(带服务端校验)"})
+		return
+	}
 	var data json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})

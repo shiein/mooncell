@@ -17,6 +17,93 @@ import (
 // Console 据已保存的类型化应用配置(entity kind=app)在服务端生成 Agent 请求,
 // 关闭「前端可注入任意 binPath/reloadCmd 等」的信任面;releaseId 提供幂等。
 
+// appTypeRunners 是各部署类型允许的 Runner(服务端校验用,须与前端 DEPLOY_TYPES 对齐)。
+var appTypeRunners = map[string][]string{
+	"go-binary":    {"systemd", "pm2"},
+	"java-jar":     {"systemd", "pm2"},
+	"python":       {"systemd", "pm2"},
+	"node":         {"pm2", "systemd"},
+	"static-nginx": {"软链", "无进程"},
+	"tomcat-war":   {"tomcat"},
+}
+
+func strInSlice(s string, ss []string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// validateAppConfig 服务端校验应用配置:类型/Runner/路径形态/数值范围/agentId 可解析。
+// 阻止经写入口写入坏配置(绕过配置页预检)。返回错误信息;ok=false 时拒绝落库。
+func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
+	var app appConfig
+	if err := json.Unmarshal(raw, &app); err != nil {
+		return "配置 JSON 解析失败", false
+	}
+	if strings.TrimSpace(app.Name) == "" {
+		return "应用名不能为空", false
+	}
+	runners, ok := appTypeRunners[app.Type]
+	if !ok {
+		return "未知部署类型: " + app.Type, false
+	}
+	if app.Runner == "" || !strInSlice(app.Runner, runners) {
+		return "Runner 不属于该类型: " + app.Runner, false
+	}
+	if appBinPath(app) == "" {
+		return "制品/目标路径不能为空", false
+	}
+	if app.Port < 0 || app.Port > 65535 {
+		return "端口越界(0–65535)", false
+	}
+	if app.BackupKeep < 0 || app.BackupKeep > 100 {
+		return "备份保留份数应为 0–100", false
+	}
+	if a.resolveAgentByID(app.AgentID) == nil {
+		return "目标 Agent 不存在: " + app.AgentID, false
+	}
+	for _, p := range app.LogPaths {
+		if strings.TrimSpace(p) == "" {
+			return "日志路径含空项", false
+		}
+	}
+	return "", true
+}
+
+// putAppConfig 处理 PUT /api/apps/{id}/config:类型化应用配置写入口(校验后落库),
+// 取代通用 PUT /api/data/app/{id}——杜绝绕过校验写脏配置。
+func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	defer r.Body.Close()
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少应用 id"})
+		return
+	}
+	var m map[string]any
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&m); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	m["id"] = id // 实体 id 以路径为准,防 body 改 id
+	raw, err := json.Marshal(m)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "序列化失败"})
+		return
+	}
+	if msg, ok := a.validateAppConfig(raw); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "配置校验未通过:" + msg})
+		return
+	}
+	if err := a.store.putEntity("app", id, raw); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入失败"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // appConfig 是应用实体里部署相关的字段(前端 addApp 落库的形态)。
 type appConfig struct {
 	Name       string            `json:"name"`

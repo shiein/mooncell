@@ -114,7 +114,7 @@ test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ p
 
 test('真实应用部署弹窗无"示例制品演示"入口(必须真实文件)', async ({ page }) => {
   await login(page);
-  await page.request.put('/api/data/app/e2e-dep', {
+  await page.request.put('/api/apps/e2e-dep/config', {
     data: { id: 'e2e-dep', name: 'E2E 部署测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-dep/app', backupKeep: 5, logPaths: [] },
   });
   await page.reload();
@@ -127,7 +127,7 @@ test('真实应用部署弹窗无"示例制品演示"入口(必须真实文件)'
 
 test('配置页 Runner 按 Agent 能力置灰(pm2 不可用)', async ({ page }) => {
   await login(page);
-  await page.request.put('/api/data/app/e2e-cfg', {
+  await page.request.put('/api/apps/e2e-cfg/config', {
     data: { id: 'e2e-cfg', name: 'E2E 配置测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-cfg/app', backupKeep: 5, logPaths: [] },
   });
   await page.reload();
@@ -140,7 +140,7 @@ test('配置页 Runner 按 Agent 能力置灰(pm2 不可用)', async ({ page }) 
 
 test('真实应用日志流失败显示错误态(不伪造模拟日志)', async ({ page }) => {
   await login(page);
-  await page.request.put('/api/data/app/e2e-log', {
+  await page.request.put('/api/apps/e2e-log/config', {
     data: { id: 'e2e-log', name: 'E2E 日志测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-log/app', backupKeep: 5, logPaths: [] },
   });
   await page.reload();
@@ -155,7 +155,7 @@ test('真实应用日志流失败显示错误态(不伪造模拟日志)', async 
 test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ page }) => {
   await login(page);
   // 经 API 建一个真实类型应用(假 Agent 的 backups 端点会 500)
-  await page.request.put('/api/data/app/e2e-bak', {
+  await page.request.put('/api/apps/e2e-bak/config', {
     data: {
       id: 'e2e-bak', name: 'E2E 备份测试', type: 'go-binary', runner: 'systemd',
       status: 'running', version: 'v1', path: '/srv/apps/e2e-bak/app',

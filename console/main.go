@@ -72,6 +72,7 @@ func main() {
 
 	// 业务数据持久化:读(hydrate)任意角色;写限 admin/operator。
 	mux.HandleFunc("POST /api/data", a.requireAuth(a.hydrate))
+	mux.HandleFunc("PUT /api/apps/{id}/config", writeRoles(a.putAppConfig)) // 类型化应用配置写入(服务端校验)
 	mux.HandleFunc("PUT /api/data/{kind}/{id}", writeRoles(a.putEntity))
 	mux.HandleFunc("DELETE /api/data/{kind}/{id}", writeRoles(a.deleteEntity))
 
