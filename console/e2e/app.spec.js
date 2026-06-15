@@ -138,6 +138,23 @@ test('配置页 Runner 按 Agent 能力置灰(pm2 不可用)', async ({ page }) 
   await expect(page.locator('option[value="pm2"]')).toBeDisabled();
 });
 
+test('配置页编辑数值字段保存成功(port/backupKeep 归一化,不再 400)', async ({ page }) => {
+  await login(page);
+  await page.request.put('/api/apps/e2e-save/config', {
+    data: { id: 'e2e-save', name: 'E2E 保存测试', type: 'go-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-save/app', port: 8080, backupKeep: 5, logPaths: [] },
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByText('E2E 保存测试').click();
+  await page.locator('button.tab').filter({ hasText: '配置' }).click();
+  await page.getByRole('button', { name: /编辑/ }).click();
+  // 改备份份数(输入框值变字符串)→ 保存应归一化为数值、服务端校验通过、提示"配置已保存"
+  const keepInput = page.locator('xpath=//label[contains(@class,"field-label") and contains(.,"备份保留份数")]/following-sibling::input[1]');
+  await keepInput.fill('7');
+  await page.getByRole('button', { name: /保存配置/ }).click();
+  await expect(page.getByText('配置已保存')).toBeVisible({ timeout: 8000 });
+});
+
 test('真实应用日志流失败显示错误态(不伪造模拟日志)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/apps/e2e-log/config', {

@@ -198,11 +198,23 @@ function App() {
       nav("app-detail", { appId: app.id });
     },
 
-    updateApp(id, patch) {
-      patchApp(id, patch); // patchApp 内部落库合并后的整应用
-      const a = apps.find((x) => x.id === id);
-      addAudit("修改配置", (a ? a.name : id), "成功");
-      toast("配置已保存"); // 是否预检由调用方(配置页)负责并据实提示,这里不谎称"校验通过"
+    // 改配置:先归一化数值类型(服务端 Port int / BackupKeep float64,字符串会反序列化失败 400),
+    // 再 await 落库;**落库成功后才更新本地状态并提示**——失败如实报错、保留旧值,不再乐观骗"已保存"。
+    async updateApp(id, patch) {
+      const norm = { ...patch };
+      if (norm.port !== undefined) norm.port = Number(norm.port) || 0;
+      if (norm.backupKeep !== undefined) norm.backupKeep = Number(norm.backupKeep) || 5;
+      const a0 = apps.find((x) => x.id === id) || {};
+      const next = { ...a0, ...norm };
+      const res = await saveAppConfig(next);
+      if (res && res.error) {
+        toast("保存失败:" + res.error, { tone: "error", icon: "alert" });
+        return res;
+      }
+      setApps((s) => s.map((x) => (x.id === id ? next : x)));
+      addAudit("修改配置", a0.name || id, "成功");
+      toast("配置已保存");
+      return { ok: true };
     },
 
     addManualBackup(app) {

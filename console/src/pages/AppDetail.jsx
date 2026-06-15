@@ -386,8 +386,10 @@ function ConfigTab({ app }) {
         toast("Agent 不可达,跳过预检直接保存(部署时再校验)", { tone: "warn" });
       }
     }
-    store.updateApp(app.id, draft); setEdit(false);
-    if (realType) toast("配置已保存 · Agent 预检通过");
+    // 落库成功才退出编辑;失败由 updateApp 据实报错并保留旧值(不乐观骗"已保存")。
+    const r = await store.updateApp(app.id, draft);
+    if (r && r.error) return;
+    setEdit(false);
   };
 
   const sec = { fontSize: 13, fontWeight: 600, margin: "4px 0 0", color: "var(--fg-secondary)" };

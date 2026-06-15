@@ -95,6 +95,8 @@ func TestPutAppConfigValidation(t *testing.T) {
 		{"空路径", `{"name":"a","type":"go-binary","runner":"systemd","path":"","agentId":"default","backupKeep":5}`},
 		{"未知 Agent", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"ghost","backupKeep":5}`},
 		{"备份份数越界", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":999}`},
+		{"port 为字符串(类型不符)", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","port":"8080","agentId":"default","backupKeep":5}`},
+		{"backupKeep 为字符串(类型不符)", `{"name":"a","type":"go-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":"5"}`},
 	} {
 		if c := put(tc.body); c != http.StatusBadRequest {
 			t.Errorf("%s 应 400,得 %d", tc.name, c)
