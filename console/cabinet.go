@@ -31,9 +31,9 @@ func cleanupMultipart(r *http.Request) {
 
 const cabinetExpiryDays = 7
 
-// cabinetMaxBytes 是单次上传请求体硬上限(64MB)。ParseMultipartForm 的参数只是内存阈值,
+// cabinetMaxBytes 是单次上传请求体硬上限(200MB)。ParseMultipartForm 的参数只是内存阈值,
 // 超出会落临时盘且 io.Copy 不限大小;必须用 MaxBytesReader 在传输层截断并回 413。
-const cabinetMaxBytes = 64 << 20
+const cabinetMaxBytes = 200 << 20
 
 // genCode 生成易读的 6 位提取码(去掉易混字符)。
 func genCode() string {
@@ -57,7 +57,7 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 	r.Body = http.MaxBytesReader(w, r.Body, cabinetMaxBytes)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		if isMaxBytes(err) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "文件超过 64MB 上限"})
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("文件超过 %d MB 上限", cabinetMaxBytes>>20)})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
@@ -86,7 +86,7 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 	if err != nil {
 		os.Remove(a.storedPath(id))
 		if isMaxBytes(err) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "文件超过 64MB 上限"})
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("文件超过 %d MB 上限", cabinetMaxBytes>>20)})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入失败"})

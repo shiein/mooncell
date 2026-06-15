@@ -223,7 +223,7 @@ function CabinetPage() {
           <Icon name="upload" size={20} style={{ color: "var(--muted-fg)" }} />
           <div style={{ fontWeight: 600, marginTop: 7, fontSize: 13.5 }}>{canWrite ? "拖拽文件到此处,或点击选择文件" : "当前角色为只读,无上传权限"}</div>
           <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 3 }}>
-            单文件 ≤ 64 MB · 默认 7 天后自动清理 · 上传后获得提取码 + 直链
+            单文件 ≤ 200 MB · 默认 7 天后自动清理 · 上传后获得提取码 + 直链
           </div>
         </React.Fragment>
       )}
