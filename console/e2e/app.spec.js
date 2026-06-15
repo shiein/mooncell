@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 // 关键前端流程的端到端验证(真实 Console + SQLite,浏览器驱动真实前端)。
-const ADMIN = { user: 'admin', pass: 'jch@9388' };
+const ADMIN = { user: 'admin', pass: '1qaz@WSX' };
 const usernameInput = (page) => page.locator('input[autocomplete="username"]');
 
 async function login(page) {

@@ -63,7 +63,7 @@ type AdminConfig struct {
 }
 
 const (
-	defaultAdminPassword = "jch@9388"
+	defaultAdminPassword = "1qaz@WSX"
 	defaultAgentToken    = "mc_ag_change_me"
 )
 

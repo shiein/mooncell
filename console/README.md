@@ -28,7 +28,7 @@ pnpm dist
 
 部署时只需拷贝 `mooncell` 二进制和 `config.toml` 到目标机即可运行(sqlite 文件首次启动自动创建)。`go build` 前必须先有 `dist/`(由 `pnpm build` 生成),否则 `go:embed` 找不到资源会编译失败。
 
-默认管理员账号:**admin / jch@9388**(仅在用户表为空时由 `config.toml` 的 `[admin]` 种入,bcrypt 存储;库中已有用户后修改配置不影响既有账号)。
+默认管理员账号:**admin / 1qaz@WSX**(仅在用户表为空时由 `config.toml` 的 `[admin]` 种入,bcrypt 存储;库中已有用户后修改配置不影响既有账号)。
 
 ### 配置 `config.toml`
 
@@ -47,7 +47,7 @@ ttl_hours = 168         # 会话有效期(小时),168 = 7 天
 
 [admin]
 username = "admin"
-password = "jch@9388"      # 默认口令;对外监听必须改,否则启动被拒
+password = "1qaz@WSX"      # 默认口令;对外监听必须改,否则启动被拒
 
 [agent]                  # Console 主动连接的默认 Agent(单机版指向本机)
 addr  = "127.0.0.1:9100"

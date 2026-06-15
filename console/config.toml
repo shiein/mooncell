@@ -14,7 +14,7 @@ ttl_hours = 168   # 会话有效期(小时),168 = 7 天
 # 仅在用户表为空时用于种入默认管理员(bcrypt 存储);
 # 库已存在用户后修改此处不会改动已有账号。
 username = "admin"
-password = "jch@9388"
+password = "1qaz@WSX"
 
 [agent]
 # Console 主动连接的 Agent;单机版默认指向本机 Agent。
