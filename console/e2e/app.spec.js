@@ -155,6 +155,21 @@ test('配置页编辑数值字段保存成功(port/backupKeep 归一化,不再 4
   await expect(page.getByText('配置已保存')).toBeVisible({ timeout: 8000 });
 });
 
+test('tomcat 不显示启停按钮(容器托管,无 systemd 单元)', async ({ page }) => {
+  await login(page);
+  await page.request.put('/api/apps/e2e-tc/config', {
+    data: { id: 'e2e-tc', name: 'E2E Tomcat', type: 'tomcat-war', runner: 'tomcat', status: 'running', version: 'v1', path: '/opt/tomcat/webapps/app.war', backupKeep: 5, logPaths: [] },
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '应用 Applications' }).click();
+  await page.getByText('E2E Tomcat').click();
+  // tomcat 无 systemd 单元,点启停必 500 → 不应显示启停按钮
+  await expect(page.getByRole('button', { name: '停止', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '启动', exact: true })).toHaveCount(0);
+  // 但「部署新版本」仍应有
+  await expect(page.getByRole('button', { name: /部署新版本/ })).toBeVisible();
+});
+
 test('真实应用日志流失败显示错误态(不伪造模拟日志)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/apps/e2e-log/config', {

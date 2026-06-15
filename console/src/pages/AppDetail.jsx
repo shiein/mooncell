@@ -29,10 +29,14 @@ function OverviewTab({ app, releases }) {
     const iv = setInterval(tick, 10000);
     return () => { alive = false; clearInterval(iv); };
   }, [app.id, real]);
-  // 真实应用的进程行优先用 live;未拉到时显式标注,不再回退到 mock 的 pid/uptime。
+  // 容器/软链托管(tomcat/static):真实类型但平台不托管进程,不能显示「未运行」误导。
+  const nonProcessReal = isRealType(app.type) && !isProcessType(app.type);
+  // 真实进程类的进程行优先用 live;未拉到时显式标注,不回退 mock pid/uptime。
   const procRow = real
     ? (live ? (live.active ? `pid ${live.pid || "?"} · ${live.state}` : `未运行 · ${live.state || "inactive"}`) : "查询中…")
-    : (app.pid ? `pid ${app.pid} · 运行 ${app.uptime}` : "未运行");
+    : nonProcessReal
+      ? (app.type === "tomcat-war" ? "Tomcat 容器托管 · 无平台进程" : "nginx 软链托管 · 无平台进程")
+      : (app.pid ? `pid ${app.pid} · 运行 ${app.uptime}` : "未运行");
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
       <div className="card card-pad">
@@ -42,6 +46,7 @@ function OverviewTab({ app, releases }) {
           <InfoRow label="进程" mono>{procRow}</InfoRow>
           <InfoRow label="资源" mono>{real
             ? (live && live.active ? `CPU ${live.cpu || "—"} · 内存 ${live.mem || "—"}` : "—")
+            : nonProcessReal ? "—(容器/软链托管,平台不采集)"
             : (app.pid ? `CPU ${app.cpu} · 内存 ${app.mem}` : "—")}</InfoRow>
           <InfoRow label="Runner"><span className="code-chip">{app.runner}</span></InfoRow>
         </div>
@@ -69,7 +74,7 @@ function OverviewTab({ app, releases }) {
           <InfoRow label="方式">{app.healthType}</InfoRow>
           <InfoRow label="目标" mono>{app.health}</InfoRow>
           <InfoRow label="策略">超时 3s · 重试 5 次 · 间隔 2s</InfoRow>
-          <InfoRow label="最近探活">{app.status === "running" ? <Badge tone="success" dot>30s 前 · 200 OK</Badge> : app.status === "failed" ? <Badge tone="error" dot>5 小时前 · 连接被拒绝</Badge> : <Badge>未启用</Badge>}</InfoRow>
+          <InfoRow label="探活基准">{app.status === "running" || app.status === "static" ? <Badge tone="success" dot>部署时探活通过</Badge> : app.status === "failed" ? <Badge tone="error" dot>部署时探活失败</Badge> : <Badge>未运行</Badge>}</InfoRow>
         </div>
       </div>
 
@@ -466,7 +471,8 @@ function AppDetailPage({ appId, tab, onTab }) {
 
   const relCount = store.releases.filter((r) => r.appId === app.id).length;
   const bakCount = store.backups.filter((b) => b.appId === app.id).length;
-  const canRun = app.type !== "static-nginx" && store.can("write");
+  // 启停只对进程类(go/java/python/node,有 systemd/pm2 单元);static 无进程、tomcat 容器托管(无单元),不显示。
+  const canRun = isProcessType(app.type) && store.can("write");
   const canWrite = store.can("write");
 
   return (
