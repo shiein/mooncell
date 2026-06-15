@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -794,6 +795,15 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 			return fail("sha256 不匹配 · 期望 " + short(exp) + " 实得 " + short(actual))
 		}
 	}
+	// "go-binary" 实为「为目标机编译的原生可执行文件」——Go/Rust/C++/Zig 等皆可。
+	// 校验"符合条件":ELF 架构须与本机一致;明显的他平台可执行(Mach-O/PE)给清晰错误;脚本/未知放行。
+	if cfg.Type == "go-binary" {
+		if msg := checkNativeBinary(artifact); msg != "" {
+			s := Step{Name: "校验制品", OK: false, Logs: []string{msg}}
+			emit(s)
+			return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
+		}
+	}
 	switch cfg.Type {
 	case "static-nginx":
 		return a.runDeployStatic(cfg, artifact, emit)
@@ -1439,6 +1449,50 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// checkNativeBinary 对原生二进制制品做轻量"符合条件"校验:
+//   - 若是 ELF:e_machine 须与本机架构一致(防"为别的架构/平台编译"——最常见的部署事故);
+//   - 若是 Mach-O(macOS)/PE(Windows)可执行:给出清晰的跨平台错误;
+//   - 脚本(shebang)/未知格式:放行,交给 systemd/pm2 启动 + 健康检查兜底。
+// 返回错误信息(空串=通过)。不限定 Go——Rust/C++/Zig 等为目标机编译的静态/自包含二进制同样适用。
+func checkNativeBinary(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "" // 打不开交给后续步骤报错
+	}
+	defer f.Close()
+	head := make([]byte, 20)
+	n, _ := io.ReadFull(f, head)
+	if n < 4 {
+		return ""
+	}
+	// ELF: 0x7F 'E' 'L' 'F'
+	if head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F' {
+		if n < 20 {
+			return ""
+		}
+		var machine uint16 // e_machine 在偏移 18,字节序由 EI_DATA(偏移5)决定(1=小端 2=大端)
+		if head[5] == 2 {
+			machine = uint16(head[18])<<8 | uint16(head[19])
+		} else {
+			machine = uint16(head[19])<<8 | uint16(head[18])
+		}
+		want := map[string]uint16{"amd64": 0x3E, "arm64": 0xB7, "386": 0x03, "arm": 0x28}[runtime.GOARCH]
+		if want != 0 && machine != want {
+			return fmt.Sprintf("二进制架构与目标机不匹配(目标机 %s/%s),请为目标机架构重新编译", runtime.GOOS, runtime.GOARCH)
+		}
+		return ""
+	}
+	be := uint32(head[0])<<24 | uint32(head[1])<<16 | uint32(head[2])<<8 | uint32(head[3])
+	switch be {
+	case 0xFEEDFACE, 0xFEEDFACF, 0xCFFAEDFE: // Mach-O(单架构)
+		return "这是 macOS 可执行文件(Mach-O),需为目标机(linux)编译"
+	}
+	if head[0] == 'M' && head[1] == 'Z' { // PE
+		return "这是 Windows 可执行文件(PE),需为目标机(linux)编译"
+	}
+	return "" // 脚本/未知:放行
 }
 
 // isHex64 校验是否为 64 位十六进制(sha256 文本形态)。

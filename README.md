@@ -6,7 +6,7 @@ Mooncell 用两个**零依赖的 Go 单二进制**(Console 控制台 + Agent 部
 
 ## ✨ 特性
 
-- **多种部署类型**:go-binary / java-jar / python / node(systemd / pm2 托管)+ static-nginx(软链原子切换)+ tomcat-war(容器换 WAR)。
+- **多种部署类型**:原生二进制(Go / Rust / C++ / Zig 等为目标机编译的可执行文件)/ java-jar / python / node(systemd / pm2 托管)+ static-nginx(软链原子切换)+ tomcat-war(容器换 WAR)。
 - **上传即部署**:浏览器上传制品 → 自动流水线(备份 → 停 → 替换 → 启动 → 健康检查),**失败自动回滚**。
 - **一键还原**:列历史备份,用任意历史制品重跑部署流水线;还原前自动备份当前版本。
 - **实时日志**:journald / pm2 logs / 声明文件 `tail -F` 经 SSE 推到前端,支持暂停、高亮、gzip 下载。
@@ -93,7 +93,7 @@ Agent 按**文件魔数**自动判断单文件 / 压缩包;压缩包智能解包
 
 | 类型 | 制品格式 | 托管方式 |
 |---|---|---|
-| go-binary | 单个可执行二进制 | systemd / pm2,原子替换 |
+| 原生二进制(`go-binary`) | 单个可执行文件 —— **任意语言**(Go/Rust/C++/Zig…)**为目标机 OS/架构编译**的自包含二进制;部署前校验 ELF 架构匹配、拦截 Mach-O/PE | systemd / pm2,原子替换 |
 | java-jar | 单个 `.jar` | systemd / pm2,原子替换 |
 | python | `.py` 或 压缩包(多文件 + `requirements.txt` 自动装依赖) | systemd / pm2,venv 优先 |
 | node | `.js` 或 压缩包 | pm2 / systemd |

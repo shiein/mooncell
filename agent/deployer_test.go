@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -683,5 +684,44 @@ func TestRotateReleasesKeepsCurrent(t *testing.T) {
 	left, _ := os.ReadDir(releasesDir)
 	if len(left) > 3 {
 		t.Errorf("滚动后剩余 %d 个,应 ≤ 3(2 份 + 受保护当前)", len(left))
+	}
+}
+
+// checkNativeBinary:架构不匹配/跨平台可执行报错,脚本/正确 ELF 放行。
+func TestCheckNativeBinary(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, b []byte) string { p := filepath.Join(dir, name); os.WriteFile(p, b, 0755); return p }
+	// 本机架构对应的 e_machine
+	mach := map[string]byte{"amd64": 0x3E, "arm64": 0xB7, "386": 0x03, "arm": 0x28}[runtime.GOARCH]
+	elf := func(m byte) []byte {
+		b := make([]byte, 20)
+		copy(b, []byte{0x7f, 'E', 'L', 'F'})
+		b[5] = 1 // 小端
+		b[18] = m
+		return b
+	}
+	// 正确架构 ELF → 放行
+	if msg := checkNativeBinary(write("ok", elf(mach))); msg != "" {
+		t.Errorf("本机架构 ELF 应放行,got %q", msg)
+	}
+	// 错误架构 ELF(用一个肯定不同的值)→ 报错
+	wrong := byte(0x3E)
+	if mach == 0x3E {
+		wrong = 0xB7
+	}
+	if msg := checkNativeBinary(write("wrong", elf(wrong))); msg == "" {
+		t.Error("错误架构 ELF 应报错")
+	}
+	// Mach-O → 报错
+	if msg := checkNativeBinary(write("macho", []byte{0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0})); msg == "" {
+		t.Error("Mach-O 应报错")
+	}
+	// PE → 报错
+	if msg := checkNativeBinary(write("pe", []byte{'M', 'Z', 0, 0})); msg == "" {
+		t.Error("PE 应报错")
+	}
+	// 脚本 shebang → 放行
+	if msg := checkNativeBinary(write("sh", []byte("#!/bin/sh\necho hi\n"))); msg != "" {
+		t.Errorf("脚本应放行,got %q", msg)
 	}
 }

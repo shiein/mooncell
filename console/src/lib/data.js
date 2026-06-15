@@ -13,7 +13,7 @@ const ago = (ms) => NOW - ms;
 const DEPLOY_TYPES = {
   "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "pm2"], artifactExt: ".jar" },
   "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war" },
-  "go-binary":    { label: "Go Binary",    tone: "cyan",    runners: ["systemd", "pm2"], artifactExt: "" },
+  "go-binary":    { label: "原生二进制",    tone: "cyan",    runners: ["systemd", "pm2"], artifactExt: "" },
   "python":       { label: "Python",       tone: "info",    runners: ["systemd", "pm2"], artifactExt: ".py / .tar.gz" },
   "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd"], artifactExt: ".js / .tar.gz" },
   "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["软链"], artifactExt: ".tar.gz / .zip" },

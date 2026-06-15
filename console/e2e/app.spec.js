@@ -61,7 +61,7 @@ test('新建应用 Runner 按真实能力置灰(pm2 不可用)', async ({ page }
   await page.getByRole('button', { name: /新建应用/ }).click();
   await expect(page.getByText('第 1 步 · 选择部署类型')).toBeVisible();
   // 选 go-binary(runners: systemd / pm2)→ 下一步到表单
-  await page.getByRole('button', { name: /Go Binary/ }).click();
+  await page.getByRole('button', { name: /原生二进制/ }).click();
   await page.getByRole('button', { name: '下一步', exact: true }).click();
   // 假 Agent 报 pm2 不可用 → 该 option 置灰禁用;systemd 可用
   await expect(page.locator('option[value="pm2"]')).toBeDisabled();
@@ -99,7 +99,7 @@ test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ p
   await page.getByRole('button', { name: '应用 Applications' }).click();
   await page.getByRole('button', { name: /新建应用/ }).click();
   // 先选 go-binary,手动选 systemd(可用)
-  await page.getByRole('button', { name: /Go Binary/ }).click();
+  await page.getByRole('button', { name: /原生二进制/ }).click();
   await page.getByRole('button', { name: '下一步', exact: true }).click();
   const runnerSel = page.locator('select').filter({ has: page.locator('option[value="systemd"]') });
   await runnerSel.selectOption('systemd');
