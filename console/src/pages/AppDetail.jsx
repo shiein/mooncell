@@ -340,7 +340,7 @@ function LogViewer({ app }) {
           : <Console lines={shown} filter={filter} height={460} />}
       {!noRealSource ? (
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11.5, color: "var(--muted-fg)" }}>
-          <span className="mono">{useReal ? (followingFile ? `tail -F ${logSrc}` : (app.runner === "pm2" ? `pm2 logs deploy-${app.id}` : `journalctl -u deploy-${app.id}`)) : (app.logPaths && app.logPaths[0]) || "—"}</span>
+          <span className="mono">{useReal ? (followingFile ? `tail -F ${logSrc}` : (app.runner === "pm2" ? `pm2 logs ${(app.pm2Name || "").trim() || "deploy-" + app.id}` : `journalctl -u deploy-${app.id}`)) : (app.logPaths && app.logPaths[0]) || "—"}</span>
           <span>缓冲 {lines.length} / 400 行 · {useReal ? (followingFile ? "tail -F 跟随(轮转安全)" : "journald 跟随(轮转安全)") : "轮转安全(fsnotify 重开文件)"}</span>
         </div>
       ) : null}
