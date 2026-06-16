@@ -444,6 +444,8 @@ func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 		if n := a.appPm2Name(id); n != "" {
 			path += "&pm2Name=" + url.QueryEscape(n)
 		}
+	} else if runner == "nohup" {
+		path += "&runner=nohup&path=" + url.QueryEscape(a.appLogPath0(id))
 	}
 	resp, err := cl.getStream(r.Context(), path)
 	a.streamAgentResp(w, resp, err)
@@ -471,6 +473,9 @@ func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
 		if n := a.appPm2Name(id); n != "" {
 			q.Set("pm2Name", n)
 		}
+	} else if runner == "nohup" {
+		q.Set("runner", "nohup")
+		q.Set("path", a.appLogPath0(id))
 	}
 	resp, err := cl.getStream(r.Context(), "/api/apps/"+id+"/logs/download?"+q.Encode())
 	if err != nil {
@@ -542,6 +547,8 @@ func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 		if n := a.appPm2Name(id); n != "" {
 			path += "&pm2Name=" + url.QueryEscape(n)
 		}
+	} else if runner == "nohup" {
+		path += "?runner=nohup&binPath=" + url.QueryEscape(a.appBinPathOf(id))
 	}
 	status, body, err := cl.get(path)
 	relayAgent(w, status, body, err)
@@ -569,6 +576,8 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 		if n := a.appPm2Name(id); n != "" {
 			path += "&pm2Name=" + url.QueryEscape(n)
 		}
+	} else if runner == "nohup" {
+		path += "&runner=nohup&binPath=" + url.QueryEscape(a.appBinPathOf(id))
 	}
 	status, body, err := cl.post(path, "application/json", nil)
 	user := a.sessionUser(r)
@@ -621,13 +630,18 @@ func (a *api) applyLifecycleState(appID string, body []byte) {
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	// 必须是已落库应用:防止 write 用户对 Console 未跟踪的任意 deploy-<id> 单元执行下线。
-	cl, _, ok := a.requireAppRouting(w, id)
+	cl, runner, ok := a.requireAppRouting(w, id)
 	if !ok {
 		return
 	}
 	if a.unknownAgent(w, cl) {
 		return
 	}
-	status, body, err := cl.del("/api/apps/" + id)
+	path := "/api/apps/" + id
+	// nohup 无监管:下线必须传 binPath,Agent 据此停掉进程并清理 pidfile/spec,否则留孤儿进程。
+	if runner == "nohup" {
+		path += "?binPath=" + url.QueryEscape(a.appBinPathOf(id))
+	}
+	status, body, err := cl.del(path)
 	relayAgent(w, status, body, err)
 }

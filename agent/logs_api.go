@@ -32,7 +32,15 @@ func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 
 	// exec.Command 数组传参不经 shell,id 来自单段路径,无注入面。
 	var cmd *exec.Cmd
-	if r.URL.Query().Get("runner") == "pm2" {
+	if r.URL.Query().Get("runner") == "nohup" {
+		// nohup 无 journal/pm2 日志,直接 tail -F 重定向的日志文件;path 须在 log_roots 白名单内。
+		path := r.URL.Query().Get("path")
+		if !withinRoots(path, a.cfg.Paths.LogRoots) {
+			sse("line", map[string]any{"ts": time.Now().UnixMilli(), "level": "error", "text": "日志路径不在 log_roots 白名单内: " + path})
+			return
+		}
+		cmd = exec.CommandContext(r.Context(), "tail", "-n", tail, "-F", path)
+	} else if r.URL.Query().Get("runner") == "pm2" {
 		// pm2 应用日志走 pm2 logs --raw(裸消息);parseJournalLine 对非 JSON 行回退为纯文本。
 		// 接管模式定位用户进程名(pm2NameReq),否则托管名 deploy-<id>。
 		cmd = exec.CommandContext(r.Context(), "pm2", "logs", pm2NameReq(r, id), "--lines", tail, "--raw")
@@ -109,7 +117,14 @@ func (a *agent) logDownload(w http.ResponseWriter, r *http.Request) {
 	defer gz.Close()
 
 	var cmd *exec.Cmd
-	if q.Get("runner") == "pm2" {
+	if q.Get("runner") == "nohup" {
+		// nohup:导出重定向日志文件末尾若干行(纯文件无时间范围检索,since/until 不适用)。path 须在白名单内。
+		path := q.Get("path")
+		if !withinRoots(path, a.cfg.Paths.LogRoots) {
+			return // 头已写,无法回 4xx;直接结束(导出空)
+		}
+		cmd = exec.CommandContext(r.Context(), "tail", "-n", "20000", path)
+	} else if q.Get("runner") == "pm2" {
 		cmd = exec.CommandContext(r.Context(), "pm2", "logs", pm2NameReq(r, id), "--lines", "20000", "--nostream", "--raw")
 	} else {
 		args := []string{"-u", unitName(id), "-o", "short-iso", "--no-pager"}

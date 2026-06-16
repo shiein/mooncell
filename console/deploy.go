@@ -23,10 +23,10 @@ var nginxContainerRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 // appTypeRunners 是各部署类型允许的 Runner(服务端校验用,须与前端 DEPLOY_TYPES 对齐)。
 var appTypeRunners = map[string][]string{
-	"native-binary": {"systemd", "pm2"},
-	"java-jar":      {"systemd", "pm2"},
-	"python":        {"systemd", "pm2"},
-	"node":          {"pm2", "systemd"},
+	"native-binary": {"systemd", "pm2", "nohup"},
+	"java-jar":      {"systemd", "pm2", "nohup"},
+	"python":        {"systemd", "pm2", "nohup"},
+	"node":          {"pm2", "systemd", "nohup"},
 	"static-nginx":  {"软链", "无进程"},
 	"tomcat-war":    {"tomcat"},
 }
@@ -163,6 +163,7 @@ type agentDeployConfig struct {
 	ReloadCmd      string            `json:"reloadCmd,omitempty"`
 	ReloadArg      string            `json:"reloadArg,omitempty"` // reload 动作的受校验参数(如 nginx 容器名)
 	Pm2Name        string            `json:"pm2Name,omitempty"`   // pm2 接管模式的已有进程名/ID(空=Mooncell 托管,用 deploy-<id>)
+	LogPath        string            `json:"logPath,omitempty"`   // nohup runner:stdout/stderr 重定向目标日志文件
 }
 
 // reloadActionFor 按应用配置把「是否 reload」表意映射到 Agent 白名单内的固定动作名(+ 可选受校验参数)。
@@ -216,12 +217,13 @@ func deployFingerprint(app appConfig, sha, version, fpExtra string) string {
 		ReloadCmd      string            `json:"reloadCmd"`
 		ReloadArg      string            `json:"reloadArg"`
 		Pm2Name        string            `json:"pm2Name"`
+		LogPath        string            `json:"logPath"`
 		Extra          string            `json:"extra"`
 	}{
 		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
 		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
 		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
-		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Pm2Name: cfg.Pm2Name, Extra: fpExtra,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Pm2Name: cfg.Pm2Name, LogPath: cfg.LogPath, Extra: fpExtra,
 	}
 	b, _ := json.Marshal(payload)
 	return "v2:" + string(b)
@@ -246,6 +248,10 @@ func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID st
 	// pm2 接管模式:仅 pm2 runner 下生效,透传已有进程名(Agent 据此 restart 而非写 ecosystem)。
 	if app.Runner == "pm2" {
 		cfg.Pm2Name = strings.TrimSpace(app.Pm2Name)
+	}
+	// nohup runner:把声明的首个日志文件作为 stdout/stderr 重定向目标,使在线 tail 与运行日志同源。
+	if app.Runner == "nohup" && len(app.LogPaths) > 0 {
+		cfg.LogPath = strings.TrimSpace(app.LogPaths[0])
 	}
 	// jvm 字段按类型映射:java 是 JVM 参数,其余是启动参数。
 	if app.Type == "java-jar" {
@@ -310,6 +316,28 @@ func (a *api) appPm2Name(id string) string {
 		var app appConfig
 		if json.Unmarshal(raw, &app) == nil {
 			return strings.TrimSpace(app.Pm2Name)
+		}
+	}
+	return ""
+}
+
+// appBinPathOf 取应用落盘路径(authoritative),供 nohup 启停/状态/下线向 Agent 透传以定位 pidfile/spec。
+func (a *api) appBinPathOf(id string) string {
+	if raw, ok := a.store.getEntity("app", id); ok {
+		var app appConfig
+		if json.Unmarshal(raw, &app) == nil {
+			return appBinPath(app)
+		}
+	}
+	return ""
+}
+
+// appLogPath0 取应用声明的首个日志文件路径,供 nohup 日志流/导出向 Agent 透传(运行日志即重定向目标)。
+func (a *api) appLogPath0(id string) string {
+	if raw, ok := a.store.getEntity("app", id); ok {
+		var app appConfig
+		if json.Unmarshal(raw, &app) == nil && len(app.LogPaths) > 0 {
+			return strings.TrimSpace(app.LogPaths[0])
 		}
 	}
 	return ""

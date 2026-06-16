@@ -74,6 +74,7 @@ type DeployConfig struct {
 	ReloadCmd      string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
 	ReloadArg      string            `json:"reloadArg"` // 部分 reload 动作的受校验参数(如 docker 部署的 nginx 容器名);仅作为 argv 末位追加,不经 shell
 	Pm2Name        string            `json:"pm2Name"`   // pm2 接管模式:非空则操作该已有进程(仅 restart,不写 ecosystem);空=Mooncell 托管(deploy-<id>)
+	LogPath        string            `json:"logPath"`   // nohup runner:stdout/stderr 重定向目标日志文件(须在 log_roots 白名单内);空则退回 <binPath>.nohup.log
 }
 
 // Step 是流水线一步的执行记录;Result 为整体结果。
@@ -528,6 +529,9 @@ func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 	if eco := pm2EcoPath(cfg.BinPath); fileExists(eco) {
 		copyFile(eco, filepath.Join(dir, "ecosystem.json"), 0644)
 	}
+	if sp := nohupSpecPath(cfg.BinPath); fileExists(sp) {
+		copyFile(sp, filepath.Join(dir, "nohup.json"), 0644)
+	}
 	meta := fmt.Sprintf(`{"version":%q,"sha256":%q,"time":%d,"operator":"console"}`,
 		currentVersion(cfg.BinPath), sha256File(cfg.BinPath), time.Now().UnixMilli())
 	os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0644)
@@ -727,12 +731,13 @@ func releaseFingerprint(cfg DeployConfig, fpExtra string) string {
 		ReloadCmd      string            `json:"reloadCmd"`
 		ReloadArg      string            `json:"reloadArg"`
 		Pm2Name        string            `json:"pm2Name"`
+		LogPath        string            `json:"logPath"`
 		Extra          string            `json:"extra"`
 	}{
 		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
 		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
 		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
-		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Pm2Name: cfg.Pm2Name, Extra: fpExtra,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Pm2Name: cfg.Pm2Name, LogPath: cfg.LogPath, Extra: fpExtra,
 	}
 	b, _ := json.Marshal(payload)
 	return "v2:" + string(b)
@@ -835,10 +840,14 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 	case "tomcat-war":
 		return a.runDeployTomcat(cfg, artifact, emit)
 	default:
-		if cfg.Runner == "pm2" {
+		switch cfg.Runner {
+		case "pm2":
 			return a.runDeployPm2(cfg, artifact, emit)
+		case "nohup":
+			return a.runDeployNohup(cfg, artifact, emit)
+		default:
+			return a.runDeployProcess(cfg, artifact, emit)
 		}
-		return a.runDeployProcess(cfg, artifact, emit)
 	}
 }
 

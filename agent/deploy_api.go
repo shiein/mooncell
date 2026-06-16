@@ -142,10 +142,44 @@ func pm2NameReq(r *http.Request, id string) string {
 	return unitName(id)
 }
 
-// appStatus 处理 GET /api/apps/{id}/status?runner=<systemd|pm2>:返回进程托管状态。
+// nohupBinPathReq 取并校验 nohup 启停/状态请求的 binPath:必须在 deploy_roots 白名单内
+// (binPath 决定 pidfile/spec 位置,不校验则越界 query 可让 Agent kill 任意 pid / 读任意 spec)。
+func (a *agent) nohupBinPathReq(w http.ResponseWriter, r *http.Request) (string, bool) {
+	bp := strings.TrimSpace(r.URL.Query().Get("binPath"))
+	if bp == "" || !withinRoots(bp, a.cfg.Paths.DeployRoots) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nohup 操作缺少合法 binPath(须在 deploy_roots 内): " + bp})
+		return "", false
+	}
+	return bp, true
+}
+
+// nohupStatusJSON 据 binPath 读 pidfile 返回 nohup 进程状态(与 pm2/systemd 同形)。
+func nohupStatusJSON(w http.ResponseWriter, id, binPath string) {
+	cfg := DeployConfig{BinPath: binPath}
+	pid := nohupReadPid(cfg)
+	alive := pidAlive(pid)
+	state := "stopped"
+	if alive {
+		state = "online"
+	} else {
+		pid = ""
+	}
+	cpu, mem := procStats(pid)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": alive, "state": state, "pid": pid, "cpu": cpu, "mem": mem})
+}
+
+// appStatus 处理 GET /api/apps/{id}/status?runner=<systemd|pm2|nohup>:返回进程托管状态。
 func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !requireValidID(w, id) {
+		return
+	}
+	if r.URL.Query().Get("runner") == "nohup" {
+		bp, ok := a.nohupBinPathReq(w, r)
+		if !ok {
+			return
+		}
+		nohupStatusJSON(w, id, bp)
 		return
 	}
 	if r.URL.Query().Get("runner") == "pm2" {
@@ -184,6 +218,20 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	action := r.URL.Query().Get("action")
 	if action != "start" && action != "stop" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
+		return
+	}
+	if r.URL.Query().Get("runner") == "nohup" {
+		bp, ok := a.nohupBinPathReq(w, r)
+		if !ok {
+			return
+		}
+		if action == "stop" {
+			nohupStop(DeployConfig{BinPath: bp})
+		} else if _, err := nohupStartFromSpec(bp); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "start 失败: " + err.Error()})
+			return
+		}
+		nohupStatusJSON(w, id, bp)
 		return
 	}
 	pm := r.URL.Query().Get("runner") == "pm2"
@@ -230,5 +278,10 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	sysctl("daemon-reload")
 	sysctl("reset-failed", unitName(id))
 	pm2("delete", unitName(id)) // 若该应用由 pm2 托管也一并清理(无 pm2/无此进程则忽略)
+	// nohup 托管:Console 传 binPath 时停掉进程并清理 pidfile/spec(无监管,不停会留孤儿进程)。
+	if bp := strings.TrimSpace(r.URL.Query().Get("binPath")); bp != "" && withinRoots(bp, a.cfg.Paths.DeployRoots) {
+		nohupStop(DeployConfig{BinPath: bp})
+		os.Remove(nohupSpecPath(bp))
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

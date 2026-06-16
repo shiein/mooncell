@@ -88,6 +88,10 @@ function CreateAppDialog({ open, onClose }) {
       runner: selectedRunner(),
       agent: form.agentId || "default",
     });
+    // pm2 接管模式:把被接管进程名带给预检,让 Agent 区分"端口被被接管进程占用(正常)"与"被别的进程占用(冲突)"。
+    if (selectedRunner() === "pm2" && (form.pm2Name || "").trim()) {
+      params.set("pm2Name", form.pm2Name.trim());
+    }
     const res = await precheckApp(params.toString());
     if (!res || !res.checks) {
       setChecks([{ label: "Agent 不可达,无法预检(仍可创建,部署时再校验)", st: "warn" }]);
@@ -129,7 +133,7 @@ function CreateAppDialog({ open, onClose }) {
   // tomcat/pm2/systemd 等均按 caps 判定。能力未知(caps===null=Agent 不可达)才降级不禁用、留预检兜底;
   // caps 已加载但缺该 key → fail-closed 视为不可用(与 Agent 预检一致,不放过未自检出的能力)。
   const capOk = (r) => {
-    if (r === "无进程" || r === "软链") return true;
+    if (r === "无进程" || r === "软链" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有
     if (!caps) return true; // Agent 不可达降级
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : false; // caps 已加载却无此 key → fail-closed
@@ -146,7 +150,7 @@ function CreateAppDialog({ open, onClose }) {
     const r = form.runner;
     const inType = (type ? DEPLOY_TYPES[type].runners : []).includes(r);
     let available = true;
-    if (r !== "无进程" && r !== "软链" && caps) {
+    if (r !== "无进程" && r !== "软链" && r !== "nohup" && caps) {
       const c = caps.find((x) => x.key === r);
       available = c ? c.ok : false; // 与 capOk 一致:caps 已加载却缺 key → 不可用
     }
