@@ -98,6 +98,31 @@ async function pingAgentNode(id) {
   } catch (e) { return null; }
 }
 
+// ---------- Agent 自更新(按架构上传升级包 → 推送匹配的包到各 Agent)----------
+async function listAgentBinaries() {
+  try {
+    const r = await fetch('/api/agent-binaries', { credentials: 'same-origin' });
+    if (!r.ok) return [];
+    return (await r.json()).binaries || [];
+  } catch (e) { return []; }
+}
+
+async function uploadAgentBinary(file, arch, version) {
+  const fd = new FormData();
+  fd.append('binary', file); fd.append('arch', arch); fd.append('version', version);
+  const r = await fetch('/api/agent-binary', { method: 'POST', body: fd, credentials: 'same-origin' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '上传失败');
+  return d;
+}
+
+async function updateAgentNode(id) {
+  const r = await fetch(`/api/agents/${encodeURIComponent(id)}/update`, { method: 'POST', credentials: 'same-origin' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '更新失败');
+  return d;
+}
+
 // ---------- 文件柜(真实二进制存储)----------
 async function uploadCabinetFile(file, anon) {
   const fd = new FormData();
@@ -397,6 +422,7 @@ export {
   login, logout, getSession,
   listUsers, createUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
+  listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
   getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, putEntity, saveAppConfig, deleteEntity, deployViaAgentStream,

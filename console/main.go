@@ -30,7 +30,11 @@ func main() {
 	if cabinetMaxBytes <= 0 {
 		cabinetMaxBytes = 200 << 20
 	}
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}}
+	agentBinDir := cfg.AgentBin.Dir
+	if agentBinDir == "" {
+		agentBinDir = "agentbin"
+	}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}}
 
 	// 文件柜过期清理 + 分块上传残留清理:启动即清一次,之后每小时一次。
 	go func() {
@@ -90,6 +94,11 @@ func main() {
 	mux.HandleFunc("POST /api/agents", a.requireRole("admin")(a.addAgent))
 	mux.HandleFunc("DELETE /api/agents/{id}", a.requireRole("admin")(a.deleteAgent))
 	mux.HandleFunc("GET /api/agents/{id}/ping", a.requireAuth(a.pingAgent))
+
+	// Agent 自更新:升级包按架构上传/列出(列表任意登录可见,上传与推送限 admin)。
+	mux.HandleFunc("GET /api/agent-binaries", a.requireAuth(a.listAgentBinaries))
+	mux.HandleFunc("POST /api/agent-binary", a.requireRole("admin")(a.uploadAgentBinary))
+	mux.HandleFunc("POST /api/agents/{id}/update", a.requireRole("admin")(a.updateAgent))
 
 	// 文件柜:上传/删除限 write;按 id 下载需登录;公开文件凭码免登录下载。
 	mux.HandleFunc("POST /api/cabinet", writeRoles(a.uploadCabinet))

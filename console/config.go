@@ -17,8 +17,14 @@ type Config struct {
 	Admin    AdminConfig    `toml:"admin"`
 	Agent    AgentConfig    `toml:"agent"`
 	Cabinet  CabinetConfig  `toml:"cabinet"`
+	AgentBin AgentBinConfig `toml:"agent_bin"`
 	Demo     DemoConfig     `toml:"demo"`
 	Deploy   DeployUpload   `toml:"deploy"`
+}
+
+// AgentBinConfig:Agent 升级包(按架构)的存储目录,默认 agentbin。
+type AgentBinConfig struct {
+	Dir string `toml:"dir"`
 }
 
 // DeployUpload:部署制品上传的传输层硬上限(MB)。仅内存阈值不足以防 DoS——

@@ -21,6 +21,9 @@ dist/
 # Agent 本地状态
 /agent/data/
 
+# Agent 升级包(运行期上传,按架构存储)
+/console/agentbin/
+
 # 日志与杂项
 *.log
 .DS_Store

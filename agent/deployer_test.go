@@ -802,27 +802,37 @@ func TestCheckNativeBinary(t *testing.T) {
 		b[18] = m
 		return b
 	}
-	// 正确架构 ELF → 放行
-	if msg := checkNativeBinary(write("ok", elf(mach))); msg != "" {
-		t.Errorf("本机架构 ELF 应放行,got %q", msg)
+	macho := []byte{0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0}
+	pe := []byte{'M', 'Z', 0, 0}
+
+	// 按本机 GOOS 校验「原生格式」:linux 期望 ELF、darwin 期望 Mach-O。跨格式报错。
+	switch runtime.GOOS {
+	case "linux":
+		if msg := checkNativeBinary(write("ok", elf(mach))); msg != "" {
+			t.Errorf("本机架构 ELF 应放行,got %q", msg)
+		}
+		wrong := byte(0x3E)
+		if mach == 0x3E {
+			wrong = 0xB7
+		}
+		if msg := checkNativeBinary(write("wrong", elf(wrong))); msg == "" {
+			t.Error("错误架构 ELF 应报错")
+		}
+		if msg := checkNativeBinary(write("macho", macho)); msg == "" {
+			t.Error("linux 上 Mach-O 应报错")
+		}
+		if msg := checkNativeBinary(write("pe", pe)); msg == "" {
+			t.Error("linux 上 PE 应报错")
+		}
+	case "darwin":
+		if msg := checkNativeBinary(write("macho", macho)); msg != "" {
+			t.Errorf("darwin 上 Mach-O 应放行,got %q", msg)
+		}
+		if msg := checkNativeBinary(write("elf", elf(mach))); msg == "" {
+			t.Error("darwin 上 ELF 应报错")
+		}
 	}
-	// 错误架构 ELF(用一个肯定不同的值)→ 报错
-	wrong := byte(0x3E)
-	if mach == 0x3E {
-		wrong = 0xB7
-	}
-	if msg := checkNativeBinary(write("wrong", elf(wrong))); msg == "" {
-		t.Error("错误架构 ELF 应报错")
-	}
-	// Mach-O → 报错
-	if msg := checkNativeBinary(write("macho", []byte{0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0})); msg == "" {
-		t.Error("Mach-O 应报错")
-	}
-	// PE → 报错
-	if msg := checkNativeBinary(write("pe", []byte{'M', 'Z', 0, 0})); msg == "" {
-		t.Error("PE 应报错")
-	}
-	// 脚本 shebang → 放行
+	// 脚本 shebang → 任意 OS 放行
 	if msg := checkNativeBinary(write("sh", []byte("#!/bin/sh\necho hi\n"))); msg != "" {
 		t.Errorf("脚本应放行,got %q", msg)
 	}

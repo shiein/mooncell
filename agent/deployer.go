@@ -1507,32 +1507,58 @@ func checkNativeBinary(path string) string {
 	if n < 4 {
 		return ""
 	}
-	// ELF: 0x7F 'E' 'L' 'F'
-	if head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F' {
-		if n < 20 {
-			return ""
+	isELF := head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F'
+	be := uint32(head[0])<<24 | uint32(head[1])<<16 | uint32(head[2])<<8 | uint32(head[3])
+	isMachO := be == 0xFEEDFACE || be == 0xFEEDFACF || be == 0xCFFAEDFE
+	isPE := head[0] == 'M' && head[1] == 'Z'
+
+	// 目标机(agent 本机)期望的原生可执行格式:linux=ELF、darwin=Mach-O、windows=PE。
+	// 跨格式直接报错;ELF 额外校验 e_machine 与本机架构一致。Mooncell 生产即 linux,linux 分支与历史行为一致。
+	switch runtime.GOOS {
+	case "linux":
+		if isMachO {
+			return "这是 macOS 可执行文件(Mach-O),需为目标机(linux)编译"
 		}
-		var machine uint16 // e_machine 在偏移 18,字节序由 EI_DATA(偏移5)决定(1=小端 2=大端)
-		if head[5] == 2 {
-			machine = uint16(head[18])<<8 | uint16(head[19])
-		} else {
-			machine = uint16(head[19])<<8 | uint16(head[18])
+		if isPE {
+			return "这是 Windows 可执行文件(PE),需为目标机(linux)编译"
 		}
-		want := map[string]uint16{"amd64": 0x3E, "arm64": 0xB7, "386": 0x03, "arm": 0x28}[runtime.GOARCH]
-		if want != 0 && machine != want {
-			return fmt.Sprintf("二进制架构与目标机不匹配(目标机 %s/%s),请为目标机架构重新编译", runtime.GOOS, runtime.GOARCH)
+		if isELF {
+			return checkELFArch(head, n)
 		}
+	case "darwin":
+		if isELF {
+			return "这是 Linux 可执行文件(ELF),需为目标机(macOS)编译"
+		}
+		if isPE {
+			return "这是 Windows 可执行文件(PE),需为目标机(macOS)编译"
+		}
+	case "windows":
+		if isELF {
+			return "这是 Linux 可执行文件(ELF),需为目标机(windows)编译"
+		}
+		if isMachO {
+			return "这是 macOS 可执行文件(Mach-O),需为目标机(windows)编译"
+		}
+	}
+	return "" // 原生格式 / 脚本 / 未知:放行
+}
+
+// checkELFArch 校验 ELF 的 e_machine 与本机 GOARCH 一致(偏移 18,字节序由 EI_DATA 偏移5决定:1=小端 2=大端)。
+func checkELFArch(head []byte, n int) string {
+	if n < 20 {
 		return ""
 	}
-	be := uint32(head[0])<<24 | uint32(head[1])<<16 | uint32(head[2])<<8 | uint32(head[3])
-	switch be {
-	case 0xFEEDFACE, 0xFEEDFACF, 0xCFFAEDFE: // Mach-O(单架构)
-		return "这是 macOS 可执行文件(Mach-O),需为目标机(linux)编译"
+	var machine uint16
+	if head[5] == 2 {
+		machine = uint16(head[18])<<8 | uint16(head[19])
+	} else {
+		machine = uint16(head[19])<<8 | uint16(head[18])
 	}
-	if head[0] == 'M' && head[1] == 'Z' { // PE
-		return "这是 Windows 可执行文件(PE),需为目标机(linux)编译"
+	want := map[string]uint16{"amd64": 0x3E, "arm64": 0xB7, "386": 0x03, "arm": 0x28}[runtime.GOARCH]
+	if want != 0 && machine != want {
+		return fmt.Sprintf("二进制架构与目标机不匹配(目标机 %s/%s),请为目标机架构重新编译", runtime.GOOS, runtime.GOARCH)
 	}
-	return "" // 脚本/未知:放行
+	return ""
 }
 
 // isHex64 校验是否为 64 位十六进制(sha256 文本形态)。
