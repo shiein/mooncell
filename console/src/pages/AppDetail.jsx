@@ -461,7 +461,7 @@ function ConfigTab({ app }) {
           </Field>
         ) : null}
         {draft.runner === "pm2" ? (
-          <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署只 pm2 restart 它、不写 ecosystem;留空 = Mooncell 托管(deploy-<id>)">
+          <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署自动取该进程运行路径(pm_exec_path)替换文件并 pm2 restart,无需对齐路径;留空 = Mooncell 托管(deploy-<id>)">
             <input className="input mono" style={{ fontSize: 12.5 }} disabled={!edit} placeholder="如 my-app(留空=托管)"
               value={draft.pm2Name || ""} onChange={(e) => set("pm2Name", e.target.value)} />
           </Field>

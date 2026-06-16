@@ -81,6 +81,30 @@ func TestPm2ProcNameAndAdopt(t *testing.T) {
 	}
 }
 
+// 接管模式:从 pm2 jlist 按进程名或数字 id 取真实运行路径 pm_exec_path;找不到/无路径报错。
+func TestParsePm2ExecPath(t *testing.T) {
+	jlist := `[
+		{"name":"web","pm_id":0,"pm2_env":{"pm_exec_path":"/srv/apps/web/server.js"}},
+		{"name":"gw","pm_id":3,"pm2_env":{"pm_exec_path":"/home/app/gateway"}},
+		{"name":"noPath","pm_id":4,"pm2_env":{"pm_exec_path":""}}
+	]`
+	if p, err := parsePm2ExecPath(jlist, "gw"); err != nil || p != "/home/app/gateway" {
+		t.Fatalf("按名取路径失败: %q err=%v", p, err)
+	}
+	if p, err := parsePm2ExecPath(jlist, "0"); err != nil || p != "/srv/apps/web/server.js" {
+		t.Fatalf("按数字 id 取路径失败: %q err=%v", p, err)
+	}
+	if _, err := parsePm2ExecPath(jlist, "ghost"); err == nil {
+		t.Fatal("找不到进程应报错")
+	}
+	if _, err := parsePm2ExecPath(jlist, "noPath"); err == nil {
+		t.Fatal("无 pm_exec_path 应报错")
+	}
+	if _, err := parsePm2ExecPath("not-json", "x"); err == nil {
+		t.Fatal("非法 JSON 应报错")
+	}
+}
+
 // java-jar 的 JVM 参数必须排在 -jar 之前(否则 pm2 下 `java -jar -Xmx app.jar` 起不来)。
 func TestWritePm2EcoJavaArgsOrder(t *testing.T) {
 	dir := t.TempDir()

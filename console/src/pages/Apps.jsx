@@ -210,7 +210,7 @@ function CreateAppDialog({ open, onClose }) {
             </Field>
           ))}
           {selectedRunner() === "pm2" ? (
-            <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署只 drop 新二进制 + pm2 restart 它,不写 ecosystem;留空 = Mooncell 托管(deploy-<id>)">
+            <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署自动取该进程运行路径(pm_exec_path)替换文件并 pm2 restart,无需手动对齐路径(上面填的目标路径在接管模式下被忽略);留空 = Mooncell 托管(deploy-<id>,写 ecosystem)">
               <input className="input mono" style={{ fontSize: 12.5 }} placeholder="如 my-app 或 0(留空=托管)"
                 value={form.pm2Name || ""} onChange={(e) => setForm({ ...form, pm2Name: e.target.value })} />
             </Field>

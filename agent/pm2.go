@@ -32,10 +32,38 @@ func pm2ProcName(cfg DeployConfig) string {
 	return unitName(cfg.ID)
 }
 
-// pm2Exists 判断 pm2 是否已注册该进程(接管模式要求进程已存在,可处于 stopped)。
-func pm2Exists(name string) bool {
-	_, err := pm2("describe", name)
-	return err == nil
+// pm2ExecPath 取 pm2 进程的真实运行文件完整路径(pm_exec_path),供接管模式自动定位部署目标——
+// 用户无需手动对齐路径,Mooncell 永远 deploy 到 pm2 真正在跑的那个文件。用 jlist(JSON)而非
+// describe(文本)以稳健解析;进程不存在/无路径则报错。
+func pm2ExecPath(nameOrID string) (string, error) {
+	out, err := pm2("jlist")
+	if err != nil {
+		return "", fmt.Errorf("pm2 jlist 失败: %s", out)
+	}
+	return parsePm2ExecPath(out, nameOrID)
+}
+
+// parsePm2ExecPath 从 pm2 jlist 的 JSON 里按进程名或数字 id 找出 pm_exec_path(纯函数,便于测试)。
+func parsePm2ExecPath(jlist, nameOrID string) (string, error) {
+	var apps []struct {
+		Name   string `json:"name"`
+		PmID   int    `json:"pm_id"`
+		Pm2Env struct {
+			PmExecPath string `json:"pm_exec_path"`
+		} `json:"pm2_env"`
+	}
+	if err := json.Unmarshal([]byte(jlist), &apps); err != nil {
+		return "", fmt.Errorf("解析 pm2 jlist 失败: %v", err)
+	}
+	for _, p := range apps {
+		if p.Name == nameOrID || fmt.Sprint(p.PmID) == nameOrID {
+			if strings.TrimSpace(p.Pm2Env.PmExecPath) == "" {
+				return "", fmt.Errorf("pm2 进程 %s 无 pm_exec_path", nameOrID)
+			}
+			return p.Pm2Env.PmExecPath, nil
+		}
+	}
+	return "", fmt.Errorf("pm2 中找不到进程 %s", nameOrID)
 }
 
 // writePm2Eco 按类型生成 pm2 ecosystem 配置(含 interpreter / env / cwd)并落盘到制品旁。
@@ -113,7 +141,21 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 		emit(s)
 	}
 
-	archived := scriptArchived(cfg, artifact) // python/node 多文件压缩包 → 解包到目录
+	archived := scriptArchived(cfg, artifact) // python/node 多文件压缩包 → 解包到目录(依赖 Type,不依赖 BinPath)
+
+	// 接管模式:部署目标自动取该 pm2 进程真实运行的文件(pm_exec_path),覆盖 Console 下发的 BinPath。
+	// 用户只填进程名即可,不必手动对齐路径;同时也校验了进程存在(取不到=进程不存在)。
+	if pm2Adopt(cfg) {
+		execPath, perr := pm2ExecPath(pm2ProcName(cfg))
+		if perr != nil {
+			add("校验目标", false, "接管模式无法定位进程运行路径:"+perr.Error()+"(请确认该 pm2 进程已存在)")
+			res.Result = "failed"
+			return res
+		}
+		cfg.BinPath = execPath
+		add("接管目标", true, "pm2 进程 "+pm2ProcName(cfg)+" 运行于 "+execPath+";部署将备份并替换此文件后 restart")
+	}
+
 	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "目标 "+cfg.BinPath, "Runner pm2")
 
 	bkDir, err := a.backupCurrent(cfg, archived)
@@ -128,14 +170,7 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 		add("备份当前版本", true, "备份(含 ecosystem) → "+bkDir+" · 滚动保留 "+fmt.Sprint(cfg.BackupKeep)+" 份")
 	}
 
-	name := pm2ProcName(cfg) // 接管模式=用户已有进程名,否则 deploy-<id>
-	// 接管模式硬前提:进程必须已存在(Mooncell 不创建、不写 ecosystem,只 restart 它)。
-	if pm2Adopt(cfg) && !pm2Exists(name) {
-		add("校验目标", false, "接管模式要求 pm2 进程 "+name+" 已存在,请先手工 pm2 start 该进程,或清空进程名改用托管模式")
-		res.Result = "failed"
-		return res
-	}
-
+	name := pm2ProcName(cfg) // 接管模式=用户已有进程名(存在性已在上面取 pm_exec_path 时校验),否则 deploy-<id>
 	pm2("stop", name)
 	add("停止服务", true, "pm2 stop "+name)
 
