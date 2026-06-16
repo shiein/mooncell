@@ -21,6 +21,23 @@ func pm2(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// pm2Adopt 判断是否为「接管已有进程」模式:配置带 pm2Name 即接管(只 restart 用户已有进程,不写 ecosystem)。
+func pm2Adopt(cfg DeployConfig) bool { return strings.TrimSpace(cfg.Pm2Name) != "" }
+
+// pm2ProcName 解析要操作的 pm2 进程名:接管模式用用户指定的已有进程名,否则用 Mooncell 托管名 deploy-<id>。
+func pm2ProcName(cfg DeployConfig) string {
+	if n := strings.TrimSpace(cfg.Pm2Name); n != "" {
+		return n
+	}
+	return unitName(cfg.ID)
+}
+
+// pm2Exists 判断 pm2 是否已注册该进程(接管模式要求进程已存在,可处于 stopped)。
+func pm2Exists(name string) bool {
+	_, err := pm2("describe", name)
+	return err == nil
+}
+
 // writePm2Eco 按类型生成 pm2 ecosystem 配置(含 interpreter / env / cwd)并落盘到制品旁。
 func writePm2Eco(cfg DeployConfig) (string, error) {
 	app := map[string]any{
@@ -66,9 +83,9 @@ func writePm2Eco(cfg DeployConfig) (string, error) {
 	return path, os.WriteFile(path, b, 0644)
 }
 
-// pm2Online 查进程是否在 pm2 中运行(pid 非空且非 0)。
-func pm2Online(id string) bool {
-	out, err := pm2("pid", unitName(id))
+// pm2Online 查进程是否在 pm2 中运行(pid 非空且非 0)。name 为已解析的 pm2 进程名(托管名或接管名)。
+func pm2Online(name string) bool {
+	out, err := pm2("pid", name)
 	if err != nil {
 		return false
 	}
@@ -111,8 +128,16 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 		add("备份当前版本", true, "备份(含 ecosystem) → "+bkDir+" · 滚动保留 "+fmt.Sprint(cfg.BackupKeep)+" 份")
 	}
 
-	pm2("stop", unitName(cfg.ID))
-	add("停止服务", true, "pm2 stop "+unitName(cfg.ID))
+	name := pm2ProcName(cfg) // 接管模式=用户已有进程名,否则 deploy-<id>
+	// 接管模式硬前提:进程必须已存在(Mooncell 不创建、不写 ecosystem,只 restart 它)。
+	if pm2Adopt(cfg) && !pm2Exists(name) {
+		add("校验目标", false, "接管模式要求 pm2 进程 "+name+" 已存在,请先手工 pm2 start 该进程,或清空进程名改用托管模式")
+		res.Result = "failed"
+		return res
+	}
+
+	pm2("stop", name)
+	add("停止服务", true, "pm2 stop "+name)
 
 	plog, err := a.placeArtifact(cfg, artifact)
 	if err != nil {
@@ -134,24 +159,35 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 		add("安装依赖", true, ilog)
 	}
 
-	eco, err := writePm2Eco(cfg)
-	if err != nil {
-		add("启动服务", false, "写 ecosystem 失败: "+err.Error())
-		rlog, ok := a.rollbackPm2(cfg, bkDir)
-		res.Result = rollbackResult(rlog, ok, add)
-		return res
-	}
-	pid, err := pm2Start(cfg, eco)
-	if err != nil {
-		add("启动服务", false, err.Error())
+	// 启动:接管模式只 restart 用户已有进程(不写 ecosystem);托管模式写 ecosystem 后 delete+start。
+	if pm2Adopt(cfg) {
+		out, e := pm2("restart", name, "--update-env")
+		if e != nil {
+			add("启动服务", false, "pm2 restart 失败: "+out)
+		} else {
+			pid, _ := pm2("pid", name)
+			add("启动服务", true, "pm2 restart(接管模式)· "+name+" · pid "+strings.TrimSpace(pid))
+		}
 	} else {
-		add("启动服务", true, "pm2 托管 · "+unitName(cfg.ID)+" · pid "+pid)
+		eco, err := writePm2Eco(cfg)
+		if err != nil {
+			add("启动服务", false, "写 ecosystem 失败: "+err.Error())
+			rlog, ok := a.rollbackPm2(cfg, bkDir)
+			res.Result = rollbackResult(rlog, ok, add)
+			return res
+		}
+		pid, err := pm2Start(cfg, eco)
+		if err != nil {
+			add("启动服务", false, err.Error())
+		} else {
+			add("启动服务", true, "pm2 托管 · "+name+" · pid "+pid)
+		}
 	}
 	time.Sleep(time.Second)
 
 	// 健康检查:HTTP 探活;未配置 HTTP 时退化为查 pm2 进程状态,避免启动失败被判成功。
 	var hlog []string
-	if processHealthy(cfg.Health, pm2Online(cfg.ID), &hlog) {
+	if processHealthy(cfg.Health, pm2Online(name), &hlog) {
 		add("健康检查", true, hlog...)
 		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
 		res.Result = "success"
@@ -161,7 +197,7 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 
 	// 失败 → 回滚:还原制品 + ecosystem(回滚前配置),pm2 重启
 	if bkDir == "" {
-		pm2("stop", unitName(cfg.ID))
+		pm2("stop", name)
 		add("回滚", false, "首次部署无备份可回滚,已停止服务")
 		res.Result = "failed"
 		return res
@@ -171,29 +207,36 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	return res
 }
 
-// rollbackPm2 在 pm2 服务已停止或部署失败后恢复旧制品与旧 ecosystem,并尝试拉起旧服务。
+// rollbackPm2 在 pm2 服务已停止或部署失败后恢复旧制品(托管模式还连 ecosystem 一起还原),并尝试拉起旧服务。
+// 接管模式:Mooncell 不拥有 ecosystem,只还原旧二进制 + pm2 restart 用户进程(配置由用户自管,不碰)。
 func (a *agent) rollbackPm2(cfg DeployConfig, bkDir string) ([]string, bool) {
+	name := pm2ProcName(cfg)
 	if bkDir == "" {
-		pm2("stop", unitName(cfg.ID))
+		pm2("stop", name)
 		return []string{"首次部署无备份可回滚,已停止服务"}, false
 	}
 	rlog := []string{"读取 " + bkDir, "还原备份制品"}
-	pm2("stop", unitName(cfg.ID))
+	pm2("stop", name)
 	if err := a.restoreArtifactFrom(cfg, bkDir); err != nil {
 		return append(rlog, "还原失败: "+err.Error()), false
 	}
-	ecoBak := filepath.Join(bkDir, "ecosystem.json")
-	if fileExists(ecoBak) {
-		if err := copyFile(ecoBak, pm2EcoPath(cfg.BinPath), 0644); err != nil {
-			return append(rlog, "还原 ecosystem 失败: "+err.Error()), false
+	if pm2Adopt(cfg) {
+		pm2("restart", name, "--update-env")
+		rlog = append(rlog, "接管模式:restart 已有进程(不动用户 ecosystem)")
+	} else {
+		ecoBak := filepath.Join(bkDir, "ecosystem.json")
+		if fileExists(ecoBak) {
+			if err := copyFile(ecoBak, pm2EcoPath(cfg.BinPath), 0644); err != nil {
+				return append(rlog, "还原 ecosystem 失败: "+err.Error()), false
+			}
+			rlog = append(rlog, "还原 ecosystem 配置")
 		}
-		rlog = append(rlog, "还原 ecosystem 配置")
+		pm2("delete", name)
+		pm2("start", pm2EcoPath(cfg.BinPath), "--update-env")
 	}
-	pm2("delete", unitName(cfg.ID))
-	pm2("start", pm2EcoPath(cfg.BinPath), "--update-env")
 	time.Sleep(time.Second)
 	var rh []string
-	ok := processHealthy(cfg.Health, pm2Online(cfg.ID), &rh) // 回滚同样确认 pm2 进程真起来
+	ok := processHealthy(cfg.Health, pm2Online(name), &rh) // 回滚同样确认 pm2 进程真起来
 	rlog = append(rlog, rh...)
 	return rlog, ok
 }

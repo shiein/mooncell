@@ -132,6 +132,16 @@ func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
 	sse("done", res)
 }
 
+// pm2NameReq 解析请求要操作的 pm2 进程名:Console 接管模式会透传 pm2Name(用户已有进程名),
+// 否则用 Mooncell 托管名 deploy-<id>。供 status/lifecycle/logs 等无状态端点统一定位进程。
+// 透传值须为合法名(与部署/容器名同一校验);非法则回退托管名,不把越界值喂给 pm2 argv。
+func pm2NameReq(r *http.Request, id string) string {
+	if n := strings.TrimSpace(r.URL.Query().Get("pm2Name")); n != "" && containerNameRe.MatchString(n) {
+		return n
+	}
+	return unitName(id)
+}
+
 // appStatus 处理 GET /api/apps/{id}/status?runner=<systemd|pm2>:返回进程托管状态。
 func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -139,8 +149,9 @@ func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("runner") == "pm2" {
-		online := pm2Online(id)
-		pid, _ := pm2("pid", unitName(id))
+		name := pm2NameReq(r, id)
+		online := pm2Online(name)
+		pid, _ := pm2("pid", name)
 		pid = strings.TrimSpace(pid)
 		state := "stopped"
 		if online {
@@ -176,10 +187,11 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pm := r.URL.Query().Get("runner") == "pm2"
+	pmName := pm2NameReq(r, id) // 接管模式=用户进程名,否则 deploy-<id>
 	var out string
 	var err error
 	if pm {
-		out, err = pm2(action, unitName(id))
+		out, err = pm2(action, pmName)
 	} else {
 		out, err = sysctl(action, unitName(id))
 	}
@@ -189,8 +201,8 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	}
 	// 返回启停后的真实托管状态(与 appStatus 同形),供前端权威刷新。
 	if pm {
-		online := pm2Online(id)
-		pid, _ := pm2("pid", unitName(id))
+		online := pm2Online(pmName)
+		pid, _ := pm2("pid", pmName)
 		pid = strings.TrimSpace(pid)
 		state := "stopped"
 		if online {

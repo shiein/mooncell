@@ -32,7 +32,6 @@ const APP_SCHEMAS = {
   ],
   "node": [
     { key: "entry", label: "入口文件", ph: "server.js", mono: true },
-    { key: "pm2name", label: "pm2 进程名", ph: "my-app", mono: true },
     { key: "nodePath", label: "node 路径", ph: "/usr/local/bin/node", mono: true },
   ],
   "static-nginx": [
@@ -113,6 +112,7 @@ function CreateAppDialog({ open, onClose }) {
       agentId: form.agentId || "default",
       reload: !!form.reload,
       nginxContainer: (form.nginxContainer || "").trim(),
+      pm2Name: selectedRunner() === "pm2" ? (form.pm2Name || "").trim() : "",
       backupKeep: +(form.backupKeep || 5), lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
       artifactName: id, extraFiles: [],
     });
@@ -209,6 +209,12 @@ function CreateAppDialog({ open, onClose }) {
                 placeholder={f.ph} value={form[f.key] || ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} />
             </Field>
           ))}
+          {selectedRunner() === "pm2" ? (
+            <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署只 drop 新二进制 + pm2 restart 它,不写 ecosystem;留空 = Mooncell 托管(deploy-<id>)">
+              <input className="input mono" style={{ fontSize: 12.5 }} placeholder="如 my-app 或 0(留空=托管)"
+                value={form.pm2Name || ""} onChange={(e) => setForm({ ...form, pm2Name: e.target.value })} />
+            </Field>
+          ) : null}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <Field label="端口">
               <input className="input mono" placeholder="8080" value={form.port || ""} onChange={(e) => setForm({ ...form, port: e.target.value })} />

@@ -460,6 +460,12 @@ function ConfigTab({ app }) {
               value={draft.nginxContainer || ""} onChange={(e) => set("nginxContainer", e.target.value)} />
           </Field>
         ) : null}
+        {draft.runner === "pm2" ? (
+          <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署只 pm2 restart 它、不写 ecosystem;留空 = Mooncell 托管(deploy-<id>)">
+            <input className="input mono" style={{ fontSize: 12.5 }} disabled={!edit} placeholder="如 my-app(留空=托管)"
+              value={draft.pm2Name || ""} onChange={(e) => set("pm2Name", e.target.value)} />
+          </Field>
+        ) : null}
         <Field label="日志文件路径(每行一条,在线 tail 需具体文件,不支持通配/~)">
           <textarea className="textarea mono" style={{ fontSize: 12.5 }} rows={2} disabled={!edit}
             value={(draft.logPaths || []).join("\n")} onChange={(e) => set("logPaths", e.target.value.split("\n").filter(Boolean))}></textarea>

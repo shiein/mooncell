@@ -73,6 +73,7 @@ type DeployConfig struct {
 	BackupKeep     int               `json:"backupKeep"`
 	ReloadCmd      string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
 	ReloadArg      string            `json:"reloadArg"` // 部分 reload 动作的受校验参数(如 docker 部署的 nginx 容器名);仅作为 argv 末位追加,不经 shell
+	Pm2Name        string            `json:"pm2Name"`   // pm2 接管模式:非空则操作该已有进程(仅 restart,不写 ecosystem);空=Mooncell 托管(deploy-<id>)
 }
 
 // Step 是流水线一步的执行记录;Result 为整体结果。
@@ -725,12 +726,13 @@ func releaseFingerprint(cfg DeployConfig, fpExtra string) string {
 		BackupKeep     int               `json:"backupKeep"`
 		ReloadCmd      string            `json:"reloadCmd"`
 		ReloadArg      string            `json:"reloadArg"`
+		Pm2Name        string            `json:"pm2Name"`
 		Extra          string            `json:"extra"`
 	}{
 		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
 		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
 		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
-		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Extra: fpExtra,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Pm2Name: cfg.Pm2Name, Extra: fpExtra,
 	}
 	b, _ := json.Marshal(payload)
 	return "v2:" + string(b)

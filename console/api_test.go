@@ -90,6 +90,11 @@ func TestPutAppConfigValidation(t *testing.T) {
 	if c := put(goodDocker); c != http.StatusOK {
 		t.Fatalf("合法容器名配置应 200,得 %d", c)
 	}
+	// node + pm2 runner + 合法 pm2 接管进程名应通过。
+	goodPm2 := `{"name":"svc","type":"node","runner":"pm2","path":"/srv/apps/svc/server.js","backupKeep":5,"agentId":"default","pm2Name":"my-proc"}`
+	if c := put(goodPm2); c != http.StatusOK {
+		t.Fatalf("合法 pm2 接管名配置应 200,得 %d", c)
+	}
 	for _, tc := range []struct {
 		name, body string
 	}{
@@ -103,6 +108,8 @@ func TestPutAppConfigValidation(t *testing.T) {
 		{"port 为字符串(类型不符)", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","port":"8080","agentId":"default","backupKeep":5}`},
 		{"backupKeep 为字符串(类型不符)", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":"5"}`},
 		{"nginx 容器名含注入字符", `{"name":"a","type":"static-nginx","runner":"软链","path":"/data/web/a","agentId":"default","backupKeep":5,"reload":true,"nginxContainer":"ng;rm -rf /"}`},
+		{"pm2 进程名用在非 pm2 runner", `{"name":"a","type":"node","runner":"systemd","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"my-proc"}`},
+		{"pm2 进程名含注入字符", `{"name":"a","type":"node","runner":"pm2","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"p;rm -rf /"}`},
 	} {
 		if c := put(tc.body); c != http.StatusBadRequest {
 			t.Errorf("%s 应 400,得 %d", tc.name, c)
@@ -296,6 +303,21 @@ func TestBuildAgentConfigMapsReloadFlag(t *testing.T) {
 	disabled := buildAgentDeployConfig(appConfig{Type: "static-nginx", Path: "/data/web/site", Reload: false}, "v1", "", "r1")
 	if disabled.ReloadCmd != "" {
 		t.Fatalf("reload=false 不应下发 reloadCmd,got %q", disabled.ReloadCmd)
+	}
+
+	// nginx 为 Docker 部署:配了容器名 → nginx-docker-restart + 容器名作受校验参数。
+	dock := buildAgentDeployConfig(appConfig{Type: "static-nginx", Path: "/data/web/site", Reload: true, NginxContainer: "nginx-proxy"}, "v1", "", "r1")
+	if dock.ReloadCmd != "nginx-docker-restart" || dock.ReloadArg != "nginx-proxy" {
+		t.Fatalf("配容器名应映射 nginx-docker-restart/nginx-proxy,got %q/%q", dock.ReloadCmd, dock.ReloadArg)
+	}
+
+	// pm2 接管:runner=pm2 + pm2Name → 透传(trim);非 pm2 runner 不下发。
+	adopt := buildAgentDeployConfig(appConfig{Type: "node", Runner: "pm2", Path: "/srv/apps/x/server.js", Pm2Name: "  my-proc "}, "v1", "", "r1")
+	if adopt.Pm2Name != "my-proc" {
+		t.Fatalf("pm2 接管名应 trim 后透传 my-proc,got %q", adopt.Pm2Name)
+	}
+	if sys := buildAgentDeployConfig(appConfig{Type: "node", Runner: "systemd", Path: "/srv/apps/x/server.js", Pm2Name: "my-proc"}, "v1", "", "r1"); sys.Pm2Name != "" {
+		t.Fatalf("非 pm2 runner 不应下发 pm2Name,got %q", sys.Pm2Name)
 	}
 }
 

@@ -247,9 +247,10 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 // applyAppRuntimeState 在真机部署/还原结束后,由 Console 服务端权威更新应用实体状态,
 // 并清零前端曾伪造的 pid/cpu/mem(运行态由 …/status 轮询补)。前端真实操作只做即时显示、
 // 不再 patch 落库,刷新后一律以服务端记录为准。三态:
-//   success    → 切到新 version,running/static
-//   rolledback → 保留旧 version(已回滚),running/static
-//   failed     → status=failed,version 不变
+//
+//	success    → 切到新 version,running/static
+//	rolledback → 保留旧 version(已回滚),running/static
+//	failed     → status=failed,version 不变
 func (a *api) applyAppRuntimeState(appID, version, result string) {
 	raw, ok := a.store.getEntity("app", appID)
 	if !ok {
@@ -440,6 +441,9 @@ func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 	path += "?tail=" + tail
 	if runner == "pm2" {
 		path += "&runner=pm2"
+		if n := a.appPm2Name(id); n != "" {
+			path += "&pm2Name=" + url.QueryEscape(n)
+		}
 	}
 	resp, err := cl.getStream(r.Context(), path)
 	a.streamAgentResp(w, resp, err)
@@ -464,6 +468,9 @@ func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	if runner == "pm2" {
 		q.Set("runner", "pm2")
+		if n := a.appPm2Name(id); n != "" {
+			q.Set("pm2Name", n)
+		}
 	}
 	resp, err := cl.getStream(r.Context(), "/api/apps/"+id+"/logs/download?"+q.Encode())
 	if err != nil {
@@ -532,6 +539,9 @@ func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 	path := "/api/apps/" + id + "/status"
 	if runner == "pm2" {
 		path += "?runner=pm2"
+		if n := a.appPm2Name(id); n != "" {
+			path += "&pm2Name=" + url.QueryEscape(n)
+		}
 	}
 	status, body, err := cl.get(path)
 	relayAgent(w, status, body, err)
@@ -556,6 +566,9 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 	path := "/api/apps/" + id + "/lifecycle?action=" + action
 	if runner == "pm2" {
 		path += "&runner=pm2"
+		if n := a.appPm2Name(id); n != "" {
+			path += "&pm2Name=" + url.QueryEscape(n)
+		}
 	}
 	status, body, err := cl.post(path, "application/json", nil)
 	user := a.sessionUser(r)

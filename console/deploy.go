@@ -73,6 +73,15 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 	if c := strings.TrimSpace(app.NginxContainer); c != "" && !nginxContainerRe.MatchString(c) {
 		return "nginx 容器名非法(仅字母数字与 _ . -,首字符字母数字): " + c, false
 	}
+	// pm2 接管进程名(可选):只在 pm2 runner 下有意义,且须为合法名(与 Agent 端校验一致,fail-closed)。
+	if n := strings.TrimSpace(app.Pm2Name); n != "" {
+		if app.Runner != "pm2" {
+			return "pm2 接管进程名仅在 Runner=pm2 时可用", false
+		}
+		if !nginxContainerRe.MatchString(n) {
+			return "pm2 进程名非法(仅字母数字与 _ . -,首字符字母数字): " + n, false
+		}
+	}
 	for _, p := range app.LogPaths {
 		if strings.TrimSpace(p) == "" {
 			return "日志路径含空项", false
@@ -128,6 +137,7 @@ type appConfig struct {
 	BackupKeep     float64           `json:"backupKeep"`
 	Reload         bool              `json:"reload"`         // static/tomcat:部署后是否触发 reload 钩子
 	NginxContainer string            `json:"nginxContainer"` // static-nginx:nginx 为 Docker 部署时的容器名(空=宿主机 nginx,走 nginx -s reload)
+	Pm2Name        string            `json:"pm2Name"`        // pm2 接管模式:填已有 pm2 进程名/ID 则部署只 pm2 restart 它、不写 ecosystem;空=Mooncell 托管
 	LogPaths       []string          `json:"logPaths"`       // 该应用声明的日志文件路径(文件 tail 授权白名单)
 	Env            map[string]string `json:"env"`
 }
@@ -152,6 +162,7 @@ type agentDeployConfig struct {
 	BackupKeep     int               `json:"backupKeep"`
 	ReloadCmd      string            `json:"reloadCmd,omitempty"`
 	ReloadArg      string            `json:"reloadArg,omitempty"` // reload 动作的受校验参数(如 nginx 容器名)
+	Pm2Name        string            `json:"pm2Name,omitempty"`   // pm2 接管模式的已有进程名/ID(空=Mooncell 托管,用 deploy-<id>)
 }
 
 // reloadActionFor 按应用配置把「是否 reload」表意映射到 Agent 白名单内的固定动作名(+ 可选受校验参数)。
@@ -204,12 +215,13 @@ func deployFingerprint(app appConfig, sha, version, fpExtra string) string {
 		BackupKeep     int               `json:"backupKeep"`
 		ReloadCmd      string            `json:"reloadCmd"`
 		ReloadArg      string            `json:"reloadArg"`
+		Pm2Name        string            `json:"pm2Name"`
 		Extra          string            `json:"extra"`
 	}{
 		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
 		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
 		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
-		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Extra: fpExtra,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Pm2Name: cfg.Pm2Name, Extra: fpExtra,
 	}
 	b, _ := json.Marshal(payload)
 	return "v2:" + string(b)
@@ -230,6 +242,10 @@ func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID st
 	if rc, ra := reloadActionFor(app); rc != "" {
 		cfg.ReloadCmd = rc
 		cfg.ReloadArg = ra
+	}
+	// pm2 接管模式:仅 pm2 runner 下生效,透传已有进程名(Agent 据此 restart 而非写 ecosystem)。
+	if app.Runner == "pm2" {
+		cfg.Pm2Name = strings.TrimSpace(app.Pm2Name)
 	}
 	// jvm 字段按类型映射:java 是 JVM 参数,其余是启动参数。
 	if app.Type == "java-jar" {
@@ -285,6 +301,18 @@ func (a *api) appDeclaresLog(id, path string) bool {
 		}
 	}
 	return false
+}
+
+// appPm2Name 取应用配置里的 pm2 接管进程名(trim);非接管/读不到返回空串。
+// 供 status/lifecycle/logs 代理端点向 Agent 透传,使无状态 Agent 能定位用户的已有 pm2 进程。
+func (a *api) appPm2Name(id string) string {
+	if raw, ok := a.store.getEntity("app", id); ok {
+		var app appConfig
+		if json.Unmarshal(raw, &app) == nil {
+			return strings.TrimSpace(app.Pm2Name)
+		}
+	}
+	return ""
 }
 
 // appRouting 据已存应用配置(authoritative)解析目标 Agent 客户端与 runner,

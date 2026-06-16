@@ -63,6 +63,24 @@ func TestWritePm2Eco(t *testing.T) {
 	}
 }
 
+// pm2 接管模式:配置带 pm2Name 即接管,进程名用用户指定的已有名;留空则用 Mooncell 托管名 deploy-<id>。
+func TestPm2ProcNameAndAdopt(t *testing.T) {
+	managed := DeployConfig{ID: "app1"}
+	if pm2Adopt(managed) {
+		t.Error("无 pm2Name 不应判为接管模式")
+	}
+	if got := pm2ProcName(managed); got != unitName("app1") {
+		t.Errorf("托管模式进程名应为 %q, got %q", unitName("app1"), got)
+	}
+	adopt := DeployConfig{ID: "app1", Pm2Name: "  my-proc  "}
+	if !pm2Adopt(adopt) {
+		t.Error("有 pm2Name 应判为接管模式")
+	}
+	if got := pm2ProcName(adopt); got != "my-proc" {
+		t.Errorf("接管模式进程名应为用户指定(trim 后)my-proc, got %q", got)
+	}
+}
+
 // java-jar 的 JVM 参数必须排在 -jar 之前(否则 pm2 下 `java -jar -Xmx app.jar` 起不来)。
 func TestWritePm2EcoJavaArgsOrder(t *testing.T) {
 	dir := t.TempDir()

@@ -34,7 +34,8 @@ func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 	var cmd *exec.Cmd
 	if r.URL.Query().Get("runner") == "pm2" {
 		// pm2 应用日志走 pm2 logs --raw(裸消息);parseJournalLine 对非 JSON 行回退为纯文本。
-		cmd = exec.CommandContext(r.Context(), "pm2", "logs", unitName(id), "--lines", tail, "--raw")
+		// 接管模式定位用户进程名(pm2NameReq),否则托管名 deploy-<id>。
+		cmd = exec.CommandContext(r.Context(), "pm2", "logs", pm2NameReq(r, id), "--lines", tail, "--raw")
 	} else {
 		// journalctl -o json:逐行结构化,时间/优先级/消息精确可取,免去文本格式与时区的脆弱解析。
 		cmd = exec.CommandContext(r.Context(), "journalctl",
@@ -109,7 +110,7 @@ func (a *agent) logDownload(w http.ResponseWriter, r *http.Request) {
 
 	var cmd *exec.Cmd
 	if q.Get("runner") == "pm2" {
-		cmd = exec.CommandContext(r.Context(), "pm2", "logs", unitName(id), "--lines", "20000", "--nostream", "--raw")
+		cmd = exec.CommandContext(r.Context(), "pm2", "logs", pm2NameReq(r, id), "--lines", "20000", "--nostream", "--raw")
 	} else {
 		args := []string{"-u", unitName(id), "-o", "short-iso", "--no-pager"}
 		// since/until 必须是纯数字 unix 秒,防注入。
