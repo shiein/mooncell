@@ -33,8 +33,14 @@ func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 	// exec.Command 数组传参不经 shell,id 来自单段路径,无注入面。
 	var cmd *exec.Cmd
 	if r.URL.Query().Get("runner") == "nohup" {
-		// nohup 无 journal/pm2 日志,直接 tail -F 重定向的日志文件;path 须在 log_roots 白名单内。
-		path := r.URL.Query().Get("path")
+		// nohup 无 journal/pm2 日志:据 binPath 从启动规格推导真实日志文件(与启动写入目标一致,
+		// 含 fallback),不信任前端传 path——否则应用未声明 logPath 时 Console 传空、读不到日志。
+		bp := strings.TrimSpace(r.URL.Query().Get("binPath"))
+		if !withinRoots(bp, a.cfg.Paths.DeployRoots) {
+			sse("line", map[string]any{"ts": time.Now().UnixMilli(), "level": "error", "text": "nohup 日志缺少合法 binPath(须在 deploy_roots 内): " + bp})
+			return
+		}
+		path := nohupResolvedLogPath(bp)
 		if !withinRoots(path, a.cfg.Paths.LogRoots) {
 			sse("line", map[string]any{"ts": time.Now().UnixMilli(), "level": "error", "text": "日志路径不在 log_roots 白名单内: " + path})
 			return
@@ -118,10 +124,15 @@ func (a *agent) logDownload(w http.ResponseWriter, r *http.Request) {
 
 	var cmd *exec.Cmd
 	if q.Get("runner") == "nohup" {
-		// nohup:导出重定向日志文件末尾若干行(纯文件无时间范围检索,since/until 不适用)。path 须在白名单内。
-		path := q.Get("path")
-		if !withinRoots(path, a.cfg.Paths.LogRoots) {
+		// nohup:导出重定向日志文件末尾若干行(纯文件无时间范围检索,since/until 不适用)。
+		// 据 binPath 从启动规格推导真实日志路径,与 logStream 一致。
+		bp := strings.TrimSpace(q.Get("binPath"))
+		if !withinRoots(bp, a.cfg.Paths.DeployRoots) {
 			return // 头已写,无法回 4xx;直接结束(导出空)
+		}
+		path := nohupResolvedLogPath(bp)
+		if !withinRoots(path, a.cfg.Paths.LogRoots) {
+			return
 		}
 		cmd = exec.CommandContext(r.Context(), "tail", "-n", "20000", path)
 	} else if q.Get("runner") == "pm2" {

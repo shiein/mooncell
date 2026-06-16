@@ -80,7 +80,8 @@ func nohupCommand(cfg DeployConfig) (string, error) {
 // shQuote 用单引号包裹并转义内嵌单引号,供安全拼入 sh -c(仅用于 agent 控制的可执行/路径)。
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// nohupStart 据 cfg 构造启动规格、落 sidecar,再启动;供部署流水线调用。返回 PID。
+// nohupStart 据 cfg 构造启动规格、原子落 sidecar,再启动;供部署流水线调用。返回 PID。
+// sidecar 写失败必须报错(不能吞):否则部署"成功"但后续启停/回滚无规格可重建命令。
 func (a *agent) nohupStart(cfg DeployConfig) (string, error) {
 	cmdStr, err := nohupCommand(cfg)
 	if err != nil {
@@ -91,10 +92,53 @@ func (a *agent) nohupStart(cfg DeployConfig) (string, error) {
 		wd = filepath.Dir(cfg.BinPath)
 	}
 	spec := nohupSpec{Cmd: cmdStr, Workdir: wd, LogPath: a.nohupLogPath(cfg), PidFile: nohupPidFile(cfg), Env: cfg.Env}
-	if b, e := json.MarshalIndent(spec, "", "  "); e == nil {
-		os.WriteFile(nohupSpecPath(cfg.BinPath), b, 0644) // 启停/状态据此重建
+	b, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("序列化启动规格失败: %w", err)
+	}
+	if err := atomicWrite(nohupSpecPath(cfg.BinPath), b, 0644); err != nil {
+		return "", fmt.Errorf("写启动规格失败: %w", err)
 	}
 	return nohupLaunch(spec)
+}
+
+// atomicWrite 同目录临时文件 + rename 原子写,避免半截文件被读到或写失败留下损坏文件。
+func atomicWrite(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// nohupResolvedLogPath 据 binPath 推导实际日志文件:优先 spec.LogPath(部署时已确定,含 fallback),
+// 读不到 spec 则退回 <binPath>.nohup.log。供日志流/导出定位真实日志,与启动时写入目标始终一致。
+func nohupResolvedLogPath(binPath string) string {
+	if b, err := os.ReadFile(nohupSpecPath(binPath)); err == nil {
+		var spec nohupSpec
+		if json.Unmarshal(b, &spec) == nil && strings.TrimSpace(spec.LogPath) != "" {
+			return spec.LogPath
+		}
+	}
+	return binPath + ".nohup.log"
 }
 
 // nohupStartFromSpec 据已落盘的启动规格拉起(供 lifecycle「启动」等只带 binPath 的无状态请求)。
@@ -110,13 +154,21 @@ func nohupStartFromSpec(binPath string) (string, error) {
 	return nohupLaunch(spec)
 }
 
-// nohupLaunch 后台启动并把 PID 写入 pidfile,返回 PID。sh 把 nohup 进程放后台、echo $! 落 pid 后即退出,
-// 故 Run 返回时 pidfile 已就绪;nohup 进程脱离 SIGHUP,Agent 退出/自更新重启都不影响它。
+// nohupLaunch 后台启动并把运行时状态(pid + starttime)落 pidfile,返回 PID。
+// $! 先落临时文件,Go 读出后补 starttime 原子写 pidfile——纯 PID 不足以判活(PID 会被复用)。
+// nohup 进程脱离 SIGHUP,Agent 退出/自更新重启都不影响它。
 func nohupLaunch(spec nohupSpec) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(spec.LogPath), 0755); err != nil {
 		return "", fmt.Errorf("创建日志目录失败: %w", err)
 	}
-	line := fmt.Sprintf("nohup %s >> %s 2>&1 & echo $! > %s", spec.Cmd, shQuote(spec.LogPath), shQuote(spec.PidFile))
+	tmp, err := os.CreateTemp(filepath.Dir(spec.PidFile), ".nohup-pid-*")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpName)
+	line := fmt.Sprintf("nohup %s >> %s 2>&1 & echo $! > %s", spec.Cmd, shQuote(spec.LogPath), shQuote(tmpName))
 	c := exec.Command("sh", "-c", line)
 	c.Dir = spec.Workdir
 	c.Env = os.Environ()
@@ -126,57 +178,103 @@ func nohupLaunch(spec nohupSpec) (string, error) {
 	if out, err := c.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("nohup 启动失败: %s", strings.TrimSpace(string(out)))
 	}
-	time.Sleep(300 * time.Millisecond) // 给进程一点时间:若立即崩溃,后续 alive 检查能如实反映
-	b, _ := os.ReadFile(spec.PidFile)
-	return strings.TrimSpace(string(b)), nil
+	time.Sleep(300 * time.Millisecond) // 给进程一点时间:若立即崩溃,starttime 读不到、后续判活如实反映
+	pb, _ := os.ReadFile(tmpName)
+	pidStr := strings.TrimSpace(string(pb))
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil {
+		return "", fmt.Errorf("无法获取启动 PID: %q", pidStr)
+	}
+	if err := writeNohupState(spec.PidFile, pid); err != nil {
+		return "", fmt.Errorf("写 pidfile 失败: %w", err)
+	}
+	return pidStr, nil
 }
 
-// nohupReadPid 读 pidfile 返回 PID(trim);读不到/为空返回 ""。
-func nohupReadPid(cfg DeployConfig) string {
+// nohupState 是落 pidfile 的运行时状态:PID + 进程身份指纹(starttime),用于识别 PID 复用——
+// 进程退出后 PID 可能被系统分给无关进程,光有 PID 会误判存活、停止/下线时误杀无关进程。
+type nohupState struct {
+	Pid       int    `json:"pid"`
+	StartTime string `json:"startTime"` // /proc/<pid>/stat starttime;非 linux 为空(退化为仅存活探测)
+}
+
+func writeNohupState(pidFile string, pid int) error {
+	st := nohupState{Pid: pid, StartTime: procStartTime(strconv.Itoa(pid))}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(pidFile, b, 0644)
+}
+
+func readNohupState(cfg DeployConfig) (nohupState, bool) {
 	b, err := os.ReadFile(nohupPidFile(cfg))
 	if err != nil {
-		return ""
+		return nohupState{}, false
 	}
-	return strings.TrimSpace(string(b))
+	var st nohupState
+	if json.Unmarshal(b, &st) != nil || st.Pid <= 0 {
+		return nohupState{}, false
+	}
+	return st, true
 }
 
-// nohupAlive 判断 pidfile 记录的进程是否存活(signal 0 探测,不实际投递信号)。
-func nohupAlive(cfg DeployConfig) bool { return pidAlive(nohupReadPid(cfg)) }
+// procStartTime 取 /proc/<pid>/stat 的 starttime(自系统启动以来的时钟滴答),作进程身份指纹。
+// 非 linux / 读不到返回 ""(此时身份校验退化为仅存活探测)。
+func procStartTime(pid string) string {
+	if f := procStatFields(pid); len(f) >= 20 {
+		return f[19]
+	}
+	return ""
+}
 
-func pidAlive(pid string) bool {
-	pid = strings.TrimSpace(pid)
-	if pid == "" || pid == "0" {
+// pidRunning 用 signal 0 探测 PID 是否存活(不实际投递信号)。
+func pidRunning(pid int) bool {
+	if pid <= 0 {
 		return false
 	}
-	n, err := strconv.Atoi(pid)
-	if err != nil {
-		return false
-	}
-	p, err := os.FindProcess(n)
+	p, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
 	return p.Signal(syscall.Signal(0)) == nil
 }
 
-// nohupStop 停止进程:SIGTERM → 最多等 5s 优雅退出 → 仍在则 SIGKILL;清理 pidfile。
+// stateAlive 判定记录的进程是否"还是它":存活 + 身份匹配。记录了 starttime 且当前可读时才比对
+// (防 PID 复用);非 linux / 读不到 starttime 则退化为仅存活探测。
+func stateAlive(st nohupState) bool {
+	if !pidRunning(st.Pid) {
+		return false
+	}
+	if st.StartTime != "" {
+		if cur := procStartTime(strconv.Itoa(st.Pid)); cur != "" && cur != st.StartTime {
+			return false // 同 PID 但 starttime 不同 = PID 已被复用为无关进程
+		}
+	}
+	return true
+}
+
+// nohupAlive 据 pidfile 判断本应用进程是否在运行(含 PID 复用身份校验)。
+func nohupAlive(cfg DeployConfig) bool {
+	st, ok := readNohupState(cfg)
+	return ok && stateAlive(st)
+}
+
+// nohupStop 停止进程:身份校验通过才发信号(SIGTERM → 最多等 5s → SIGKILL);
+// 无记录 / 已退出 / PID 复用(stale)一律只清 pidfile,绝不对不属于自己的 PID 发信号。
 func nohupStop(cfg DeployConfig) {
-	pid := strings.TrimSpace(nohupReadPid(cfg))
 	defer os.Remove(nohupPidFile(cfg))
-	if pid == "" || pid == "0" {
+	st, ok := readNohupState(cfg)
+	if !ok || !stateAlive(st) {
 		return
 	}
-	n, err := strconv.Atoi(pid)
-	if err != nil {
-		return
-	}
-	p, err := os.FindProcess(n)
+	p, err := os.FindProcess(st.Pid)
 	if err != nil {
 		return
 	}
 	p.Signal(syscall.SIGTERM)
 	for i := 0; i < 25; i++ {
-		if !pidAlive(pid) {
+		if !pidRunning(st.Pid) {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -234,9 +332,11 @@ func (a *agent) runDeployNohup(cfg DeployConfig, artifact string, emit func(Step
 	pid, err := a.nohupStart(cfg)
 	if err != nil {
 		add("启动服务", false, err.Error())
-	} else {
-		add("启动服务", true, "nohup 托管 · pid "+pid+" · 日志 "+a.nohupLogPath(cfg))
+		rlog, ok := a.rollbackNohup(cfg, bkDir)
+		res.Result = rollbackResult(rlog, ok, add)
+		return res
 	}
+	add("启动服务", true, "nohup 托管 · pid "+pid+" · 日志 "+a.nohupLogPath(cfg))
 	time.Sleep(time.Second)
 
 	var hlog []string

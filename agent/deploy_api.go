@@ -153,16 +153,13 @@ func (a *agent) nohupBinPathReq(w http.ResponseWriter, r *http.Request) (string,
 	return bp, true
 }
 
-// nohupStatusJSON 据 binPath 读 pidfile 返回 nohup 进程状态(与 pm2/systemd 同形)。
+// nohupStatusJSON 据 binPath 读 pidfile 返回 nohup 进程状态(与 pm2/systemd 同形;含 PID 复用身份校验)。
 func nohupStatusJSON(w http.ResponseWriter, id, binPath string) {
-	cfg := DeployConfig{BinPath: binPath}
-	pid := nohupReadPid(cfg)
-	alive := pidAlive(pid)
-	state := "stopped"
+	st, ok := readNohupState(DeployConfig{BinPath: binPath})
+	alive := ok && stateAlive(st)
+	pid, state := "", "stopped"
 	if alive {
-		state = "online"
-	} else {
-		pid = ""
+		pid, state = fmt.Sprint(st.Pid), "online"
 	}
 	cpu, mem := procStats(pid)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": alive, "state": state, "pid": pid, "cpu": cpu, "mem": mem})
@@ -227,6 +224,8 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 		}
 		if action == "stop" {
 			nohupStop(DeployConfig{BinPath: bp})
+		} else if nohupAlive(DeployConfig{BinPath: bp}) {
+			// 幂等:已在运行(身份匹配)则直接返回现状,不重复 launch 出第二份进程
 		} else if _, err := nohupStartFromSpec(bp); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "start 失败: " + err.Error()})
 			return

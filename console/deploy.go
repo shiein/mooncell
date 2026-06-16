@@ -332,17 +332,6 @@ func (a *api) appBinPathOf(id string) string {
 	return ""
 }
 
-// appLogPath0 取应用声明的首个日志文件路径,供 nohup 日志流/导出向 Agent 透传(运行日志即重定向目标)。
-func (a *api) appLogPath0(id string) string {
-	if raw, ok := a.store.getEntity("app", id); ok {
-		var app appConfig
-		if json.Unmarshal(raw, &app) == nil && len(app.LogPaths) > 0 {
-			return strings.TrimSpace(app.LogPaths[0])
-		}
-	}
-	return ""
-}
-
 // appRouting 据已存应用配置(authoritative)解析目标 Agent 客户端与 runner,
 // 供日志/状态等接口服务端派生路由与 runner,不再信任前端传的 ?agent / ?runner。
 // 应用未落库时退回配置内置 Agent(兼容尚未真机化的演示应用)。

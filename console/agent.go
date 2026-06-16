@@ -445,7 +445,8 @@ func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 			path += "&pm2Name=" + url.QueryEscape(n)
 		}
 	} else if runner == "nohup" {
-		path += "&runner=nohup&path=" + url.QueryEscape(a.appLogPath0(id))
+		// nohup 传 binPath,Agent 据启动规格推导真实日志路径(应用可能未声明 logPath,走 fallback)。
+		path += "&runner=nohup&binPath=" + url.QueryEscape(a.appBinPathOf(id))
 	}
 	resp, err := cl.getStream(r.Context(), path)
 	a.streamAgentResp(w, resp, err)
@@ -475,7 +476,7 @@ func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if runner == "nohup" {
 		q.Set("runner", "nohup")
-		q.Set("path", a.appLogPath0(id))
+		q.Set("binPath", a.appBinPathOf(id))
 	}
 	resp, err := cl.getStream(r.Context(), "/api/apps/"+id+"/logs/download?"+q.Encode())
 	if err != nil {

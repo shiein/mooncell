@@ -138,22 +138,27 @@ func pidMatches(target string, owners []string) bool {
 	return false
 }
 
-// ppidOf 读 /proc/<pid>/stat 取父 pid。comm 字段可能含空格/括号,故从最后一个 ')' 之后再切字段。
-func ppidOf(pid string) string {
+// procStatFields 读 /proc/<pid>/stat 返回 comm 之后的字段切片(comm 可能含空格/括号,故从最后一个 ')' 后切)。
+// f[0]=state f[1]=ppid …… f[19]=starttime(stat 第 22 字段)。非 linux / 读不到返回 nil。
+func procStatFields(pid string) []string {
 	b, err := os.ReadFile("/proc/" + pid + "/stat")
 	if err != nil {
-		return ""
+		return nil
 	}
 	s := string(b)
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 {
-		return ""
+		return nil
 	}
-	f := strings.Fields(s[i+1:]) // f[0]=state, f[1]=ppid
-	if len(f) < 2 {
-		return ""
+	return strings.Fields(s[i+1:])
+}
+
+// ppidOf 取父 pid。
+func ppidOf(pid string) string {
+	if f := procStatFields(pid); len(f) >= 2 {
+		return f[1]
 	}
-	return f[1]
+	return ""
 }
 
 // capStatus 查启动自检缓存里某能力是否可用及版本。

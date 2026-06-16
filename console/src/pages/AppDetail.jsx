@@ -242,7 +242,7 @@ function LogViewer({ app }) {
   const JOURNAL = "__journal__";
   const canJournal = isProcessType(app.type);
   const fileOpts = (app.logPaths || []).filter(isConcreteLogPath);
-  const journalLabel = app.runner === "pm2" ? "进程日志 · pm2" : "进程日志 · journal";
+  const journalLabel = app.runner === "pm2" ? "进程日志 · pm2" : app.runner === "nohup" ? "进程日志 · nohup log" : "进程日志 · journal";
   const logOptions = [
     ...(canJournal ? [{ value: JOURNAL, label: journalLabel }] : []),
     ...fileOpts.map((p) => ({ value: p, label: p })),
