@@ -8,6 +8,7 @@ dist/
 /console/mooncell
 /console/console
 /agent/agent
+*.exe
 
 # 发布打包产物(由 deploy/build-release.sh 生成)
 /deploy/release/
@@ -23,3 +24,6 @@ dist/
 # 日志与杂项
 *.log
 .DS_Store
+
+# IDE
+.idea/
