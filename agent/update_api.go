@@ -26,6 +26,14 @@ const selfUpdateMaxBytes = 256 << 20
 
 // selfUpdate 处理 POST /api/self-update(token)。
 func (a *agent) selfUpdate(w http.ResponseWriter, r *http.Request) {
+	// 全局串行:固定临时路径 <exe>.new 与"备份→替换自身"都是非原子临界区,
+	// 两个管理员同时推送会互相覆盖,导致最终二进制/sha/版本对不上。并发推送直接 409 拒绝。
+	if !a.selfUpdateMu.TryLock() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "已有自更新进行中,请稍后重试"})
+		return
+	}
+	defer a.selfUpdateMu.Unlock()
+
 	r.Body = http.MaxBytesReader(w, r.Body, selfUpdateMaxBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败或超过上限"})
@@ -76,12 +84,27 @@ func (a *agent) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
-	// 自检:新二进制能在本机起来(挡住坏包/动态依赖缺失等;纯 nohup 无自愈网,自检是关键前置闸)。
+	// 自检:新二进制能在本机起来 + 接受当前 config.toml(挡住坏包/动态依赖缺失/配置不兼容;
+	// 纯 nohup 无自愈网,自检是关键前置闸)。
 	if err := selftestBinary(newPath); err != nil {
 		os.Remove(newPath)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "新二进制自检失败,保持旧版: " + err.Error()})
 		return
 	}
+	// 版本核对:以新二进制自报 --version 为权威,与 Console 声明版本比对——防止误标/传错包(上传旧包
+	// 却填新版本号会"看起来升级成功")。最终验收只能在 Agent 端做(Console 不能执行跨架构包)。
+	realVer, verr := binaryVersion(newPath)
+	if verr != nil {
+		os.Remove(newPath)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无法读取新二进制版本: " + verr.Error()})
+		return
+	}
+	if version != "" && realVer != version {
+		os.Remove(newPath)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("包版本与声明不符:Console 声明 %s,二进制自报 %s", version, realVer)})
+		return
+	}
+	version = realVer // 后续响应/日志一律用二进制自报的真实版本,不再信任表单
 	// 备份当前 → <exe>.old(供手工回滚:纯 nohup 模式无监管,升级后若新版崩溃需人工 mv 回滚)。
 	if err := copyFile(exe, exe+".old", 0o755); err != nil {
 		os.Remove(newPath)
@@ -123,7 +146,7 @@ func validateSelfUpdate(path, gotSha, wantSha string) string {
 	return ""
 }
 
-// selftestBinary 跑 `<bin> --selftest`,退出码 0 视为可在本机执行(不绑端口,不冲突)。
+// selftestBinary 跑 `<bin> --selftest`,退出码 0 视为可在本机执行且能接受当前 config.toml(不绑端口,不冲突)。
 func selftestBinary(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -132,4 +155,15 @@ func selftestBinary(path string) error {
 		return fmt.Errorf("%v (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// binaryVersion 跑 `<bin> --version` 取新二进制自报版本(权威),用于与 Console 声明版本核对。
+func binaryVersion(path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
 }

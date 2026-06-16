@@ -65,7 +65,10 @@ function CreateAppDialog({ open, onClose }) {
     getAgentCapabilities(form.agentId).then((c) => setCaps(c && c.capabilities ? c.capabilities : null));
   }, [open, form.agentId]);
 
-  const appId = () => (form.name || "new-app").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "new-app";
+  // 由应用名派生 Agent 端合法 slug:Agent 的 nameRe 要求首字符为字母数字(见 deployer.go),
+  // 故必须剥掉首尾连字符——纯中文名经 [^a-z0-9]→"-" 会塌成 "-",拼随机后缀后以 "-" 开头会被 Agent 判非法。
+  // slice 后可能再造出尾部 "-",故二次剥除;全空(纯非 ASCII 名)兜底为 "app"。应用名本身可中文,id 只是内部 slug。
+  const appId = () => (form.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 24).replace(/-+$/, "") || "app";
   // 落盘路径:预检与创建共用同一计算,避免"预检校验 A 路径、实际部署落盘 B 路径"不一致。
   // python/node → 入口脚本;static → web root 目录(软链);go/java → 制品文件(不能是目录)。
   const binPathOf = (id) => {

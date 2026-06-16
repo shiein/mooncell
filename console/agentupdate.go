@@ -60,12 +60,16 @@ func elfArch(path string) string {
 	return ""
 }
 
-// archOf 从 ping 上报的 os 串("linux/amd64")取放开的架构名;不识别返回 ""。
+// archOf 从 ping 上报的 os 串("linux/amd64")取放开的架构名;非 linux 或不识别架构返回 ""。
+// 必须连 OS 一起 fail-closed:Mooncell agent 包只发 linux,"darwin/amd64" 不能被当成 amd64 推 linux 包
+// (虽然 Agent 端最终会拒非 ELF,但后端边界也要一致,不把跨 OS 的包送上路)。
 func archOf(osStr string) string {
-	if i := strings.IndexByte(osStr, '/'); i >= 0 {
-		if arch := osStr[i+1:]; agentArchELF[arch] != 0 {
-			return arch
-		}
+	i := strings.IndexByte(osStr, '/')
+	if i < 0 || osStr[:i] != "linux" {
+		return ""
+	}
+	if arch := osStr[i+1:]; agentArchELF[arch] != 0 {
+		return arch
 	}
 	return ""
 }
@@ -102,12 +106,15 @@ func (a *api) uploadAgentBinary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建存储目录失败"})
 		return
 	}
-	tmp := a.agentBinPath(arch) + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	// 唯一临时文件(不用固定 <path>.tmp):两个管理员同时上传同一架构时,固定路径会互相覆盖,
+	// 可能出现"校验的是 A 写的、rename 的是 B 写一半的"。校验通过后再原子 rename 到正式路径。
+	out, err := os.CreateTemp(a.agentBinDir, "agent-"+arch+"-*.tmp")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "落盘失败"})
 		return
 	}
+	tmp := out.Name()
+	os.Chmod(tmp, 0o755)
 	h := sha256.New()
 	size, err := io.Copy(io.MultiWriter(out, h), file)
 	out.Close()
@@ -194,10 +201,47 @@ func (a *api) updateAgent(w http.ResponseWriter, r *http.Request) {
 	user := a.sessionUser(r)
 	if perr != nil || st >= 400 {
 		a.store.appendAudit(user, "更新 Agent", id+" → "+meta.Version, "失败")
-	} else {
-		a.store.appendAudit(user, "更新 Agent", id+" "+p.Version+" → "+meta.Version, "成功")
+		relayAgent(w, st, rb, perr)
+		return
 	}
-	relayAgent(w, st, rb, perr)
+	// Agent 已接受并替换二进制、将 self-exec 就地重启;但 200 是在 exec 之前返回的,新版可能起不来。
+	// 必须回探 /api/ping 确认 Agent 以新版本重新上线,才能记"成功"——否则可能升挂了还记成功(nohup 无监管)。
+	ok, gotVer := a.waitAgentVersion(cl, meta.Version, 30*time.Second)
+	if ok {
+		a.store.appendAudit(user, "更新 Agent", id+" "+p.Version+" → "+meta.Version, "成功")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "confirmed": true, "version": gotVer})
+		return
+	}
+	a.store.appendAudit(user, "更新 Agent", id+" → "+meta.Version, "重启未确认")
+	writeJSON(w, http.StatusBadGateway, map[string]any{
+		"ok": false, "confirmed": false,
+		"error": "已推送并替换二进制,但 30s 内未确认 Agent 以新版本重新上线(回探到版本: " + gotVer + ")。" +
+			"请检查目标机 Agent 进程;若未恢复,可用备份 <可执行文件>.old 手工回滚。",
+	})
+}
+
+// waitAgentVersion 自更新推送后回探 Agent:每秒轮询 /api/ping,直到在线且版本==want 或超时。
+// 返回是否确认 + 最后一次探到的版本(用于诊断:能 ping 通但版本不对 = 替换/重启出了问题)。
+func (a *api) waitAgentVersion(cl *agentClient, want string, timeout time.Duration) (bool, string) {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		time.Sleep(time.Second)
+		status, body, err := cl.get("/api/ping")
+		if err != nil || status != http.StatusOK {
+			continue
+		}
+		var p struct {
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(body, &p) == nil && p.Version != "" {
+			last = p.Version
+			if p.Version == want {
+				return true, p.Version
+			}
+		}
+	}
+	return false, last
 }
 
 // buildSelfUpdateBody 流式构造发给 Agent /api/self-update 的 multipart(binary + version + sha256)。

@@ -16,10 +16,11 @@ var agentVersion = "v0.1.0"
 
 // agent 持有配置与运行期状态,挂载各 HTTP handler。
 type agent struct {
-	cfg     *Config
-	caps    []Capability
-	started time.Time
-	locks   sync.Map // appId → *sync.Mutex,同应用部署/还原串行
+	cfg          *Config
+	caps         []Capability
+	started      time.Time
+	locks        sync.Map   // appId → *sync.Mutex,同应用部署/还原串行
+	selfUpdateMu sync.Mutex // 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -37,6 +38,10 @@ func main() {
 			fmt.Println(agentVersion)
 			return
 		case "--selftest":
+			// 深度自检:加载并校验当前 config.toml——loadConfig 对解析失败/不安全配置会 log.Fatal 非零退出,
+			// 从而挡住"能跑起来但无法接受当前运行配置"的坏包(纯 nohup 无监管,自检是升级前唯一前置闸)。
+			// 仍不绑端口,避免与运行中的实例冲突。
+			loadConfig("config.toml")
 			fmt.Println("ok " + agentVersion + " " + runtime.GOOS + "/" + runtime.GOARCH)
 			return
 		}
