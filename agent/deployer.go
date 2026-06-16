@@ -1243,6 +1243,20 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 		res.Result = "failed"
 		return res
 	}
+	// 软链部署要求对外路径是 Mooncell 托管的软链,或尚不存在(首次部署创建为软链)。
+	// 若它已是真实目录/普通文件,原子切换(rename 软链覆盖)会被内核以 EEXIST 拒绝,报错晦涩。
+	// 提前拦截给人话提示——Lstat 不跟随软链:已是软链→放行(后续重指),真实目录/文件→拒绝,不存在→放行。
+	if fi, err := os.Lstat(cfg.BinPath); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		kind := "普通文件"
+		if fi.IsDir() {
+			kind = "目录"
+		}
+		add("校验目标", false, fmt.Sprintf(
+			"目标路径已是真实%s,软链部署要求该路径为软链或尚不存在:请改用一个不存在的新路径,或先移走/删除 %s 后再部署",
+			kind, cfg.BinPath))
+		res.Result = "failed"
+		return res
+	}
 
 	// 2. 记录当前软链指向(用于回滚);首次部署无旧目标
 	prevTarget, _ := os.Readlink(cfg.BinPath)

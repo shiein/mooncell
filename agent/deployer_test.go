@@ -404,6 +404,55 @@ func TestStaticDeployRejectsRootBinPath(t *testing.T) {
 	}
 }
 
+// 软链部署:目标路径若已是真实目录(非软链),必须提前拒绝并给人话提示,
+// 而不是在 switchSymlink 阶段甩出 "rename ... file exists"(EEXIST)。
+func TestStaticDeployRejectsRealDirTarget(t *testing.T) {
+	root := t.TempDir()
+	binPath := filepath.Join(root, "site")
+	if err := os.MkdirAll(filepath.Join(binPath, "old"), 0755); err != nil { // 预先存在的真实非空目录
+		t.Fatal(err)
+	}
+	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{root}}}}
+	archive := filepath.Join(t.TempDir(), "site.tar.gz")
+	makeTarGz(t, archive, map[string]string{"index.html": "ok"})
+
+	var msgs []string
+	res := a.runDeployStatic(DeployConfig{ID: "site", Type: "static-nginx", BinPath: binPath, Version: "v1"}, archive,
+		func(s Step) { msgs = append(msgs, s.Logs...) })
+	if res.Result != "failed" {
+		t.Fatalf("目标为真实目录应失败,got %q", res.Result)
+	}
+	if !fileExists(filepath.Join(binPath, "old")) {
+		t.Fatal("拒绝后不应破坏原目录内容")
+	}
+	if !strings.Contains(strings.Join(msgs, " "), "软链部署要求该路径为软链或尚不存在") {
+		t.Fatalf("应给出软链用法提示, got logs=%v", msgs)
+	}
+}
+
+// 软链部署:首次部署(目标不存在)与既有软链(后续重指)都应通过目标校验并成功切换。
+func TestStaticDeployAcceptsSymlinkAndAbsent(t *testing.T) {
+	root := t.TempDir()
+	binPath := filepath.Join(root, "site")
+	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{root}}}}
+	mk := func() string {
+		p := filepath.Join(t.TempDir(), "site.tar.gz")
+		makeTarGz(t, p, map[string]string{"index.html": "ok"})
+		return p
+	}
+	// 首次:目标不存在 → 创建软链
+	if res := a.runDeployStatic(DeployConfig{ID: "s", Type: "static-nginx", BinPath: binPath, Version: "v1", BackupKeep: 3}, mk(), func(Step) {}); res.Result != "success" {
+		t.Fatalf("首次部署应成功,got %q (steps=%+v)", res.Result, res.Steps)
+	}
+	if fi, err := os.Lstat(binPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("首次部署后目标应为软链, err=%v", err)
+	}
+	// 再次:目标已是软链 → 原子重指
+	if res := a.runDeployStatic(DeployConfig{ID: "s", Type: "static-nginx", BinPath: binPath, Version: "v2", BackupKeep: 3}, mk(), func(Step) {}); res.Result != "success" {
+		t.Fatalf("二次部署(重指软链)应成功,got %q", res.Result)
+	}
+}
+
 // T7:HTTP 探活 2xx/3xx 通过(不再只认 200);连接失败判失败。
 func TestHttpHealthyAcceptsNon200(t *testing.T) {
 	for _, code := range []int{200, 204, 302, 401} {
