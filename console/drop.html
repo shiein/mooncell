@@ -94,7 +94,7 @@
     <div class="zone" id="zone">
       <div class="ic">⬆️</div>
       <div class="t">点击选择文件,或拖拽到此处</div>
-      <div class="h">单文件 ≤ 200 MB · 上传后获得提取码</div>
+      <div class="h" id="hint">单文件 ≤ 200 MB · 上传后获得提取码</div>
       <div class="fname" id="fname"></div>
       <input type="file" id="file" hidden />
     </div>
@@ -144,6 +144,19 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var file = null;
+  var limitMB = 200; // 默认值,加载后用服务端真实上限覆盖
+
+  // 加载真实上限 + 匿名开关:据此更新提示、客户端预检上限;未开启则直接置灰上传。
+  fetch("/api/pub/limits").then(function (r) { return r.json(); }).then(function (j) {
+    if (j && j.cabinetMaxMB) {
+      limitMB = j.cabinetMaxMB;
+      $("hint").textContent = "单文件 ≤ " + limitMB + " MB · 上传后获得提取码";
+    }
+    if (j && j.anonUpload === false) {
+      $("up").disabled = true;
+      setMsg("upMsg", "匿名上传未开启:管理员需在 config.toml 设 cabinet.anon_upload=true 后重启。", true);
+    }
+  }).catch(function () {});
 
   // ---- 上传 ----
   var zone = $("zone");
@@ -166,6 +179,12 @@
 
   $("up").onclick = function () {
     if (!file) { setMsg("upMsg", "请先选择文件", true); return; }
+    // 客户端预检大小:超限直接给明确提示,不发请求——否则浏览器流式上传到中途被服务端
+    // 截断重置,只会看到含糊的「网络错误」。
+    if (file.size > limitMB * 1024 * 1024) {
+      setMsg("upMsg", "文件 " + fmtSize(file.size) + " 超过 " + limitMB + " MB 上限,无法上传(管理员可调 config.toml 的 cabinet.max_upload_mb 后重启)。", true);
+      return;
+    }
     var fd = new FormData();
     fd.append("file", file);
     fd.append("expireDays", $("expire").value);

@@ -114,6 +114,15 @@ async function removeCabinetFile(id) {
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); }
 }
 
+// 公开:文件柜上限(MB)+ 匿名开关;用于上传前客户端大小预检。失败返回 null。
+async function getPubLimits() {
+  try {
+    const r = await fetch('/api/pub/limits', { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
 // ---------- Agent(经 Console 代理)----------
 // 任一失败都返回 null,调用方据此回退到 mock 并把 Agent 显示为离线。
 async function agentGet(path) {
@@ -388,7 +397,7 @@ export {
   login, logout, getSession,
   listUsers, createUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
-  uploadCabinetFile, removeCabinetFile,
+  uploadCabinetFile, removeCabinetFile, getPubLimits,
   getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, putEntity, saveAppConfig, deleteEntity, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,

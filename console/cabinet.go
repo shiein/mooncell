@@ -65,9 +65,8 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// cabinetMaxBytes 是单次上传请求体硬上限(200MB)。ParseMultipartForm 的参数只是内存阈值,
-// 超出会落临时盘且 io.Copy 不限大小;必须用 MaxBytesReader 在传输层截断并回 413。
-const cabinetMaxBytes = 200 << 20
+// 文件柜单文件上限由 cabinet.max_upload_mb 配置(a.cabinetMaxBytes,默认 200MB)。ParseMultipartForm
+// 的参数只是内存阈值,超出会落临时盘且 io.Copy 不限大小;必须用 MaxBytesReader 在传输层截断并回 413。
 
 // genCode 生成易读的 6 位提取码(去掉易混字符)。
 func genCode() string {
@@ -87,11 +86,19 @@ func (a *api) storedPath(id string) string {
 
 // storeCabinetFile 落盘 + 写元数据的共享核心;public=true 时上传即公开(匿名场景凭码可下载)。
 func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader string, public bool) {
-	// 传输层硬上限:超过即 MaxBytesError,统一回 413,杜绝「文案 64MB、实际不限」。
-	r.Body = http.MaxBytesReader(w, r.Body, cabinetMaxBytes)
+	// 早拦:Content-Length 已超限就立刻回 413,不再读 body。浏览器不发 Expect:100-continue,
+	// 若等到 MaxBytesReader 在传输中途截断 + 关连接,客户端只会看到「网络错误」而读不到 413;
+	// 提前据声明长度拒绝能让客户端尽量拿到明确响应(客户端另有大小预检兜底)。
+	limitMB := a.cabinetMaxBytes >> 20
+	if r.ContentLength > a.cabinetMaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("文件超过 %d MB 上限", limitMB)})
+		return
+	}
+	// 传输层硬上限:超过即 MaxBytesError,统一回 413,杜绝「文案上限、实际不限」。
+	r.Body = http.MaxBytesReader(w, r.Body, a.cabinetMaxBytes)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		if isMaxBytes(err) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("文件超过 %d MB 上限", cabinetMaxBytes>>20)})
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("文件超过 %d MB 上限", limitMB)})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
@@ -120,7 +127,7 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 	if err != nil {
 		os.Remove(a.storedPath(id))
 		if isMaxBytes(err) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("文件超过 %d MB 上限", cabinetMaxBytes>>20)})
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("文件超过 %d MB 上限", limitMB)})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入失败"})
@@ -148,6 +155,15 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 func (a *api) uploadCabinet(w http.ResponseWriter, r *http.Request) {
 	uploader, _, _ := a.currentUser(r)
 	a.storeCabinetFile(w, r, uploader, false)
+}
+
+// pubLimits 处理 GET /api/pub/limits(免登录):供 /drop 页展示真实上限、据此做客户端大小预检,
+// 并在匿名上传未开启时直接置灰提示。只暴露上限与开关,不泄露其它配置。
+func (a *api) pubLimits(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cabinetMaxMB": a.cabinetMaxBytes >> 20,
+		"anonUpload":   a.anonUpload,
+	})
 }
 
 // uploadCabinetAnon 处理 POST /api/pub/cabinet(免登录,需 cabinet.anon_upload=true):

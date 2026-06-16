@@ -1,10 +1,10 @@
 // Mooncell — 总览(系统监控)/ 文件柜 / 审计日志
 import React from 'react';
-import { useMC, AGENT, genSeries, timeAgo, fmtTime, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
+import { useMC, AGENT, genSeries, timeAgo, fmtTime, fmtBytes, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
 import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, EmptyState, Select, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAgents } from '../lib/agent.js';
-import { uploadCabinetFile } from '../lib/api.js';
+import { uploadCabinetFile, getPubLimits } from '../lib/api.js';
 
 function StatCard({ label, value, unit, series, color, extra }) {
   return (
@@ -205,12 +205,20 @@ function CabinetPage() {
   const store = useMC();
   const [uploading, setUploading] = React.useState(false);
   const [prog, setProg] = React.useState(0);
+  const [limitMB, setLimitMB] = React.useState(200);
   const fileRef = React.useRef(null);
   const canWrite = store.can("write");
+
+  // 加载真实上限,供上传前客户端大小预检(避免大文件流式上传被服务端中途截断→只显"网络错误")。
+  React.useEffect(() => { getPubLimits().then((l) => { if (l && l.cabinetMaxMB) setLimitMB(l.cabinetMaxMB); }); }, []);
 
   // 真实上传:multipart 到 Console,落盘 + 返回元数据(登录上传默认私有)。
   const realUpload = async (file) => {
     if (!file) return;
+    if (file.size > limitMB * 1024 * 1024) {
+      toast(`文件 ${fmtBytes(file.size)} 超过 ${limitMB} MB 上限,无法上传(管理员可调 cabinet.max_upload_mb)`, { tone: "error", icon: "alert" });
+      return;
+    }
     setUploading(true); setProg(45);
     try {
       const meta = await uploadCabinetFile(file, false);
@@ -247,7 +255,7 @@ function CabinetPage() {
           <Icon name="upload" size={20} style={{ color: "var(--muted-fg)" }} />
           <div style={{ fontWeight: 600, marginTop: 7, fontSize: 13.5 }}>{canWrite ? "拖拽文件到此处,或点击选择文件" : "当前角色为只读,无上传权限"}</div>
           <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 3 }}>
-            单文件 ≤ 200 MB · 默认 7 天后自动清理 · 上传后获得提取码 + 直链
+            单文件 ≤ {limitMB} MB · 默认 7 天后自动清理 · 上传后获得提取码 + 直链
           </div>
         </React.Fragment>
       )}

@@ -32,10 +32,11 @@ type DemoConfig struct {
 	Seed bool `toml:"seed"`
 }
 
-// CabinetConfig 文件柜:二进制落盘目录 + 是否允许匿名(免登录)上传。
+// CabinetConfig 文件柜:二进制落盘目录 + 是否允许匿名(免登录)上传 + 单文件上限(MB)。
 type CabinetConfig struct {
-	Dir        string `toml:"dir"`
-	AnonUpload bool   `toml:"anon_upload"`
+	Dir         string `toml:"dir"`
+	AnonUpload  bool   `toml:"anon_upload"`
+	MaxUploadMB int    `toml:"max_upload_mb"` // 单文件上限(MB),默认 200;部署大制品建议调高并提示上传方
 }
 
 // AgentConfig 是 Console 连接 Agent 的地址与共享 token(单机版默认指向本机 Agent)。
@@ -74,7 +75,7 @@ func loadConfig(path string) *Config {
 		Session:  SessionConfig{TTLHours: 168}, // 7 天
 		Admin:    AdminConfig{Username: "admin", Password: defaultAdminPassword},
 		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
-		Cabinet:  CabinetConfig{Dir: "cabinet"},
+		Cabinet:  CabinetConfig{Dir: "cabinet", MaxUploadMB: 200},
 		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 	}
 	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败(语法错误/权限等)→ 直接退出。

@@ -18,10 +18,11 @@ type api struct {
 	agent      *agentClient            // 配置内的默认 Agent(id="default"/空)
 	clients    map[string]*agentClient // 注册的远端 Agent 客户端缓存(按 id)
 	clientsMu  sync.Mutex
-	cabinetDir string
-	anonUpload bool
-	demoSeed   bool
-	maxUpload  int64                     // 部署制品上传硬上限(字节);超出在传输层截断回 413
+	cabinetDir      string
+	anonUpload      bool
+	cabinetMaxBytes int64 // 文件柜单文件上限(字节),来自 cabinet.max_upload_mb(默认 200MB)
+	demoSeed        bool
+	maxUpload       int64                     // 部署制品上传硬上限(字节);超出在传输层截断回 413
 	uploads    map[string]*uploadSession // 分块上传会话(按 uploadId)
 	uploadsMu  sync.Mutex
 }

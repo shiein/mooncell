@@ -26,7 +26,11 @@ func main() {
 	if maxUpload <= 0 {
 		maxUpload = 1024 << 20
 	}
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}}
+	cabinetMaxBytes := int64(cfg.Cabinet.MaxUploadMB) << 20
+	if cabinetMaxBytes <= 0 {
+		cabinetMaxBytes = 200 << 20
+	}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}}
 
 	// 文件柜过期清理 + 分块上传残留清理:启动即清一次,之后每小时一次。
 	go func() {
@@ -94,6 +98,7 @@ func main() {
 	mux.HandleFunc("GET /api/pubfile/{code}", a.downloadByCode)   // 独立前缀,避免与 /api/cabinet/{id}/... 冲突
 	mux.HandleFunc("GET /api/pubfile/{code}/meta", a.pubfileMeta) // 凭码校验 + 文件信息(不计下载数),供 /drop 页用
 	mux.HandleFunc("POST /api/pub/cabinet", a.uploadCabinetAnon)  // 匿名上传(需 cabinet.anon_upload=true)
+	mux.HandleFunc("GET /api/pub/limits", a.pubLimits)            // 公开:文件柜上限 + 匿名开关(供 /drop 客户端预检)
 
 	// 独立免登录投递页:极简自包含 HTML,只上传 + 凭码下载,无列表(列表仅登录后 SPA 可见)。
 	mux.HandleFunc("GET /drop", a.dropPage)
