@@ -194,7 +194,11 @@
         setMsg("upMsg", r.error || ("上传失败(" + xhr.status + ")"), true);
       }
     };
-    xhr.onerror = function () { $("up").disabled = false; $("bar").hidden = true; setMsg("upMsg", "网络错误,上传失败", true); };
+    xhr.onerror = function () {
+      $("up").disabled = false; $("bar").hidden = true; $("barI").style.width = "0";
+      // onerror = 传输层失败(非 HTTP 错误码)。最常见两因:反代请求体上限 / 文件超 200MB。
+      setMsg("upMsg", "上传中断(传输层失败)。常见原因:① Console 前的反向代理限制了请求体大小——nginx 需设 client_max_body_size(如 200m)并 reload;② 文件超过 200MB 上限。可按 F12 看 Network 里该请求的状态进一步确认。", true);
+    };
     xhr.send(fd);
   };
 
