@@ -40,8 +40,11 @@ func (a *agent) nohupLogPath(cfg DeployConfig) string {
 	return cfg.BinPath + ".nohup.log"
 }
 
-// nohupCommand 拼要 nohup 起的命令(executable 经 LookPath 解析为绝对路径并 shell 引用;
-// jvmArgs/args 为用户自由参数,与 systemd ExecStart 同样直接拼入,信任面不变)。
+// nohupCommand 拼要 nohup 起的命令。executable 与每个用户参数都经 shell 引用后再拼入:
+// 不同于 systemd(ExecStart 由 systemd 自己分词、不过 shell),nohup 走 `sh -c`,若原样拼接
+// jvmArgs/args,串里的 ;|`$() 等会被 shell 解释 → 命令注入。故先用 splitArgs 按 shell 词法切成
+// 独立 token,再逐个 shQuote——既保留「按空白/引号分词」的预期,又让元字符成为字面参数(对齐
+// systemd 的「分词但不执行」语义,消除注入面)。
 func nohupCommand(cfg DeployConfig) (string, error) {
 	switch cfg.Type {
 	case "java-jar":
@@ -49,36 +52,85 @@ func nohupCommand(cfg DeployConfig) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("未找到 java(请先安装 JRE): %w", err)
 		}
-		parts := []string{shQuote(java)}
-		if j := strings.TrimSpace(cfg.JvmArgs); j != "" {
-			parts = append(parts, j)
-		}
+		parts := append([]string{shQuote(java)}, quoteArgs(cfg.JvmArgs)...)
 		parts = append(parts, "-jar", shQuote(cfg.BinPath))
-		if a := strings.TrimSpace(cfg.Args); a != "" {
-			parts = append(parts, a)
-		}
+		parts = append(parts, quoteArgs(cfg.Args)...)
 		return strings.Join(parts, " "), nil
 	case "python", "node":
 		rt, err := runtimeBin(cfg, map[string]string{"python": "python3", "node": "node"}[cfg.Type])
 		if err != nil {
 			return "", err
 		}
-		parts := []string{shQuote(rt), shQuote(cfg.BinPath)}
-		if a := strings.TrimSpace(cfg.Args); a != "" {
-			parts = append(parts, a)
-		}
+		parts := append([]string{shQuote(rt), shQuote(cfg.BinPath)}, quoteArgs(cfg.Args)...)
 		return strings.Join(parts, " "), nil
 	default: // native-binary
-		cmd := shQuote(cfg.BinPath)
-		if a := strings.TrimSpace(cfg.Args); a != "" {
-			cmd += " " + a
-		}
-		return cmd, nil
+		parts := append([]string{shQuote(cfg.BinPath)}, quoteArgs(cfg.Args)...)
+		return strings.Join(parts, " "), nil
 	}
 }
 
 // shQuote 用单引号包裹并转义内嵌单引号,供安全拼入 sh -c(仅用于 agent 控制的可执行/路径)。
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// quoteArgs 把用户自由参数串按 shell 词法切成独立 token 后逐个 shQuote,返回可直接拼入 sh -c 的切片。
+func quoteArgs(raw string) []string {
+	toks := splitArgs(raw)
+	out := make([]string, len(toks))
+	for i, t := range toks {
+		out[i] = shQuote(t)
+	}
+	return out
+}
+
+// splitArgs 按 shell 词法把参数串切成 argv:空白分隔,单/双引号分组(引号本身剥离),
+// 反斜杠转义下一字符(单引号内除外)。仅做分词,不做 $ 展开/命令替换——切出的 token 由
+// quoteArgs 单引号包裹后才进 shell,故 token 内的元字符一律字面。空串返回 nil。
+func splitArgs(s string) []string {
+	var args []string
+	var cur strings.Builder
+	inTok := false
+	var quote byte // 0=无, '\'' 或 '"'
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			} else {
+				cur.WriteByte(c)
+			}
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			} else if c == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\') {
+				i++
+				cur.WriteByte(s[i])
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+			inTok = true
+		case c == '\\' && i+1 < len(s):
+			i++
+			cur.WriteByte(s[i])
+			inTok = true
+		case c == ' ' || c == '\t' || c == '\n':
+			if inTok {
+				args = append(args, cur.String())
+				cur.Reset()
+				inTok = false
+			}
+		default:
+			cur.WriteByte(c)
+			inTok = true
+		}
+	}
+	if inTok {
+		args = append(args, cur.String())
+	}
+	return args
+}
 
 // nohupStart 据 cfg 构造启动规格、原子落 sidecar,再启动;供部署流水线调用。返回 PID。
 // sidecar 写失败必须报错(不能吞):否则部署"成功"但后续启停/回滚无规格可重建命令。
@@ -392,8 +444,13 @@ func (a *agent) rollbackNohup(cfg DeployConfig, bkDir string) ([]string, bool) {
 		if _, err := nohupStartFromSpec(cfg.BinPath); err != nil {
 			return append(rlog, "重启旧版失败: "+err.Error()), false
 		}
-	} else if _, err := a.nohupStart(cfg); err != nil {
-		return append(rlog, "重启旧版失败: "+err.Error()), false
+	} else {
+		// 备份里没有启动规格(旧版用别的 runner 部署、或规格被手工删除):无从还原旧配置,
+		// 只能用本次(失败)部署的 cfg 拉起旧制品——env/args 可能与旧版不一致,据实告警让运维核对。
+		rlog = append(rlog, "⚠ 备份缺启动规格,用当前部署配置拉起旧制品(env/args 可能与旧版不符,请人工核对)")
+		if _, err := a.nohupStart(cfg); err != nil {
+			return append(rlog, "重启旧版失败: "+err.Error()), false
+		}
 	}
 	time.Sleep(time.Second)
 	var rh []string

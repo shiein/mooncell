@@ -129,8 +129,14 @@ func (a *agent) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		argv := append([]string{exe}, os.Args[1:]...)
 		log.Printf("[self-update] %s → %s,exec 新二进制就地重启", agentVersion, version)
 		if err := syscall.Exec(exe, argv, os.Environ()); err != nil {
-			// exec 仅在失败时返回:旧映像继续运行,磁盘已是新版,下次重启即生效。
-			log.Printf("[self-update] exec 失败(继续运行旧映像,新版已落盘): %v", err)
+			// exec 仅在失败时返回(几乎不可能:新二进制已过 --selftest,而 selftest 同样靠 exec)。
+			// 当前进程仍是旧映像、继续运行;但磁盘已被换成未经此机实际运行验证的新版,若此时系统重启
+			// 会误用它。故把磁盘二进制回滚为已备份的旧版(<exe>.old),让下次重启回到已知可用状态。
+			if rerr := os.Rename(exe+".old", exe); rerr != nil {
+				log.Printf("[self-update] exec 失败且回滚磁盘二进制失败(磁盘仍为新版,重启前请人工核对): exec=%v rollback=%v", err, rerr)
+			} else {
+				log.Printf("[self-update] exec 失败,已把磁盘二进制回滚为旧版(继续运行旧映像): %v", err)
+			}
 		}
 	}()
 }

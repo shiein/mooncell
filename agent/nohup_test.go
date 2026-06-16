@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,11 +62,51 @@ func TestNohupLifecycle(t *testing.T) {
 	}
 }
 
-// TestNohupCommand 校验各类型命令拼装(executable 经引用,参数原样)。
+// TestNohupCommand 校验各类型命令拼装:executable 与每个参数都经 shell 引用,分词按 shell 词法。
 func TestNohupCommand(t *testing.T) {
 	cmd, err := nohupCommand(DeployConfig{Type: "native-binary", BinPath: "/srv/apps/x/app", Args: "--port 9000"})
-	if err != nil || cmd != `'/srv/apps/x/app' --port 9000` {
+	if err != nil || cmd != `'/srv/apps/x/app' '--port' '9000'` {
 		t.Fatalf("native-binary 命令拼装错误: %q err=%v", cmd, err)
+	}
+	// 注入防御:args 含 shell 元字符时,每个 token 被单引号包裹 → 元字符成字面参数,不被 sh -c 解释。
+	cmd, err = nohupCommand(DeployConfig{Type: "native-binary", BinPath: "/app", Args: `-a 1 ; rm -rf /`})
+	if err != nil || cmd != `'/app' '-a' '1' ';' 'rm' '-rf' '/'` {
+		t.Fatalf("注入防御:元字符未被引用隔离: %q err=%v", cmd, err)
+	}
+	// 引号分组:带空格的值用引号包成单个参数,引号被剥离。
+	cmd, err = nohupCommand(DeployConfig{Type: "java-jar", BinPath: "/x.jar", JvmArgs: `-Dname="a b"`, Args: ""})
+	if err != nil {
+		t.Skipf("java 不在 PATH,跳过 jvmArgs 引号分组用例: %v", err)
+	}
+	if !strings.Contains(cmd, `'-Dname=a b'`) || !strings.Contains(cmd, `-jar '/x.jar'`) {
+		t.Fatalf("jvmArgs 引号分组错误: %q", cmd)
+	}
+}
+
+// TestSplitArgs 校验 shell 词法分词:空白分隔、引号分组剥离、转义、空串。
+func TestSplitArgs(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{"--port 8080", []string{"--port", "8080"}},
+		{`--msg "a b" c`, []string{"--msg", "a b", "c"}},
+		{`'a b'c`, []string{"a bc"}},
+		{`x\ y`, []string{"x y"}},
+		{`a ; b`, []string{"a", ";", "b"}},
+	}
+	for _, c := range cases {
+		got := splitArgs(c.in)
+		if len(got) != len(c.want) {
+			t.Fatalf("splitArgs(%q) = %q, want %q", c.in, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Fatalf("splitArgs(%q)[%d] = %q, want %q", c.in, i, got[i], c.want[i])
+			}
+		}
 	}
 }
 
