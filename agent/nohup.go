@@ -186,7 +186,11 @@ func nohupLaunch(spec nohupSpec) (string, error) {
 		return "", fmt.Errorf("无法获取启动 PID: %q", pidStr)
 	}
 	if err := writeNohupState(spec.PidFile, pid); err != nil {
-		return "", fmt.Errorf("写 pidfile 失败: %w", err)
+		// pidfile 没落成 → nohupStop 将找不到这个进程而留孤儿(磁盘满/权限变/rename 失败时会发生)。
+		// 用刚拿到的 pid 主动收尾(带身份校验,几乎无复用窗口)。
+		st := nohupState{Pid: pid, StartTime: procStartTime(strconv.Itoa(pid))}
+		terminate(pid, func() bool { return stateAlive(st) })
+		return "", fmt.Errorf("写 pidfile 失败,已终止刚启动的进程: %w", err)
 	}
 	return pidStr, nil
 }
@@ -260,26 +264,35 @@ func nohupAlive(cfg DeployConfig) bool {
 	return ok && stateAlive(st)
 }
 
-// nohupStop 停止进程:身份校验通过才发信号(SIGTERM → 最多等 5s → SIGKILL);
-// 无记录 / 已退出 / PID 复用(stale)一律只清 pidfile,绝不对不属于自己的 PID 发信号。
-func nohupStop(cfg DeployConfig) {
-	defer os.Remove(nohupPidFile(cfg))
-	st, ok := readNohupState(cfg)
-	if !ok || !stateAlive(st) {
+// terminate 优雅终止 pid:SIGTERM → 最多等 5s → 仍在则 SIGKILL。每步都用 alive() 判定,
+// alive 必须带身份校验(stateAlive)——否则等待期间原进程退出、PID 被复用,会误杀新占用者。
+func terminate(pid int, alive func() bool) {
+	if !alive() {
 		return
 	}
-	p, err := os.FindProcess(st.Pid)
+	p, err := os.FindProcess(pid)
 	if err != nil {
 		return
 	}
 	p.Signal(syscall.SIGTERM)
 	for i := 0; i < 25; i++ {
-		if !pidRunning(st.Pid) {
-			return
+		if !alive() {
+			return // 原进程已退出(或 PID 已被复用为别的进程):停止等待,绝不强杀新占用者
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	p.Signal(syscall.SIGKILL)
+	if alive() {
+		p.Signal(syscall.SIGKILL)
+	}
+}
+
+// nohupStop 停止进程:身份校验通过才发信号;无记录 / 已退出 / PID 复用(stale)一律只清 pidfile,
+// 绝不对不属于自己的 PID 发信号。
+func nohupStop(cfg DeployConfig) {
+	defer os.Remove(nohupPidFile(cfg))
+	if st, ok := readNohupState(cfg); ok {
+		terminate(st.Pid, func() bool { return stateAlive(st) })
+	}
 }
 
 // runDeployNohup nohup runner 的进程类部署闭环:备份 → 停 → 原子替换 → nohup 启动 → 健康检查;失败回滚。
