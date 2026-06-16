@@ -130,7 +130,7 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 	add("切换软链", true, cfg.BinPath+" → "+releaseDir)
 	// reload 失败即视为还原失败,触发回滚——不再丢弃错误、不再无条件标成功。
 	reloadOK := true
-	if ran, log, err := runReload(cfg.ReloadCmd); ran {
+	if ran, log, err := runReload(cfg.ReloadCmd, cfg.ReloadArg); ran {
 		reloadOK = err == nil
 		add("reload", reloadOK, log)
 	}
@@ -160,7 +160,7 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 		res.Result = "failed"
 		return res
 	}
-	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
+	_, rloadLog, rerr := runReload(cfg.ReloadCmd, cfg.ReloadArg)
 	if rloadLog != "" {
 		rlogs = append(rlogs, rloadLog)
 	}

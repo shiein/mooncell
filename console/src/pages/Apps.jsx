@@ -38,8 +38,8 @@ const APP_SCHEMAS = {
   "static-nginx": [
     { key: "path", label: "目标目录", ph: "/data/web/my-app", mono: true },
     { key: "keepRoot", label: "整目录替换(否则仅 dist 内容)", type: "switch", def: true },
-    { key: "reload", label: "部署后 nginx -s reload", type: "switch", def: false },
-    { key: "nginxBin", label: "nginx 二进制路径", ph: "/usr/sbin/nginx", mono: true },
+    { key: "reload", label: "部署后触发 reload 钩子", type: "switch", def: false },
+    { key: "nginxContainer", label: "nginx 容器名(Docker 部署时填,留空=宿主机 nginx)", ph: "nginx-proxy", mono: true, hint: "填了则 reload 改为 docker restart <容器名>;留空走宿主机 nginx -s reload" },
   ],
 };
 
@@ -112,6 +112,7 @@ function CreateAppDialog({ open, onClose }) {
       jvm: form.jvm || form.args || "", user: form.user || "appuser",
       agentId: form.agentId || "default",
       reload: !!form.reload,
+      nginxContainer: (form.nginxContainer || "").trim(),
       backupKeep: +(form.backupKeep || 5), lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
       artifactName: id, extraFiles: [],
     });

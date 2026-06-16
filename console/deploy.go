@@ -10,8 +10,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// nginxContainerRe 与 Agent 端 containerNameRe 保持一致:Docker 容器名/ID 形态校验,守住「reload 参数只追加合法标识符」。
+var nginxContainerRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 // 部署/还原:前端只提交 制品 + version + releaseId,不再组装 Agent 配置。
 // Console 据已保存的类型化应用配置(entity kind=app)在服务端生成 Agent 请求,
@@ -19,12 +23,12 @@ import (
 
 // appTypeRunners 是各部署类型允许的 Runner(服务端校验用,须与前端 DEPLOY_TYPES 对齐)。
 var appTypeRunners = map[string][]string{
-	"native-binary":    {"systemd", "pm2"},
-	"java-jar":     {"systemd", "pm2"},
-	"python":       {"systemd", "pm2"},
-	"node":         {"pm2", "systemd"},
-	"static-nginx": {"软链", "无进程"},
-	"tomcat-war":   {"tomcat"},
+	"native-binary": {"systemd", "pm2"},
+	"java-jar":      {"systemd", "pm2"},
+	"python":        {"systemd", "pm2"},
+	"node":          {"pm2", "systemd"},
+	"static-nginx":  {"软链", "无进程"},
+	"tomcat-war":    {"tomcat"},
 }
 
 func strInSlice(s string, ss []string) bool {
@@ -64,6 +68,10 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 	}
 	if a.resolveAgentByID(app.AgentID) == nil {
 		return "目标 Agent 不存在: " + app.AgentID, false
+	}
+	// static-nginx 的 Docker 容器名(可选):非空则须为合法容器名,与 Agent 端 reload 校验一致(fail-closed)。
+	if c := strings.TrimSpace(app.NginxContainer); c != "" && !nginxContainerRe.MatchString(c) {
+		return "nginx 容器名非法(仅字母数字与 _ . -,首字符字母数字): " + c, false
 	}
 	for _, p := range app.LogPaths {
 		if strings.TrimSpace(p) == "" {
@@ -106,21 +114,22 @@ func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
 
 // appConfig 是应用实体里部署相关的字段(前端 addApp 落库的形态)。
 type appConfig struct {
-	Name       string            `json:"name"`
-	Type       string            `json:"type"`
-	Runner     string            `json:"runner"`
-	Path       string            `json:"path"`
-	Workdir    string            `json:"workdir"`
-	Health     string            `json:"health"`
-	Port       int               `json:"port"` // 应用端口,用于"端口探活"健康检查
-	Interp     string            `json:"interp"`
-	Jvm        string            `json:"jvm"`
-	User       string            `json:"user"`
-	AgentID    string            `json:"agentId"`
-	BackupKeep float64           `json:"backupKeep"`
-	Reload     bool              `json:"reload"`   // static/tomcat:部署后是否触发 reload 钩子
-	LogPaths   []string          `json:"logPaths"` // 该应用声明的日志文件路径(文件 tail 授权白名单)
-	Env        map[string]string `json:"env"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type"`
+	Runner         string            `json:"runner"`
+	Path           string            `json:"path"`
+	Workdir        string            `json:"workdir"`
+	Health         string            `json:"health"`
+	Port           int               `json:"port"` // 应用端口,用于"端口探活"健康检查
+	Interp         string            `json:"interp"`
+	Jvm            string            `json:"jvm"`
+	User           string            `json:"user"`
+	AgentID        string            `json:"agentId"`
+	BackupKeep     float64           `json:"backupKeep"`
+	Reload         bool              `json:"reload"`         // static/tomcat:部署后是否触发 reload 钩子
+	NginxContainer string            `json:"nginxContainer"` // static-nginx:nginx 为 Docker 部署时的容器名(空=宿主机 nginx,走 nginx -s reload)
+	LogPaths       []string          `json:"logPaths"`       // 该应用声明的日志文件路径(文件 tail 授权白名单)
+	Env            map[string]string `json:"env"`
 }
 
 // agentDeployConfig 是 Console 下发给 Agent 的配置形态。fingerprint 也从同一结构派生,
@@ -142,21 +151,26 @@ type agentDeployConfig struct {
 	ExpectedSha256 string            `json:"expectedSha256"`
 	BackupKeep     int               `json:"backupKeep"`
 	ReloadCmd      string            `json:"reloadCmd,omitempty"`
+	ReloadArg      string            `json:"reloadArg,omitempty"` // reload 动作的受校验参数(如 nginx 容器名)
 }
 
-// reloadActionFor 按应用类型把「是否 reload」表意映射到 Agent 白名单内的固定动作名。
-// 前端只能开关 bool,动作名由服务端按类型决定,前端无法注入任意动作;Agent 侧另有白名单二次校验。
-func reloadActionFor(typ string, reload bool) string {
-	if !reload {
-		return ""
+// reloadActionFor 按应用配置把「是否 reload」表意映射到 Agent 白名单内的固定动作名(+ 可选受校验参数)。
+// 前端只能开关 bool / 填容器名,动作名由服务端按类型决定,前端无法注入任意动作;Agent 侧另有白名单 + 容器名二次校验。
+// static-nginx 配了容器名 → 走 docker restart <容器名>(nginx 为 Docker 部署);否则宿主机 nginx -s reload。
+func reloadActionFor(app appConfig) (cmd, arg string) {
+	if !app.Reload {
+		return "", ""
 	}
-	switch typ {
+	switch app.Type {
 	case "static-nginx":
-		return "nginx-reload"
+		if c := strings.TrimSpace(app.NginxContainer); c != "" {
+			return "nginx-docker-restart", c
+		}
+		return "nginx-reload", ""
 	case "tomcat-war":
-		return "tomcat-restart"
+		return "tomcat-restart", ""
 	}
-	return ""
+	return "", ""
 }
 
 // appBinPath 取应用落盘路径首段(static 的 path 可能含 " → release" 后缀)。
@@ -189,12 +203,13 @@ func deployFingerprint(app appConfig, sha, version, fpExtra string) string {
 		ExpectedSha256 string            `json:"expectedSha256"`
 		BackupKeep     int               `json:"backupKeep"`
 		ReloadCmd      string            `json:"reloadCmd"`
+		ReloadArg      string            `json:"reloadArg"`
 		Extra          string            `json:"extra"`
 	}{
 		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
 		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
 		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
-		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, Extra: fpExtra,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Extra: fpExtra,
 	}
 	b, _ := json.Marshal(payload)
 	return "v2:" + string(b)
@@ -211,9 +226,10 @@ func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID st
 		Health: healthSpec(app), Version: version, ReleaseID: releaseID,
 		ExpectedSha256: expectedSha256, BackupKeep: keep,
 	}
-	// static/tomcat 的部署后 reload 钩子:服务端按类型映射白名单动作名(空则不下发)。
-	if rc := reloadActionFor(app.Type, app.Reload); rc != "" {
+	// static/tomcat 的部署后 reload 钩子:服务端按类型映射白名单动作名(+ 可选容器名,空则不下发)。
+	if rc, ra := reloadActionFor(app); rc != "" {
 		cfg.ReloadCmd = rc
+		cfg.ReloadArg = ra
 	}
 	// jvm 字段按类型映射:java 是 JVM 参数,其余是启动参数。
 	if app.Type == "java-jar" {

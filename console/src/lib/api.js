@@ -157,8 +157,8 @@ async function precheckApp(query) {
 
 // 拉某 Agent 的能力清单(?agent 路由到指定 Agent;空/default 用内置)。失败返回 null。
 const getAgentCapabilities = (agentId) => agentGet(qa('/api/agent/capabilities', agentId));
-const getAgentSystem = () => agentGet('/api/agent/system');
-const getAgentPing = () => agentGet('/api/agent/ping');
+const getAgentSystem = (agentId) => agentGet(qa('/api/agent/system', agentId));
+const getAgentPing = (agentId) => agentGet(qa('/api/agent/ping', agentId));
 
 // ---------- 业务数据持久化(SQLite 文档存储)----------
 // hydrateData:首启用 seed 种子初始化,始终返回库中当前全部数据;失败返回 null(前端回退 mock)。

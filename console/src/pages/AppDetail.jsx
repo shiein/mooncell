@@ -448,8 +448,16 @@ function ConfigTab({ app }) {
           <Field label="部署后 reload 钩子(白名单动作,服务端按类型映射)">
             <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
               <Switch on={!!draft.reload} onChange={(v) => set("reload", v)} />
-              {app.type === "static-nginx" ? "部署后 nginx -s reload" : "部署后 systemctl restart tomcat"}
+              {app.type === "static-nginx"
+                ? ((draft.nginxContainer || "").trim() ? `部署后 docker restart ${draft.nginxContainer.trim()}` : "部署后 nginx -s reload")
+                : "部署后 systemctl restart tomcat"}
             </label>
+          </Field>
+        ) : null}
+        {app.type === "static-nginx" ? (
+          <Field label="nginx 容器名(Docker 部署时填,留空=宿主机 nginx)" hint="填了则 reload 改为 docker restart <容器名>;仅字母数字与 _ . -">
+            <input className="input mono" style={{ fontSize: 12.5 }} disabled={!edit} placeholder="nginx-proxy"
+              value={draft.nginxContainer || ""} onChange={(e) => set("nginxContainer", e.target.value)} />
           </Field>
         ) : null}
         <Field label="日志文件路径(每行一条,在线 tail 需具体文件,不支持通配/~)">

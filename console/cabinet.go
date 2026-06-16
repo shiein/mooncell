@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +31,39 @@ func cleanupMultipart(r *http.Request) {
 // 上传/删除限 write 角色;按 id 下载需登录(任意角色);公开文件可凭提取码免登录下载。
 
 const cabinetExpiryDays = 7
+
+// allowedExpiryDays 是匿名/登录上传可选的过期天数白名单;白名单外一律回退默认 7 天(fail-safe)。
+var allowedExpiryDays = map[int]bool{1: true, 7: true, 30: true}
+
+// parseExpiryDays 解析上传表单里的 expireDays;非白名单值回退默认 7 天。
+func parseExpiryDays(s string) int {
+	switch strings.TrimSpace(s) {
+	case "1":
+		return 1
+	case "30":
+		return 30
+	default:
+		return cabinetExpiryDays
+	}
+}
+
+// clientIP 取请求来源 IP:优先反代透传头(X-Forwarded-For 首段 / X-Real-IP),否则 RemoteAddr。
+// 内网工具,IP 仅作上传者标识(审计),不作鉴权依据,故接受反代头即可。
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		return xr
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
 
 // cabinetMaxBytes 是单次上传请求体硬上限(200MB)。ParseMultipartForm 的参数只是内存阈值,
 // 超出会落临时盘且 io.Copy 不限大小;必须用 MaxBytesReader 在传输层截断并回 413。
@@ -94,9 +128,10 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 	}
 
 	now := time.Now()
+	expiryDays := parseExpiryDays(r.FormValue("expireDays")) // 表单可选 1/7/30 天,缺省/非法回退 7
 	meta := map[string]any{
 		"id": id, "name": hdr.Filename, "size": n, "uploader": uploader,
-		"time": now.UnixMilli(), "expires": now.Add(cabinetExpiryDays * 24 * time.Hour).UnixMilli(),
+		"time": now.UnixMilli(), "expires": now.Add(time.Duration(expiryDays) * 24 * time.Hour).UnixMilli(),
 		"code": genCode(), "public": public, "downloads": 0,
 	}
 	b, _ := json.Marshal(meta)
@@ -116,13 +151,13 @@ func (a *api) uploadCabinet(w http.ResponseWriter, r *http.Request) {
 }
 
 // uploadCabinetAnon 处理 POST /api/pub/cabinet(免登录,需 cabinet.anon_upload=true):
-// 匿名上传,文件即公开(凭返回的提取码下载)。
+// 匿名上传,文件即公开(凭返回的提取码下载);上传者记为来源 IP,供登录用户在列表追溯。
 func (a *api) uploadCabinetAnon(w http.ResponseWriter, r *http.Request) {
 	if !a.anonUpload {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "匿名上传未开启"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "匿名上传未开启(管理员需在 config.toml 设 cabinet.anon_upload=true)"})
 		return
 	}
-	a.storeCabinetFile(w, r, "匿名", true)
+	a.storeCabinetFile(w, r, clientIP(r)+"(匿名)", true)
 }
 
 // cleanupExpiredCabinet 删除已过期的文件柜条目(元数据 + 落盘字节);由后台定时任务调用。
@@ -183,6 +218,24 @@ func (a *api) downloadByCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.serveFile(w, meta)
+}
+
+// pubfileMeta 处理 GET /api/pubfile/{code}/meta(免登录):仅回元数据(名/大小/过期),不回文件体、不计下载数。
+// 供 /drop 页凭码校验并展示文件信息后再触发下载,避免「为校验而整文件下载一遍」。
+func (a *api) pubfileMeta(w http.ResponseWriter, r *http.Request) {
+	code := r.PathValue("code")
+	meta, ok := a.store.cabinetByCode(code)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "提取码无效"})
+		return
+	}
+	if pub, _ := meta["public"].(bool); !pub {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "该文件未公开,请登录后下载"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name": meta["name"], "size": meta["size"], "expires": meta["expires"], "code": meta["code"],
+	})
 }
 
 // deleteCabinet 处理 DELETE /api/cabinet/{id}(write):删元数据 + 落盘文件。

@@ -72,6 +72,7 @@ type DeployConfig struct {
 	ExpectedSha256 string            `json:"expectedSha256"` // 非空则部署前强校验制品 sha256,不匹配直接失败
 	BackupKeep     int               `json:"backupKeep"`
 	ReloadCmd      string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
+	ReloadArg      string            `json:"reloadArg"` // 部分 reload 动作的受校验参数(如 docker 部署的 nginx 容器名);仅作为 argv 末位追加,不经 shell
 }
 
 // Step 是流水线一步的执行记录;Result 为整体结果。
@@ -628,23 +629,44 @@ func processHealthy(healthURL string, alive bool, logs *[]string) bool {
 	return true
 }
 
-// reloadActions 是 static/tomcat 部署后可选 reload 钩子的白名单:动作名 → 固定 argv(不经 shell)。
-// 杜绝把前端/Console 下发的字符串当 shell 执行(任意命令执行)。
-var reloadActions = map[string][]string{
-	"nginx-reload":   {"nginx", "-s", "reload"},
-	"nginx-restart":  {"systemctl", "reload", "nginx"},
-	"tomcat-restart": {"systemctl", "restart", "tomcat"},
+// reloadAction 是一条 reload 白名单项:固定 argv 前缀 + 是否需要追加一个受校验参数。
+type reloadAction struct {
+	argv    []string // 固定命令前缀(不经 shell)
+	needArg bool     // true 时把校验过的 ReloadArg 作为 argv 末位追加(如容器名)
 }
 
+// reloadActions 是 static/tomcat 部署后可选 reload 钩子的白名单:动作名 → 固定 argv(不经 shell)。
+// 杜绝把前端/Console 下发的字符串当 shell 执行(任意命令执行)。needArg 项仅允许追加一个
+// 严格校验过的参数(容器名),仍是 exec argv 直传,不拼 shell、无注入面。
+var reloadActions = map[string]reloadAction{
+	"nginx-reload":         {argv: []string{"nginx", "-s", "reload"}},
+	"nginx-restart":        {argv: []string{"systemctl", "reload", "nginx"}},
+	"tomcat-restart":       {argv: []string{"systemctl", "restart", "tomcat"}},
+	"nginx-docker-restart": {argv: []string{"docker", "restart"}, needArg: true}, // + 校验过的容器名
+}
+
+// containerNameRe 限定 Docker 容器名/ID:首字符字母数字,其余允许字母数字与 _ . -(与 Docker 命名规则一致)。
+// 守住「needArg 动作只追加合法标识符」的红线——杜绝把 "; rm -rf /" 这类当参数(虽不经 shell,仍拒绝越界值)。
+var containerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
+
 // runReload 执行白名单内的 reload 动作。空动作跳过(ran=false);白名单外动作拒绝执行并报错。
-func runReload(action string) (ran bool, log string, err error) {
+// 需参数的动作(如 nginx-docker-restart)在追加前严格校验 arg,非法即拒绝执行。
+func runReload(action, arg string) (ran bool, log string, err error) {
 	action = strings.TrimSpace(action)
 	if action == "" {
 		return false, "", nil
 	}
-	argv, ok := reloadActions[action]
+	spec, ok := reloadActions[action]
 	if !ok {
 		return true, "拒绝执行白名单外的 reload 动作: " + action, fmt.Errorf("disallowed reload action %q", action)
+	}
+	argv := spec.argv
+	if spec.needArg {
+		arg = strings.TrimSpace(arg)
+		if !containerNameRe.MatchString(arg) {
+			return true, "非法容器名,拒绝执行 reload: " + arg, fmt.Errorf("invalid container name %q for action %q", arg, action)
+		}
+		argv = append(append([]string{}, argv...), arg) // 拷贝后追加,不污染白名单切片
 	}
 	out, e := exec.Command(argv[0], argv[1:]...).CombinedOutput()
 	return true, strings.Join(argv, " ") + " → " + strings.TrimSpace(string(out)), e
@@ -702,12 +724,13 @@ func releaseFingerprint(cfg DeployConfig, fpExtra string) string {
 		ExpectedSha256 string            `json:"expectedSha256"`
 		BackupKeep     int               `json:"backupKeep"`
 		ReloadCmd      string            `json:"reloadCmd"`
+		ReloadArg      string            `json:"reloadArg"`
 		Extra          string            `json:"extra"`
 	}{
 		Name: cfg.Name, Type: cfg.Type, BinPath: cfg.BinPath, Workdir: cfg.Workdir, Runner: cfg.Runner,
 		Interpreter: cfg.Interpreter, Args: cfg.Args, JvmArgs: cfg.JvmArgs, Env: cfg.Env, User: cfg.User,
 		Health: cfg.Health, Version: cfg.Version, ExpectedSha256: cfg.ExpectedSha256,
-		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, Extra: fpExtra,
+		BackupKeep: cfg.BackupKeep, ReloadCmd: cfg.ReloadCmd, ReloadArg: cfg.ReloadArg, Extra: fpExtra,
 	}
 	b, _ := json.Marshal(payload)
 	return "v2:" + string(b)
@@ -1264,7 +1287,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	// 5. 可选 reload 钩子(白名单动作,如 nginx-reload):失败即视为部署失败,触发回滚——
 	//    reload 没成功就意味着新版本没真正生效,不能报成功。
 	reloadOK := true
-	if ran, log, err := runReload(cfg.ReloadCmd); ran {
+	if ran, log, err := runReload(cfg.ReloadCmd, cfg.ReloadArg); ran {
 		reloadOK = err == nil
 		add("reload", reloadOK, log)
 	}
@@ -1297,7 +1320,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 		return res
 	}
 	// 回滚的 reload 同样可能失败——失败则旧版本未确认重新生效,回滚不算成功。
-	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
+	_, rloadLog, rerr := runReload(cfg.ReloadCmd, cfg.ReloadArg)
 	if rloadLog != "" {
 		rlog = append(rlog, rloadLog)
 	}
@@ -1396,7 +1419,7 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 
 	// 4. 可选 reload 钩子(白名单动作,如 tomcat-restart / nginx-reload):失败即视为部署失败,回滚 WAR。
 	reloadOK := true
-	if ran, log, err := runReload(cfg.ReloadCmd); ran {
+	if ran, log, err := runReload(cfg.ReloadCmd, cfg.ReloadArg); ran {
 		reloadOK = err == nil
 		add("reload", reloadOK, log)
 	}
@@ -1430,7 +1453,7 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	if exploded != cfg.BinPath {
 		os.RemoveAll(exploded)
 	}
-	_, rloadLog, rerr := runReload(cfg.ReloadCmd)
+	_, rloadLog, rerr := runReload(cfg.ReloadCmd, cfg.ReloadArg)
 	if rloadLog != "" {
 		rlog = append(rlog, rloadLog)
 	}
@@ -1455,6 +1478,7 @@ func fileExists(p string) bool {
 //   - 若是 ELF:e_machine 须与本机架构一致(防"为别的架构/平台编译"——最常见的部署事故);
 //   - 若是 Mach-O(macOS)/PE(Windows)可执行:给出清晰的跨平台错误;
 //   - 脚本(shebang)/未知格式:放行,交给 systemd/pm2 启动 + 健康检查兜底。
+//
 // 返回错误信息(空串=通过)。不限定 Go——Rust/C++/Zig 等为目标机编译的静态/自包含二进制同样适用。
 func checkNativeBinary(path string) string {
 	f, err := os.Open(path)

@@ -87,19 +87,30 @@ func TestWritePm2EcoJavaArgsOrder(t *testing.T) {
 	}
 }
 
-// runReload:白名单外动作必须被拒绝且不执行;空动作跳过。
+// runReload:白名单外动作必须被拒绝且不执行;空动作跳过;需参数动作必须严格校验容器名。
 func TestRunReloadWhitelist(t *testing.T) {
-	if ran, _, err := runReload(""); ran || err != nil {
+	if ran, _, err := runReload("", ""); ran || err != nil {
 		t.Fatalf("空动作应跳过: ran=%v err=%v", ran, err)
 	}
 	// 任意 shell 串(注入意图)必须被白名单拒绝,而不是当 sh -c 执行
-	ran, _, err := runReload("rm -rf / ; curl evil")
+	ran, _, err := runReload("rm -rf / ; curl evil", "")
 	if !ran || err == nil || !strings.Contains(err.Error(), "disallowed") {
 		t.Fatalf("白名单外动作应被拒绝: ran=%v err=%v", ran, err)
 	}
 	// 白名单内动作名应被识别(实际 exec 可能因环境无 nginx 失败,这里只验“被允许而非拒绝”)
-	if _, _, err := runReload("nginx-reload"); err != nil && strings.Contains(err.Error(), "disallowed") {
+	if _, _, err := runReload("nginx-reload", ""); err != nil && strings.Contains(err.Error(), "disallowed") {
 		t.Fatalf("白名单内动作不应被判为 disallowed")
+	}
+	// nginx-docker-restart:容器名非法(含注入字符)必须被拒绝,不进入 exec
+	for _, bad := range []string{"", "ng inx", "n;rm", "-evil", "a/b", "c$d"} {
+		if _, _, err := runReload("nginx-docker-restart", bad); err == nil || !strings.Contains(err.Error(), "invalid container name") {
+			t.Fatalf("非法容器名 %q 应被拒绝, got err=%v", bad, err)
+		}
+	}
+	// 合法容器名应被允许(exec 可能因无 docker 失败,只验非 invalid/disallowed)
+	if _, _, err := runReload("nginx-docker-restart", "nginx_proxy-1.0"); err != nil &&
+		(strings.Contains(err.Error(), "invalid container name") || strings.Contains(err.Error(), "disallowed")) {
+		t.Fatalf("合法容器名不应被判为非法: err=%v", err)
 	}
 }
 

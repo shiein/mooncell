@@ -91,8 +91,12 @@ func main() {
 	mux.HandleFunc("POST /api/cabinet", writeRoles(a.uploadCabinet))
 	mux.HandleFunc("GET /api/cabinet/{id}/download", a.requireAuth(a.downloadCabinet))
 	mux.HandleFunc("DELETE /api/cabinet/{id}", writeRoles(a.deleteCabinet))
-	mux.HandleFunc("GET /api/pubfile/{code}", a.downloadByCode) // 独立前缀,避免与 /api/cabinet/{id}/... 冲突
-	mux.HandleFunc("POST /api/pub/cabinet", a.uploadCabinetAnon) // 匿名上传(需 cabinet.anon_upload=true)
+	mux.HandleFunc("GET /api/pubfile/{code}", a.downloadByCode)   // 独立前缀,避免与 /api/cabinet/{id}/... 冲突
+	mux.HandleFunc("GET /api/pubfile/{code}/meta", a.pubfileMeta) // 凭码校验 + 文件信息(不计下载数),供 /drop 页用
+	mux.HandleFunc("POST /api/pub/cabinet", a.uploadCabinetAnon)  // 匿名上传(需 cabinet.anon_upload=true)
+
+	// 独立免登录投递页:极简自包含 HTML,只上传 + 凭码下载,无列表(列表仅登录后 SPA 可见)。
+	mux.HandleFunc("GET /drop", a.dropPage)
 
 	// 其余路径交给嵌入的前端静态资源(单页应用,无 URL 路由)。
 	sub, err := fs.Sub(distFS, "dist")

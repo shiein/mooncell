@@ -1,10 +1,10 @@
 // Mooncell — 总览(系统监控)/ 文件柜 / 审计日志
 import React from 'react';
 import { useMC, AGENT, genSeries, timeAgo, fmtTime, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
-import { Btn, Icon, Badge, Progress, Sparkline, Seg, Switch, CopyChip, EmptyState, Select, toast } from '../components/primitives.jsx';
+import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, EmptyState, Select, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
-import { useAgent } from '../lib/agent.js';
-import { getAgentPing, uploadCabinetFile } from '../lib/api.js';
+import { useAgents } from '../lib/agent.js';
+import { uploadCabinetFile } from '../lib/api.js';
 
 function StatCard({ label, value, unit, series, color, extra }) {
   return (
@@ -19,21 +19,20 @@ function StatCard({ label, value, unit, series, color, extra }) {
   );
 }
 
-function OverviewPage() {
+// AgentBlock — 单台 Agent 的分区块:资源水位(CPU/内存/磁盘)+ 能力清单 + 该机名下应用健康。
+// 每块自管 CPU/内存曲线:有真实读数则追加,离线/探测中维持模拟动画(纯前端 dev 也有动效)。
+function AgentBlock({ agent, apps }) {
   const store = useMC();
-  const { caps, system, online } = useAgent();
+  const { name, addr, system, caps, online } = agent;
   const [cpuS, setCpuS] = React.useState(() => genSeries(AGENT.cpu, 9));
   const [memS, setMemS] = React.useState(() => genSeries(AGENT.mem, 4));
-  const [testing, setTesting] = React.useState(false);
 
-  // 有真实读数:把 Agent 上报值追加进曲线
   React.useEffect(() => {
     if (!system) return;
     setCpuS((s) => [...s.slice(1), Math.round(system.cpuPercent)]);
     setMemS((s) => [...s.slice(1), Math.round(system.memPercent)]);
   }, [system]);
 
-  // 离线 / 探测中:维持模拟动画,保证纯前端或 Agent 未运行时页面 1:1 有动效
   React.useEffect(() => {
     if (online) return;
     const iv = setInterval(() => {
@@ -44,33 +43,32 @@ function OverviewPage() {
   }, [online]);
 
   const cpu = cpuS[cpuS.length - 1], mem = memS[memS.length - 1];
-  const d = AGENT.diskDetail;
   const disk = system ? Math.round(system.diskPercent) : AGENT.disk;
-  const diskUsed = system ? system.diskUsedGB : d.used;
-  const diskTotal = system ? system.diskTotalGB : d.total;
+  const diskUsed = system ? system.diskUsedGB : AGENT.diskDetail.used;
+  const diskTotal = system ? system.diskTotalGB : AGENT.diskDetail.total;
   const memLabel = system
     ? `${(system.memUsedMB / 1024).toFixed(1)} GB / ${Math.round(system.memTotalMB / 1024)} GB`
-    : "15.8 GB / 32 GB";
-  const failedApps = store.apps.filter((a) => a.status === "failed");
-
-  const testConn = async () => {
-    setTesting(true);
-    const ping = await getAgentPing();
-    setTesting(false);
-    if (ping) toast(`Agent 连通正常 · ${ping.agent} · ${ping.os} · 运行 ${Math.floor((ping.uptime || 0) / 60)} 分钟`);
-    else toast("Agent 不可达 · 请检查 Agent 是否运行、token 是否与 Console 配置一致", { tone: "error", icon: "alert" });
-  };
+    : "—";
+  const failed = apps.filter((a) => a.status === "failed");
+  const running = apps.filter((a) => a.status === "running" || a.status === "static").length;
+  const stopped = apps.filter((a) => a.status === "stopped").length;
 
   return (
-    <div>
-      <PageHead title="总览 Overview" desc={`${AGENT.name} · ${AGENT.host} · ${AGENT.os}`}
-        actions={<Btn icon="zap" disabled={testing} onClick={testConn}>{testing ? "测试中…" : "连通性测试"}</Btn>} />
+    <div className="card card-pad" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+        <Icon name="server" size={15} style={{ color: "var(--primary)" }} />
+        <span style={{ fontSize: 14, fontWeight: 700 }}>{name}</span>
+        {addr ? <span className="mono" style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{addr}</span> : null}
+        {online === false ? <Badge tone="error" dot style={{ marginLeft: "auto" }}>离线 · 显示缓存</Badge>
+          : online ? <Badge tone="success" dot style={{ marginLeft: "auto" }}>在线</Badge>
+            : <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted-fg)" }}>探测中…</span>}
+      </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
         <StatCard label="CPU" value={cpu} unit="%" series={cpuS} color="var(--info)" />
         <StatCard label="内存" value={mem} unit="%" series={memS} color="var(--cyan)"
           extra={<div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{memLabel}</div>} />
-        <div className="card card-pad" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div className="card card-pad" style={{ display: "flex", flexDirection: "column", gap: 8, boxShadow: "none" }}>
           <div style={{ display: "flex", alignItems: "center" }}>
             <span style={{ fontSize: 12.5, color: "var(--muted-fg)", fontWeight: 500 }}>磁盘水位</span>
             {disk > 85 ? <Badge tone="error" style={{ marginLeft: "auto" }}>禁止部署</Badge> :
@@ -78,67 +76,101 @@ function OverviewPage() {
           </div>
           <div className="stat-num">{disk}<span style={{ fontSize: 14, color: "var(--muted-fg)", fontWeight: 500 }}> % · {diskUsed}/{diskTotal} GB</span></div>
           <Progress value={disk} height={7} color={disk > 85 ? "var(--error)" : disk > 70 ? "var(--warn)" : "var(--success)"} />
-          <div style={{ display: "flex", gap: 12, fontSize: 11.5, color: "var(--muted-fg)", whiteSpace: "nowrap" }}>
-            <span>备份 {d.backups} GB</span><span>文件柜 {d.cabinet} GB</span><span>日志 {d.logs} GB</span>
-          </div>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "5fr 4fr", gap: 14 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {/* Agent 能力清单 */}
-          <div className="card card-pad">
-            <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
-              <h4 style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 7 }}><Icon name="server" size={14} style={{ color: "var(--primary)" }} />Agent 能力清单</h4>
-              {online === false
-                ? <Badge tone="error" dot style={{ marginLeft: "auto" }}>Agent 离线 · 显示缓存</Badge>
-                : <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted-fg)" }}>启动自检上报 · 前端按能力过滤可选 Runner</span>}
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-              {caps.map((c) => (
-                <div key={c.key} className="card" style={{ padding: "9px 12px", boxShadow: "none", background: c.ok ? "var(--bg)" : "var(--muted)", opacity: c.ok ? 1 : .6 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600 }}>
-                    <Icon name={c.ok ? "check" : "x"} size={12} style={{ color: c.ok ? "var(--success)" : "var(--muted-fg)" }} />{c.label}
-                  </div>
-                  <div className="mono" style={{ fontSize: 10.5, color: "var(--muted-fg)", marginTop: 2 }}>{c.ver}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        {/* 能力清单 */}
+        <div>
+          <div style={{ fontSize: 12.5, color: "var(--muted-fg)", fontWeight: 600, marginBottom: 8 }}>能力清单</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+            {caps.map((c) => (
+              <div key={c.key} className="card" style={{ padding: "6px 9px", boxShadow: "none", background: c.ok ? "var(--bg)" : "var(--muted)", opacity: c.ok ? 1 : .55 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600 }}>
+                  <Icon name={c.ok ? "check" : "x"} size={11} style={{ color: c.ok ? "var(--success)" : "var(--muted-fg)" }} />{c.label}
                 </div>
-              ))}
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "6px 16px", fontSize: 12.5, marginTop: 14, color: "var(--fg-secondary)" }}>
-              <span style={{ color: "var(--muted-fg)" }}>运行时长</span><span className="mono" style={{ fontSize: 12 }}>{AGENT.uptime}</span>
-              <span style={{ color: "var(--muted-fg)" }}>Token</span><span className="mono" style={{ fontSize: 12 }}>{AGENT.token}</span>
-              <span style={{ color: "var(--muted-fg)" }}>安全边界</span><span>仅类型化 API · 无任意 shell 接口 · 钩子白名单</span>
-            </div>
-          </div>
-
-          {/* 应用健康 */}
-          <div className="card card-pad">
-            <h4 style={{ fontSize: 13.5, marginBottom: 12, display: "flex", alignItems: "center", gap: 7 }}><Icon name="box" size={14} style={{ color: "var(--primary)" }} />应用健康</h4>
-            <div style={{ display: "flex", gap: 18, marginBottom: failedApps.length ? 12 : 0 }}>
-              {[["运行中", store.apps.filter((a) => a.status === "running" || a.status === "static").length, "var(--success)"],
-                ["异常", failedApps.length, "var(--error)"],
-                ["已停止", store.apps.filter((a) => a.status === "stopped").length, "var(--muted-fg)"]].map(([l, n, c]) => (
-                <div key={l}>
-                  <div className="stat-num" style={{ fontSize: 22, color: c }}>{n}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{l}</div>
-                </div>
-              ))}
-            </div>
-            {failedApps.map((a) => (
-              <button key={a.id} className="card" onClick={() => store.nav("app-detail", { appId: a.id })} style={{
-                width: "100%", padding: "10px 13px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer",
-                font: "inherit", textAlign: "left", background: "var(--error-soft)", borderColor: "transparent", boxShadow: "none",
-              }}>
-                <Icon name="alert" size={14} style={{ color: "var(--error)" }} />
-                <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--error)" }}>{a.name}</span>
-                <span style={{ fontSize: 11.5, color: "var(--error)", opacity: .8 }}>健康检查失败 · 已自动回滚</span>
-                <Icon name="chevronR" size={13} style={{ color: "var(--error)", marginLeft: "auto" }} />
-              </button>
+                <div className="mono" style={{ fontSize: 10, color: "var(--muted-fg)" }}>{c.ver}</div>
+              </div>
             ))}
           </div>
         </div>
 
-        {/* 最近动态 */}
+        {/* 该 Agent 名下应用健康 */}
+        <div>
+          <div style={{ fontSize: 12.5, color: "var(--muted-fg)", fontWeight: 600, marginBottom: 8 }}>应用健康 · {apps.length} 个</div>
+          {apps.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--muted-fg)", padding: "6px 0" }}>该 Agent 暂无应用</div>
+          ) : (
+            <React.Fragment>
+              <div style={{ display: "flex", gap: 18, marginBottom: failed.length ? 10 : 0 }}>
+                {[["运行中", running, "var(--success)"], ["异常", failed.length, "var(--error)"], ["已停止", stopped, "var(--muted-fg)"]].map(([l, n, c]) => (
+                  <div key={l}>
+                    <div className="stat-num" style={{ fontSize: 20, color: c }}>{n}</div>
+                    <div style={{ fontSize: 11, color: "var(--muted-fg)" }}>{l}</div>
+                  </div>
+                ))}
+              </div>
+              {failed.map((a) => (
+                <button key={a.id} className="card" onClick={() => store.nav("app-detail", { appId: a.id })} style={{
+                  width: "100%", padding: "8px 11px", marginTop: 6, display: "flex", alignItems: "center", gap: 9, cursor: "pointer",
+                  font: "inherit", textAlign: "left", background: "var(--error-soft)", borderColor: "transparent", boxShadow: "none",
+                }}>
+                  <Icon name="alert" size={13} style={{ color: "var(--error)" }} />
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "var(--error)" }}>{a.name}</span>
+                  <Icon name="chevronR" size={12} style={{ color: "var(--error)", marginLeft: "auto" }} />
+                </button>
+              ))}
+            </React.Fragment>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OverviewPage() {
+  const store = useMC();
+  const agents = useAgents();
+
+  // 应用按 agentId 归属(未设视为 default,与 appConfig/路由口径一致)。
+  const appsOf = (id) => store.apps.filter((a) => (a.agentId || "default") === id);
+  // 防丢:agentId 指向已移除/未知 Agent 的应用,单列一块,避免在分组视图里静默消失。
+  const knownIds = new Set((agents || []).map((a) => a.id));
+  const orphans = agents ? store.apps.filter((a) => !knownIds.has(a.agentId || "default")) : [];
+
+  return (
+    <div>
+      <PageHead title="总览 Overview" desc="按 Agent 分组 · 各机资源水位 / 能力清单 / 应用健康" />
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {agents === null ? (
+          <div className="card card-pad" style={{ fontSize: 13, color: "var(--muted-fg)" }}>正在加载 Agent 列表…</div>
+        ) : (
+          agents.map((ag) => <AgentBlock key={ag.id} agent={ag} apps={appsOf(ag.id)} />)
+        )}
+
+        {orphans.length > 0 ? (
+          <div className="card card-pad" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Icon name="alert" size={14} style={{ color: "var(--warn)" }} />
+              <span style={{ fontSize: 13.5, fontWeight: 700 }}>未知 / 已移除 Agent 名下应用</span>
+              <Badge tone="warn" style={{ marginLeft: "auto" }}>{orphans.length} 个</Badge>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted-fg)" }}>这些应用的 agentId 不在已注册 Agent 列表中,请重新指派或确认对应 Agent 是否被移除。</div>
+            {orphans.map((a) => (
+              <button key={a.id} className="card" onClick={() => store.nav("app-detail", { appId: a.id })} style={{
+                width: "100%", padding: "8px 11px", display: "flex", alignItems: "center", gap: 9, cursor: "pointer",
+                font: "inherit", textAlign: "left", background: "var(--bg)", boxShadow: "none",
+              }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600 }}>{a.name}</span>
+                <span className="mono" style={{ fontSize: 11, color: "var(--muted-fg)" }}>agentId={a.agentId || "default"}</span>
+                <Icon name="chevronR" size={12} style={{ color: "var(--muted-fg)", marginLeft: "auto" }} />
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {/* 最近动态(全局,跨 Agent) */}
         <div className="card card-pad">
           <h4 style={{ fontSize: 13.5, marginBottom: 14, display: "flex", alignItems: "center", gap: 7 }}><Icon name="clock" size={14} style={{ color: "var(--primary)" }} />最近动态</h4>
           <div style={{ display: "flex", flexDirection: "column" }}>
@@ -168,24 +200,22 @@ function OverviewPage() {
 }
 
 // ---------- 文件柜 ----------
+// 登录视图:看到所有上传(含匿名投递),可改公开/私有、删除。匿名投递走独立免登录页 /drop。
 function CabinetPage() {
   const store = useMC();
-  const [mode, setMode] = React.useState("login");
-  const [code, setCode] = React.useState("");
-  const [found, setFound] = React.useState(null);
   const [uploading, setUploading] = React.useState(false);
   const [prog, setProg] = React.useState(0);
   const fileRef = React.useRef(null);
   const canWrite = store.can("write");
 
-  // 真实上传:multipart 到 Console,落盘 + 返回元数据。
+  // 真实上传:multipart 到 Console,落盘 + 返回元数据(登录上传默认私有)。
   const realUpload = async (file) => {
     if (!file) return;
     setUploading(true); setProg(45);
     try {
-      const meta = await uploadCabinetFile(file, mode === "anon");
+      const meta = await uploadCabinetFile(file, false);
       setProg(100);
-      store.pushCabinetFile(meta, mode === "anon");
+      store.pushCabinetFile(meta, false);
     } catch (e) {
       toast(e.message || "上传失败", { tone: "error", icon: "alert" });
     } finally {
@@ -199,12 +229,6 @@ function CabinetPage() {
     const a = document.createElement("a");
     a.href = url; a.rel = "noopener";
     document.body.appendChild(a); a.click(); a.remove();
-  };
-
-  const lookup = () => {
-    const f = store.cabinet.find((x) => x.code.toLowerCase() === code.trim().toLowerCase());
-    if (f) setFound(f);
-    else { setFound(null); toast("提取码不存在或文件已过期", { tone: "error", icon: "alert" }); }
   };
 
   const zone = (
@@ -233,80 +257,39 @@ function CabinetPage() {
   return (
     <div>
       <PageHead title="文件柜 Cabinet" desc="内网临时文件中转 · 二进制存储 · 下载强制 attachment"
-        actions={<Seg value={mode} onChange={(v) => { setMode(v); setFound(null); }} options={[{ value: "login", label: "登录视图" }, { value: "anon", label: "匿名视图(演示)" }]} />} />
+        actions={<Btn icon="link" onClick={() => window.open("/drop", "_blank", "noopener")}>免登录投递页 · /drop</Btn>} />
 
-      {mode === "anon" ? (
-        <div style={{ maxWidth: 560, margin: "30px auto 0", display: "flex", flexDirection: "column", gap: 14 }}>
-          {zone}
-          <div className="card card-pad">
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>凭提取码下载</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input className="input mono" style={{ textTransform: "uppercase", letterSpacing: ".15em" }} placeholder="提取码,如 M3QP"
-                value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && lookup()} />
-              <Btn variant="primary" onClick={lookup}>提取</Btn>
-            </div>
-            {found ? (
-              <div className="card fade-up" style={{ marginTop: 12, padding: 13, display: "flex", alignItems: "center", gap: 10, background: "var(--bg)" }}>
-                <Icon name="fileText" size={17} style={{ color: "var(--primary)" }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{found.name}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{found.size} · {timeAgo(found.expires)}过期</div>
-                </div>
-                <Btn size="sm" variant="primary" icon="download" onClick={() => dl(found.public ? `/api/pubfile/${found.code}` : `/api/cabinet/${found.id}/download`)}>下载</Btn>
-              </div>
-            ) : null}
-            <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 10 }}>匿名用户只能凭提取码访问自己的文件,看不到完整列表。</div>
-          </div>
-          {store.cabinet.filter((f) => f.public).length > 0 ? (
-            <div className="card" style={{ overflow: "hidden" }}>
-              <div style={{ padding: "12px 16px 0", fontSize: 13, fontWeight: 600 }}>公开文件</div>
-              <table className="table">
-                <tbody>
-                  {store.cabinet.filter((f) => f.public).map((f) => (
-                    <tr key={f.id}>
-                      <td><span className="mono" style={{ fontSize: 12 }}>{f.name}</span></td>
-                      <td style={{ width: 90 }}><span className="mono" style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{f.size}</span></td>
-                      <td style={{ width: 80, textAlign: "right" }}><Btn size="sm" variant="ghost" icon="download" onClick={() => dl(`/api/pubfile/${f.code}`)}></Btn></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {zone}
+        <div className="card" style={{ overflow: "hidden" }}>
+          <table className="table">
+            <thead><tr><th>文件</th><th>大小</th><th>上传者</th><th>上传时间</th><th>过期</th><th>提取码</th><th>公开</th><th>下载</th><th style={{ width: 90 }}></th></tr></thead>
+            <tbody>
+              {store.cabinet.map((f) => (
+                <tr key={f.id}>
+                  <td><span className="mono" style={{ fontSize: 12, fontWeight: 500 }}>{f.name}</span></td>
+                  <td><span className="mono" style={{ fontSize: 12 }}>{f.size}</span></td>
+                  <td style={{ fontSize: 12.5 }}>{f.uploader}</td>
+                  <td><span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{timeAgo(f.time)}</span></td>
+                  <td><span style={{ fontSize: 12, color: f.expires - MC_NOW < 3 * MC_DAY ? "var(--warn)" : "var(--muted-fg)" }}>{timeAgo(f.expires)}</span></td>
+                  <td><CopyChip text={f.code} /></td>
+                  <td>{canWrite ? <Switch on={f.public} onChange={() => store.toggleCabinetPublic(f)} /> : <span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.public ? "公开" : "私有"}</span>}</td>
+                  <td><span className="mono" style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.downloads}</span></td>
+                  <td>
+                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      <Btn size="sm" variant="ghost" icon="download" title="下载" onClick={() => dl(`/api/cabinet/${f.id}/download`)}></Btn>
+                      <Btn size="sm" variant="ghost" icon="link" title={f.public ? "复制公开直链" : "复制下载链接"}
+                        onClick={() => { navigator.clipboard?.writeText(location.origin + (f.public ? `/api/pubfile/${f.code}` : `/api/cabinet/${f.id}/download`)); toast("直链已复制到剪贴板"); }}></Btn>
+                      {canWrite ? <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => store.deleteCabinetFile(f)}></Btn> : null}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {store.cabinet.length === 0 ? <EmptyState icon="folder" title="文件柜是空的" /> : null}
         </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {zone}
-          <div className="card" style={{ overflow: "hidden" }}>
-            <table className="table">
-              <thead><tr><th>文件</th><th>大小</th><th>上传者</th><th>上传时间</th><th>过期</th><th>提取码</th><th>公开</th><th>下载</th><th style={{ width: 90 }}></th></tr></thead>
-              <tbody>
-                {store.cabinet.map((f) => (
-                  <tr key={f.id}>
-                    <td><span className="mono" style={{ fontSize: 12, fontWeight: 500 }}>{f.name}</span></td>
-                    <td><span className="mono" style={{ fontSize: 12 }}>{f.size}</span></td>
-                    <td style={{ fontSize: 12.5 }}>{f.uploader}</td>
-                    <td><span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{timeAgo(f.time)}</span></td>
-                    <td><span style={{ fontSize: 12, color: f.expires - MC_NOW < 3 * MC_DAY ? "var(--warn)" : "var(--muted-fg)" }}>{timeAgo(f.expires)}</span></td>
-                    <td><CopyChip text={f.code} /></td>
-                    <td>{canWrite ? <Switch on={f.public} onChange={() => store.toggleCabinetPublic(f)} /> : <span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.public ? "公开" : "私有"}</span>}</td>
-                    <td><span className="mono" style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.downloads}</span></td>
-                    <td>
-                      <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                        <Btn size="sm" variant="ghost" icon="download" title="下载" onClick={() => dl(`/api/cabinet/${f.id}/download`)}></Btn>
-                        <Btn size="sm" variant="ghost" icon="link" title={f.public ? "复制公开直链" : "复制下载链接"}
-                          onClick={() => { navigator.clipboard?.writeText(location.origin + (f.public ? `/api/pubfile/${f.code}` : `/api/cabinet/${f.id}/download`)); toast("直链已复制到剪贴板"); }}></Btn>
-                        {canWrite ? <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => store.deleteCabinetFile(f)}></Btn> : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {store.cabinet.length === 0 ? <EmptyState icon="folder" title="文件柜是空的" /> : null}
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
