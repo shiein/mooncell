@@ -59,7 +59,15 @@ func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 	cmd.Stdout = pw
 	cmd.Stderr = pw // journalctl 的错误(无 unit / 权限)也透给前端,便于定位
 	if err := cmd.Start(); err != nil {
-		sse("line", map[string]any{"ts": time.Now().UnixMilli(), "level": "error", "text": "启动 journalctl 失败: " + err.Error()})
+		// 据 runner 给出准确的命令名:此前一律写 journalctl,pm2/nohup 失败时误导排查。
+		tool := "journalctl"
+		switch r.URL.Query().Get("runner") {
+		case "pm2":
+			tool = "pm2"
+		case "nohup":
+			tool = "tail"
+		}
+		sse("line", map[string]any{"ts": time.Now().UnixMilli(), "level": "error", "text": "启动 " + tool + " 失败: " + err.Error()})
 		return
 	}
 	go func() { cmd.Wait(); pw.Close() }() // 进程退出(含被 ctx 杀)后关闭管道,让 Scan 收尾
