@@ -8,7 +8,7 @@ port = 8787
 path = "mooncell.db"   # sqlite 文件路径,首次运行自动创建
 
 [session]
-ttl_hours = 168   # 会话有效期(小时),168 = 7 天
+ttl_hours = 1   # 闲置超时(小时):有动作滑动续期,闲置满该时长自动退出;配合 session cookie(关浏览器即清)
 
 [admin]
 # 仅在用户表为空时用于种入默认管理员(bcrypt 存储);

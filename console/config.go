@@ -60,6 +60,8 @@ type DatabaseConfig struct {
 	Path string `toml:"path"`
 }
 
+// SessionConfig.TTLHours 是会话「闲置超时」窗口(小时):每次有动作即滑动续期,
+// 闲置满该时长自动失效。配合 session cookie(关浏览器即清),无需 redis。
 type SessionConfig struct {
 	TTLHours int `toml:"ttl_hours"`
 }
@@ -78,7 +80,7 @@ func loadConfig(path string) *Config {
 	cfg := &Config{
 		Server:   ServerConfig{Addr: "127.0.0.1", Port: 8787},
 		Database: DatabaseConfig{Path: "mooncell.db"},
-		Session:  SessionConfig{TTLHours: 168}, // 7 天
+		Session:  SessionConfig{TTLHours: 1}, // 闲置 1 小时无动作自动退出(滑动续期)
 		Admin:    AdminConfig{Username: "admin", Password: defaultAdminPassword},
 		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
 		Cabinet:  CabinetConfig{Dir: "cabinet", MaxUploadMB: 200},

@@ -282,16 +282,22 @@ func (s *Store) createSession(username string) (string, time.Time) {
 	return token, exp
 }
 
-// userByToken 返回会话用户名;顺手清理过期会话。
+// userByToken 返回会话用户名;过期(闲置超 ttl)即清理,有效则滑动续期(idle timeout)。
 func (s *Store) userByToken(token string) (string, bool) {
 	var username string
 	var exp int64
 	if err := s.db.QueryRow("SELECT username, expires_at FROM sessions WHERE token = ?", token).Scan(&username, &exp); err != nil {
 		return "", false
 	}
-	if exp < time.Now().UnixMilli() {
+	now := time.Now()
+	if exp < now.UnixMilli() {
 		s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
 		return "", false
+	}
+	// 滑动续期:有动作就把过期推到 now+ttl(闲置满 ttl 才失效)。节流——距上次续期满 1 分钟才写,
+	// 避免前端轮询(如 10s 一次的状态刷新)导致每请求都写库。
+	if s.ttl > time.Minute && exp <= now.Add(s.ttl-time.Minute).UnixMilli() {
+		s.db.Exec("UPDATE sessions SET expires_at = ? WHERE token = ?", now.Add(s.ttl).UnixMilli(), token)
 	}
 	return username, true
 }

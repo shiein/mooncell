@@ -59,14 +59,15 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, exp := a.store.createSession(username)
+	token, _ := a.store.createSession(username)
+	// 不设 Expires/MaxAge → session cookie:浏览器关闭即清除,重开必须重新登录。
+	// 服务端另有闲置超时(滑动续期,见 userByToken),双重保证。
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Expires:  exp,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"user": username, "role": a.store.userRole(username)})
 }
