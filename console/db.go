@@ -282,24 +282,34 @@ func (s *Store) createSession(username string) (string, time.Time) {
 	return token, exp
 }
 
-// userByToken 返回会话用户名;过期(闲置超 ttl)即清理,有效则滑动续期(idle timeout)。
+// sessionAbsoluteMax 是会话绝对最长生命周期:即便持续有动作滑动续期,从登录起超过即失效、需重新登录(纵深防御)。
+const sessionAbsoluteMax = 12 * time.Hour
+
+// userByToken 仅校验会话有效性(闲置过期 / 超绝对寿命即清理并失败),不做续期。
+// 续期由 touchSession 单独负责,且只在"用户动作"请求上调用——避免后台轮询把闲置会话续命。
 func (s *Store) userByToken(token string) (string, bool) {
 	var username string
-	var exp int64
-	if err := s.db.QueryRow("SELECT username, expires_at FROM sessions WHERE token = ?", token).Scan(&username, &exp); err != nil {
+	var created, exp int64
+	if err := s.db.QueryRow("SELECT username, created_at, expires_at FROM sessions WHERE token = ?", token).Scan(&username, &created, &exp); err != nil {
 		return "", false
 	}
-	now := time.Now()
-	if exp < now.UnixMilli() {
+	now := time.Now().UnixMilli()
+	if exp < now || now-created > sessionAbsoluteMax.Milliseconds() {
 		s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
 		return "", false
 	}
-	// 滑动续期:有动作就把过期推到 now+ttl(闲置满 ttl 才失效)。节流——距上次续期满 1 分钟才写,
-	// 避免前端轮询(如 10s 一次的状态刷新)导致每请求都写库。
-	if s.ttl > time.Minute && exp <= now.Add(s.ttl-time.Minute).UnixMilli() {
-		s.db.Exec("UPDATE sessions SET expires_at = ? WHERE token = ?", now.Add(s.ttl).UnixMilli(), token)
-	}
 	return username, true
+}
+
+// touchSession 滑动续期(idle timeout):把过期推到 now+ttl。仅供"用户动作"请求调用。
+// 节流写在 SQL 里(距上次续期满 1 分钟才更新),避免高频请求写放大。
+func (s *Store) touchSession(token string) {
+	if s.ttl <= time.Minute {
+		return
+	}
+	now := time.Now()
+	s.db.Exec("UPDATE sessions SET expires_at = ? WHERE token = ? AND expires_at <= ?",
+		now.Add(s.ttl).UnixMilli(), token, now.Add(s.ttl-time.Minute).UnixMilli())
 }
 
 func (s *Store) deleteSession(token string) {

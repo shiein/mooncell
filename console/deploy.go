@@ -87,6 +87,22 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 			return "日志路径含空项", false
 		}
 	}
+	// 健康检查方式 fail-closed:显式选了方式就必须给出可用目标,杜绝"选了 HTTP/端口却因空值/0
+	// 被 healthSpec 静默降级为仅进程存活"——那样部署只看进程 active 即判成功,与用户预期不符。
+	switch app.HealthType {
+	case "", "进程存活", "无": // 空(历史数据回退旧推断)或显式不探活:无需目标
+	case "HTTP 200":
+		h := strings.TrimSpace(app.Health)
+		if !strings.HasPrefix(h, "http://") && !strings.HasPrefix(h, "https://") {
+			return "健康检查方式为 HTTP 200 时,目标须为 http(s):// URL", false
+		}
+	case "端口探活":
+		if app.Type == "static-nginx" || app.Port <= 0 {
+			return "健康检查方式为端口探活时,须填写有效端口", false
+		}
+	default:
+		return "未知健康检查方式: " + app.HealthType, false
+	}
 	return "", true
 }
 

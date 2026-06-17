@@ -276,7 +276,11 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	os.Remove(unitPath(id))
 	sysctl("daemon-reload")
 	sysctl("reset-failed", unitName(id))
-	pm2("delete", unitName(id)) // 若该应用由 pm2 托管也一并清理(无 pm2/无此进程则忽略)
+	pm2("delete", unitName(id)) // 托管模式:清理 deploy-<id>(无 pm2/无此进程则忽略)
+	// pm2 接管模式:Console 传真实进程名,否则只删 deploy-<id>、用户接管的进程会残留。
+	if pn := strings.TrimSpace(r.URL.Query().Get("pm2Name")); pn != "" {
+		pm2("delete", pn)
+	}
 	// nohup 托管:Console 传 binPath 时停掉进程并清理 pidfile/spec(无监管,不停会留孤儿进程)。
 	if bp := strings.TrimSpace(r.URL.Query().Get("binPath")); bp != "" && withinRoots(bp, a.cfg.Paths.DeployRoots) {
 		nohupStop(DeployConfig{BinPath: bp})

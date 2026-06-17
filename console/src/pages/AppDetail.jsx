@@ -362,7 +362,7 @@ function ConfigTab({ app }) {
     getAgentCapabilities(app.agentId).then((c) => setCaps(c && c.capabilities ? c.capabilities : null));
   }, [app.agentId]);
   const capOk = (r) => {
-    if (r === "无进程" || r === "软链") return true;
+    if (r === "无进程" || r === "软链" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有(与新建向导一致)
     if (!caps) return true;
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : false;

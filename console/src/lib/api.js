@@ -2,6 +2,17 @@
 // 登录与 Agent 数据走真实后端(Go + SQLite);其余业务页仍为静态 mock。
 // 会话基于 httpOnly cookie(mc_sid),前端拿不到也无需拿到 token。
 
+// 统一会话失效处理:任何请求拿到 401 → 通知 App 回登录页。
+// 否则闲置过期后,后台轮询/操作只会局部报错,用户仍停在原页面,不会被引导重新登录。
+let onUnauthorized = null;
+function setUnauthorizedHandler(fn) { onUnauthorized = fn; }
+const _rawFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const r = await _rawFetch(...args);
+  if (r && r.status === 401 && onUnauthorized) onUnauthorized();
+  return r;
+};
+
 async function login(username, password) {
   const r = await fetch('/api/login', {
     method: 'POST',
@@ -246,11 +257,11 @@ async function deleteEntity(kind, id) {
   } catch (e) { console.error('[persist] delete', kind, e); }
 }
 
-// agentUndeploy:停掉并移除目标机上该应用的服务(systemd unit / pm2 / nohup 进程+pidfile/spec)。
-// 目标 Agent、runner、nohup 的 binPath 均由后端据已落库应用解析(前端无需传)。
-async function agentUndeploy(appId) {
-  const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}`, { method: 'DELETE', credentials: 'same-origin' });
-  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || ('下线失败 (' + r.status + ')')); }
+// appDelete:服务端权威删除应用(DELETE /api/apps/{id})——后端先经 Agent 下线(停服 +
+// 清理 unit/pm2/nohup),成功后才删元数据并审计。不能走通用 /api/data 删除(后端禁止删 app)。
+async function appDelete(appId) {
+  const r = await fetch(`/api/apps/${encodeURIComponent(appId)}`, { method: 'DELETE', credentials: 'same-origin' });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || ('删除失败 (' + r.status + ')')); }
   return r.json().catch(() => ({}));
 }
 
@@ -433,6 +444,6 @@ export {
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
   getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus, setAppLifecycle,
-  hydrateData, putEntity, saveAppConfig, deleteEntity, agentUndeploy, deployViaAgentStream,
+  hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };

@@ -72,6 +72,7 @@ func main() {
 	mux.HandleFunc("GET /api/agent/apps/{id}/status", a.requireAuth(a.agentAppStatus))
 	mux.HandleFunc("POST /api/agent/apps/{id}/lifecycle", writeRoles(a.agentLifecycle))
 	mux.HandleFunc("DELETE /api/agent/apps/{id}", writeRoles(a.agentUndeploy))
+	mux.HandleFunc("DELETE /api/apps/{id}", writeRoles(a.appDelete)) // 权威删除:Agent 下线 + 删元数据 + 审计
 	mux.HandleFunc("GET /api/agent/apps/{id}/backups", a.requireAuth(a.agentListBackups))
 	mux.HandleFunc("POST /api/agent/apps/{id}/restore/stream", writeRoles(a.agentRestoreStream))
 	mux.HandleFunc("GET /api/agent/apps/{id}/logs/stream", a.requireAuth(a.agentLogStream))

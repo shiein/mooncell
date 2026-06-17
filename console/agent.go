@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,7 +27,9 @@ func newAgentClient(cfg AgentConfig) *agentClient {
 		base:   "http://" + cfg.Addr,
 		token:  cfg.Token,
 		http:   &http.Client{Timeout: 5 * time.Second},
-		deploy: &http.Client{Timeout: 180 * time.Second},
+		// 部署/下线含 Agent 端健康检查宽限(retries×interval≈30s,探活超时最坏更久)+ 失败回滚再探测,
+		// 余量需覆盖最坏约 2×探活;给到 300s 防 Console 侧先于 Agent 超时(Agent 仍在跑造成状态不一致)。
+		deploy: &http.Client{Timeout: 300 * time.Second},
 		stream: &http.Client{Timeout: 0},
 	}
 }
@@ -91,7 +94,7 @@ func (c *agentClient) del(path string) (int, []byte, error) {
 		return 0, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(req)
+	resp, err := c.deploy.Do(req) // 下线含 nohup SIGTERM 最多 5s 等待 + 停服,用长超时 client(非 5s 的 http)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -111,6 +114,9 @@ func (a *api) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		if _, ok := a.store.userByToken(c.Value); !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 			return
+		}
+		if !isPassiveRequest(r) {
+			a.store.touchSession(c.Value)
 		}
 		next(w, r)
 	}
@@ -433,22 +439,15 @@ func (a *api) agentLogStream(w http.ResponseWriter, r *http.Request) {
 	if a.unknownAgent(w, cl) {
 		return
 	}
-	path := "/api/apps/" + id + "/logs/stream"
-	tail := r.URL.Query().Get("tail")
-	if tail == "" {
+	// tail 必须是纯数字:否则前端可注入 &runner=pm2&pm2Name=x 篡改服务端派生的 runner,
+	// 越权读取非本应用日志(用 url.Values 构造,杜绝拼接注入)。
+	tail := strings.TrimSpace(r.URL.Query().Get("tail"))
+	if _, err := strconv.Atoi(tail); err != nil || tail == "" {
 		tail = "200"
 	}
-	path += "?tail=" + tail
-	if runner == "pm2" {
-		path += "&runner=pm2"
-		if n := a.appPm2Name(id); n != "" {
-			path += "&pm2Name=" + url.QueryEscape(n)
-		}
-	} else if runner == "nohup" {
-		// nohup 传 binPath,Agent 据启动规格推导真实日志路径(应用可能未声明 logPath,走 fallback)。
-		path += "&runner=nohup&binPath=" + url.QueryEscape(a.appBinPathOf(id))
-	}
-	resp, err := cl.getStream(r.Context(), path)
+	q := url.Values{"tail": {tail}}
+	a.addRunnerQuery(q, id, runner)
+	resp, err := cl.getStream(r.Context(), "/api/apps/"+id+"/logs/stream?"+q.Encode())
 	a.streamAgentResp(w, resp, err)
 }
 
@@ -628,6 +627,31 @@ func (a *api) applyLifecycleState(appID string, body []byte) {
 	}
 }
 
+// addRunnerQuery 据服务端派生的 runner 往 query 注入定位参数:pm2→runner+pm2Name、nohup→runner+binPath。
+// 集中一处,避免某条链路(此前的下线)漏传 pm2Name 导致只删 deploy-<id>、接管的真实进程残留。
+func (a *api) addRunnerQuery(q url.Values, id, runner string) {
+	switch runner {
+	case "pm2":
+		q.Set("runner", "pm2")
+		if n := a.appPm2Name(id); n != "" {
+			q.Set("pm2Name", n)
+		}
+	case "nohup":
+		q.Set("runner", "nohup")
+		q.Set("binPath", a.appBinPathOf(id))
+	}
+}
+
+// undeployPath 构造 Agent 下线路径(带 runner 定位参数)。
+func (a *api) undeployPath(id, runner string) string {
+	q := url.Values{}
+	a.addRunnerQuery(q, id, runner)
+	if e := q.Encode(); e != "" {
+		return "/api/apps/" + id + "?" + e
+	}
+	return "/api/apps/" + id
+}
+
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	// 必须是已落库应用:防止 write 用户对 Console 未跟踪的任意 deploy-<id> 单元执行下线。
@@ -638,11 +662,32 @@ func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	if a.unknownAgent(w, cl) {
 		return
 	}
-	path := "/api/apps/" + id
-	// nohup 无监管:下线必须传 binPath,Agent 据此停掉进程并清理 pidfile/spec,否则留孤儿进程。
-	if runner == "nohup" {
-		path += "?binPath=" + url.QueryEscape(a.appBinPathOf(id))
-	}
-	status, body, err := cl.del(path)
+	status, body, err := cl.del(a.undeployPath(id, runner))
 	relayAgent(w, status, body, err)
+}
+
+// appDelete 处理 DELETE /api/apps/{id}:服务端权威删除——先经 Agent 下线(停服 + 清理 unit/pm2/nohup),
+// 成功后才删 Console 元数据并审计。前端不能走通用 /api/data 删除(那里禁止删 app,只会"前端假删、刷新复现")。
+func (a *api) appDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	cl, runner, ok := a.requireAppRouting(w, id)
+	if !ok {
+		return
+	}
+	if a.unknownAgent(w, cl) {
+		return
+	}
+	// 1. 下线目标机服务;失败则中止、不删元数据(否则留孤儿服务且丢失管理入口)。
+	if status, body, err := cl.del(a.undeployPath(id, runner)); err != nil || status >= 300 {
+		a.store.appendAudit(a.sessionUser(r), "删除应用", id, "下线失败")
+		relayAgent(w, status, body, err)
+		return
+	}
+	// 2. 删 Console 元数据。
+	if err := a.store.deleteEntity("app", id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "已下线但删除元数据失败: " + err.Error()})
+		return
+	}
+	a.store.appendAudit(a.sessionUser(r), "删除应用", id, "成功")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

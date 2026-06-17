@@ -13,7 +13,7 @@ import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
 import { UsersPage } from './pages/Users.jsx';
 import { AgentsPage } from './pages/Agents.jsx';
-import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, agentUndeploy, removeCabinetFile, setAppLifecycle } from './lib/api.js';
+import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -40,6 +40,16 @@ function App() {
       if (alive && s) { setSession(s.user); setRole(s.role || "viewer"); setView("console"); }
     });
     return () => { alive = false; };
+  }, []);
+
+  // 会话失效统一回登录页:任何请求 401(闲置 1h 超时 / 关浏览器后 cookie 失效)→ 清状态并提示重新登录。
+  React.useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setSession((cur) => {
+        if (cur) { setView("login"); toast("会话已过期,请重新登录", { tone: "warn", icon: "alert" }); }
+        return null;
+      });
+    });
   }, []);
 
   // ---- route ----
@@ -217,16 +227,14 @@ function App() {
       return { ok: true };
     },
 
-    // 删除应用:先停并移除目标机上的服务(尽力,失败仅告警不阻断),再删 Console 实体记录。
-    // 不阻断是因为用户已确认删除——即便 Agent 不可达,也应能清掉 Console 记录,孤儿服务以告警提示人工处理。
+    // 删除应用:走服务端权威删除(下线 + 删元数据 + 审计,后端原子完成)。
+    // 失败(如 Agent 不可达)则不动本地状态、据实报错——杜绝"前端假删、刷新复现"。
     async deleteApp(app) {
-      let warn = "";
-      try { await agentUndeploy(app.id); }
-      catch (e) { warn = "(目标机服务下线失败:" + (e.message || e) + ",请手动确认是否残留进程)"; }
-      await remove("app", app.id);
+      try { await appDelete(app.id); }
+      catch (e) { toast("删除失败:" + (e.message || e), { tone: "error", icon: "alert" }); return { error: e.message }; }
       setApps((s) => s.filter((x) => x.id !== app.id));
-      addAudit("删除应用", app.name, warn ? "部分成功" : "成功");
-      toast(`应用「${app.name}」已删除` + warn, { tone: warn ? "warn" : undefined, icon: "trash" });
+      addAudit("删除应用", app.name, "成功");
+      toast(`应用「${app.name}」已删除`, { icon: "trash" });
       return { ok: true };
     },
 

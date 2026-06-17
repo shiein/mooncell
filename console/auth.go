@@ -103,7 +103,14 @@ func (a *api) session(w http.ResponseWriter, r *http.Request) {
 
 var validRoles = map[string]bool{"admin": true, "operator": true, "viewer": true}
 
-// currentUser 从会话 cookie 取用户名与角色。
+// isPassiveRequest 判断是否为后台轮询类请求(系统指标 2.5s / 应用状态 10s)。
+// 这类不是"用户动作",不触发会话滑动续期——否则开着页面挂机也永不闲置超时,违背"闲置 1h 退出"。
+func isPassiveRequest(r *http.Request) bool {
+	p := r.URL.Path
+	return p == "/api/agent/system" || strings.HasSuffix(p, "/status")
+}
+
+// currentUser 从会话 cookie 取用户名与角色;非轮询请求(=用户动作)顺带滑动续期。
 func (a *api) currentUser(r *http.Request) (string, string, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
@@ -112,6 +119,9 @@ func (a *api) currentUser(r *http.Request) (string, string, bool) {
 	u, ok := a.store.userByToken(c.Value)
 	if !ok {
 		return "", "", false
+	}
+	if !isPassiveRequest(r) {
+		a.store.touchSession(c.Value)
 	}
 	return u, a.store.userRole(u), true
 }

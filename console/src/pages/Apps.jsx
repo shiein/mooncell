@@ -83,8 +83,18 @@ function CreateAppDialog({ open, onClose }) {
   // 必填项缺失:进程类/static/tomcat 的落盘路径(python/node 是入口文件)必填,杜绝漏填后
   // 静默 fallback 到 /srv/apps/<id>/app 这类隐藏路径——用户填的制品"找不到"多由此而来。
   const requiredMissing = () => {
-    if (type === "python" || type === "node") return !(form.entry || "").trim();
-    if (isProcessType(type) || type === "static-nginx" || type === "tomcat-war") return !(form.path || "").trim();
+    if (type === "python" || type === "node") { if (!(form.entry || "").trim()) return true; }
+    else if (isProcessType(type) || type === "static-nginx" || type === "tomcat-war") { if (!(form.path || "").trim()) return true; }
+    // 健康检查 fail-closed(与后端 validateAppConfig 一致):选了 HTTP/端口就必须给出可用目标,
+    // 否则会被后端拒绝(且新建流程不回查结果会"假建")。
+    if (isProcessType(type) || type === "tomcat-war") {
+      const ht = form.healthType || "端口探活";
+      if (ht === "HTTP 200") {
+        const h = (form.health || "").trim();
+        if (!h.startsWith("http://") && !h.startsWith("https://")) return true;
+      }
+      if (ht === "端口探活" && !(Number(form.port) > 0)) return true;
+    }
     return false;
   };
 
