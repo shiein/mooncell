@@ -1,46 +1,49 @@
 // Mooncell — 应用列表 + 新建应用向导(JSON Schema 动态表单 + 预检)
 import React from 'react';
-import { useMC, DEPLOY_TYPES, timeAgo } from '../lib/data.js';
+import { useMC, DEPLOY_TYPES, isProcessType, timeAgo } from '../lib/data.js';
 import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, EmptyState } from '../components/primitives.jsx';
 import { DeployDialog } from '../components/pipeline.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { listAgentNodes, precheckApp, getAgentCapabilities } from '../lib/api.js';
 
+// APP_SCHEMAS 只描述各 type 的「特有字段」;工作目录 / 健康检查这类进程类通用字段由下方
+// 统一渲染(与编辑表单 ConfigTab 字段对齐,杜绝新建/编辑漂移)。
 const APP_SCHEMAS = {
   "java-jar": [
-    { key: "path", label: "JAR 目标路径", ph: "/srv/apps/my-app/app.jar", mono: true },
+    { key: "path", label: "JAR 目标路径(完整文件路径,含文件名)", ph: "/srv/apps/my-app/app.jar", mono: true, required: true },
     { key: "jvm", label: "JVM 参数", ph: "-Xms512m -Xmx2g", mono: true },
     { key: "user", label: "启动用户", ph: "appuser" },
-    { key: "health", label: "健康检查 URL / 端口", ph: "http://127.0.0.1:8080/actuator/health", mono: true },
     { key: "logs", label: "日志文件路径(用于在线 tail,需具体文件、不支持通配/~)", ph: "/srv/apps/my-app/logs/app.log", mono: true },
   ],
   "tomcat-war": [
-    { key: "path", label: "WAR 目标路径(webapps 下)", ph: "/opt/tomcat/webapps/report.war", mono: true },
-    { key: "health", label: "健康检查 URL / 端口", ph: "http://127.0.0.1:8081/report/ 或 端口探活 :8081", mono: true },
+    { key: "path", label: "WAR 目标路径(webapps 下)", ph: "/opt/tomcat/webapps/report.war", mono: true, required: true },
     { key: "reload", label: "部署后 systemctl restart tomcat", type: "switch", def: false },
   ],
   "native-binary": [
-    { key: "path", label: "二进制目标路径", ph: "/srv/apps/my-app/server", mono: true, hint: "任意语言(Go/Rust/C++…)为目标机编译的自包含可执行文件;部署前校验架构匹配" },
+    { key: "path", label: "二进制目标路径(完整文件路径)", ph: "/srv/apps/my-app/server", mono: true, required: true, hint: "任意语言(Go/Rust/C++…)为目标机编译的自包含可执行文件;部署前校验架构匹配" },
     { key: "args", label: "启动参数", ph: "--config config.toml", mono: true },
-    { key: "workdir", label: "工作目录", ph: "/srv/apps/my-app", mono: true },
-    { key: "health", label: "健康检查", ph: "http://127.0.0.1:80/healthz", mono: true },
   ],
   "python": [
     { key: "interp", label: "解释器路径(支持 venv)", ph: "/srv/apps/my-app/venv/bin/python", mono: true },
-    { key: "entry", label: "入口脚本", ph: "main.py", mono: true },
+    { key: "entry", label: "入口脚本", ph: "main.py", mono: true, required: true },
     { key: "args", label: "启动参数", ph: "--port 8090", mono: true },
   ],
   "node": [
-    { key: "entry", label: "入口文件", ph: "server.js", mono: true },
+    { key: "entry", label: "入口文件", ph: "server.js", mono: true, required: true },
     { key: "nodePath", label: "node 路径", ph: "/usr/local/bin/node", mono: true },
+    { key: "args", label: "启动参数", ph: "--port 8090", mono: true },
   ],
   "static-nginx": [
-    { key: "path", label: "目标目录", ph: "/data/web/my-app", mono: true },
+    { key: "path", label: "目标目录", ph: "/data/web/my-app", mono: true, required: true },
     { key: "keepRoot", label: "整目录替换(否则仅 dist 内容)", type: "switch", def: true },
     { key: "reload", label: "部署后触发 reload 钩子", type: "switch", def: false },
     { key: "nginxContainer", label: "nginx 容器名(Docker 部署时填,留空=宿主机 nginx)", ph: "nginx-proxy", mono: true, hint: "填了则 reload 改为 docker restart <容器名>;留空走宿主机 nginx -s reload" },
   ],
 };
+
+// 健康检查方式取值,与编辑表单 ConfigTab 完全一致(后端 healthSpec 实际只看「目标」内容 + 端口,
+// 方式仅作展示标签:HTTP 200=目标填 http(s) URL;端口探活=用端口 tcp 探活;进程存活/无=仅判进程托管态)。
+const HEALTH_TYPES = ["HTTP 200", "端口探活", "进程存活", "无"];
 
 function CreateAppDialog({ open, onClose }) {
   const store = useMC();
@@ -76,6 +79,13 @@ function CreateAppDialog({ open, onClose }) {
       return `/srv/apps/${id}/${form.entry || (type === "node" ? "server.js" : "app.py")}`;
     if (type === "static-nginx") return form.path || `/srv/apps/${id}`;
     return form.path || `/srv/apps/${id}/app`;
+  };
+  // 必填项缺失:进程类/static/tomcat 的落盘路径(python/node 是入口文件)必填,杜绝漏填后
+  // 静默 fallback 到 /srv/apps/<id>/app 这类隐藏路径——用户填的制品"找不到"多由此而来。
+  const requiredMissing = () => {
+    if (type === "python" || type === "node") return !(form.entry || "").trim();
+    if (isProcessType(type) || type === "static-nginx" || type === "tomcat-war") return !(form.path || "").trim();
+    return false;
   };
 
   const runPrecheck = async () => {
@@ -113,7 +123,7 @@ function CreateAppDialog({ open, onClose }) {
       name: form.name || "未命名应用", type, runner: selectedRunner(),
       status: "stopped", version: "—", pid: null, port: +(form.port || 8080),
       path, interp, workdir: form.workdir || `/srv/apps/${id}`,
-      health: form.health || "端口探活 :" + (form.port || 8080), healthType: form.health ? "HTTP 200" : "端口探活",
+      health: form.health || "", healthType: form.healthType || (form.health ? "HTTP 200" : "端口探活"),
       logPaths: [form.logs || `/srv/apps/${id}/logs/app.log`],
       jvm: form.jvm || form.args || "", user: form.user || "appuser",
       agentId: form.agentId || "default",
@@ -165,7 +175,7 @@ function CreateAppDialog({ open, onClose }) {
         <React.Fragment>
           {step > 0 ? <Btn variant="ghost" icon="chevronL" onClick={() => setStep(step - 1)}>上一步</Btn> : <Btn variant="ghost" onClick={onClose}>取消</Btn>}
           {step === 0 ? <Btn variant="primary" disabled={!type} onClick={() => setStep(1)}>下一步</Btn> : null}
-          {step === 1 ? <Btn variant="primary" disabled={!form.name || noAvailableRunner} onClick={runPrecheck}>执行预检</Btn> : null}
+          {step === 1 ? <Btn variant="primary" disabled={!form.name || noAvailableRunner || requiredMissing()} onClick={runPrecheck}>执行预检</Btn> : null}
           {step === 2 ? <Btn variant="primary" icon="check" disabled={!checksDone || checksBlocked} onClick={create}>创建应用</Btn> : null}
         </React.Fragment>
       }>
@@ -211,11 +221,36 @@ function CreateAppDialog({ open, onClose }) {
               <span style={{ fontSize: 13 }}>{f.label}</span>
             </div>
           ) : (
-            <Field key={f.key} label={f.label} hint={f.hint}>
+            <Field key={f.key} label={f.label + (f.required ? " *" : "")} hint={f.hint}>
               <input className={"input" + (f.mono ? " mono" : "")} style={f.mono ? { fontSize: 12.5 } : undefined}
                 placeholder={f.ph} value={form[f.key] || ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} />
             </Field>
           ))}
+          {/* 进程类通用字段:工作目录 + 健康检查(与编辑表单 ConfigTab 对齐)。 */}
+          {isProcessType(type) ? (
+            <Field label="工作目录" hint="进程启动时的 cwd;留空默认 /srv/apps/<应用id>">
+              <input className="input mono" style={{ fontSize: 12.5 }} placeholder={`/srv/apps/${appId()}`}
+                value={form.workdir || ""} onChange={(e) => setForm({ ...form, workdir: e.target.value })} />
+            </Field>
+          ) : null}
+          {isProcessType(type) || type === "tomcat-war" ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="健康检查方式">
+                <Select value={form.healthType || "端口探活"} onChange={(v) => setForm({ ...form, healthType: v })} options={HEALTH_TYPES} />
+              </Field>
+              <Field label="健康检查目标" hint="HTTP 200 填 http(s):// URL;端口探活用下方端口;进程存活/无 可留空">
+                <input className="input mono" style={{ fontSize: 12.5 }} placeholder="http://127.0.0.1:8080/healthz"
+                  value={form.health || ""} onChange={(e) => setForm({ ...form, health: e.target.value })} />
+              </Field>
+            </div>
+          ) : null}
+          {/* 落盘路径预览:所见即所得,杜绝"文件落到没预期的地方"。 */}
+          {isProcessType(type) || type === "static-nginx" ? (
+            <div style={{ fontSize: 11.5, color: "var(--muted-fg)", background: "var(--muted)", borderRadius: 8, padding: "8px 12px" }}>
+              制品将落盘到 <span className="mono" style={{ color: "var(--fg)" }}>{binPathOf(appId())}</span>
+              {(type === "python" || type === "node") ? "(由应用名与入口文件自动生成)" : ""}
+            </div>
+          ) : null}
           {selectedRunner() === "pm2" ? (
             <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署自动取该进程运行路径(pm_exec_path)替换文件并 pm2 restart,无需手动对齐路径(上面填的目标路径在接管模式下被忽略);留空 = Mooncell 托管(deploy-<id>,写 ecosystem)">
               <input className="input mono" style={{ fontSize: 12.5 }} placeholder="如 my-app 或 0(留空=托管)"
