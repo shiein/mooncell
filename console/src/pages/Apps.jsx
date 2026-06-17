@@ -238,10 +238,25 @@ function CreateAppDialog({ open, onClose }) {
               <Field label="健康检查方式">
                 <Select value={form.healthType || "端口探活"} onChange={(v) => setForm({ ...form, healthType: v })} options={HEALTH_TYPES} />
               </Field>
-              <Field label="健康检查目标" hint="HTTP 200 填 http(s):// URL;端口探活用下方端口;进程存活/无 可留空">
-                <input className="input mono" style={{ fontSize: 12.5 }} placeholder="http://127.0.0.1:8080/healthz"
-                  value={form.health || ""} onChange={(e) => setForm({ ...form, health: e.target.value })} />
-              </Field>
+              {(() => {
+                const ht = form.healthType || "端口探活";
+                if (ht === "HTTP 200") return (
+                  <Field label="健康检查 URL" hint="返回 2xx/3xx 即通过">
+                    <input className="input mono" style={{ fontSize: 12.5 }} placeholder="http://127.0.0.1:8080/healthz"
+                      value={form.health || ""} onChange={(e) => setForm({ ...form, health: e.target.value })} />
+                  </Field>
+                );
+                if (ht === "端口探活") return (
+                  <Field label="健康检查端口" hint="对下方「端口」做 TCP 探活,无需另填地址">
+                    <input className="input mono" style={{ fontSize: 12.5 }} disabled value={form.port ? ":" + form.port : "(请先填写下方端口)"} />
+                  </Field>
+                );
+                return (
+                  <Field label="健康检查" hint="不做 HTTP/TCP 探活,仅确认进程处于托管运行态">
+                    <input className="input" disabled value={ht === "无" ? "跳过探活(仅判进程存活)" : "仅判进程存活"} />
+                  </Field>
+                );
+              })()}
             </div>
           ) : null}
           {/* 落盘路径预览:所见即所得,杜绝"文件落到没预期的地方"。 */}
@@ -307,6 +322,10 @@ function AppsPage() {
     (typeF === "all" || a.type === typeF) &&
     (!q.trim() || a.name.includes(q) || a.id.includes(q.toLowerCase()))
   );
+  const onDelete = async (a) => {
+    if (!confirm(`确认删除应用「${a.name}」?\n\n这会停止并移除目标机上的服务(Runner: ${a.runner}),并删除该应用记录。\n此操作不可恢复。`)) return;
+    await store.deleteApp(a);
+  };
   const counts = {
     running: apps.filter((a) => a.status === "running" || a.status === "static").length,
     failed: apps.filter((a) => a.status === "failed").length,
@@ -332,7 +351,7 @@ function AppsPage() {
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
           <thead><tr>
-            <th>应用</th><th>类型</th><th>Runner</th><th>状态</th><th>版本</th><th>端口</th><th>最近部署</th><th style={{ width: 130 }}></th>
+            <th>应用</th><th>类型</th><th>Runner</th><th>状态</th><th>版本</th><th>端口</th><th>最近部署</th><th style={{ width: 170 }}></th>
           </tr></thead>
           <tbody>
             {list.map((a) => (
@@ -350,6 +369,7 @@ function AppsPage() {
                 <td onClick={(e) => e.stopPropagation()}>
                   <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                     {store.can("write") ? <Btn size="sm" icon="upload" onClick={() => setDeployApp(a)}>部署</Btn> : null}
+                    {store.can("write") ? <Btn variant="ghost" size="sm" icon="trash" title="删除应用" onClick={() => onDelete(a)}></Btn> : null}
                     <Btn variant="ghost" size="sm" icon="chevronR" onClick={() => store.nav("app-detail", { appId: a.id })}></Btn>
                   </div>
                 </td>

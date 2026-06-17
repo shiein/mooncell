@@ -246,6 +246,14 @@ async function deleteEntity(kind, id) {
   } catch (e) { console.error('[persist] delete', kind, e); }
 }
 
+// agentUndeploy:停掉并移除目标机上该应用的服务(systemd unit / pm2 / nohup 进程+pidfile/spec)。
+// 目标 Agent、runner、nohup 的 binPath 均由后端据已落库应用解析(前端无需传)。
+async function agentUndeploy(appId) {
+  const r = await fetch(`/api/agent/apps/${encodeURIComponent(appId)}`, { method: 'DELETE', credentials: 'same-origin' });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || ('下线失败 (' + r.status + ')')); }
+  return r.json().catch(() => ({}));
+}
+
 // consumeSSE 消费一个 text/event-stream 响应:按 \n\n 分帧,解析 event/data,
 // 每帧回调 onEvent(type, data);返回最终 done 事件数据。部署与还原共用。
 async function consumeSSE(r, onEvent, errLabel) {
@@ -425,6 +433,6 @@ export {
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
   getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus, setAppLifecycle,
-  hydrateData, putEntity, saveAppConfig, deleteEntity, deployViaAgentStream,
+  hydrateData, putEntity, saveAppConfig, deleteEntity, agentUndeploy, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };

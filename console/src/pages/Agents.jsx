@@ -43,6 +43,16 @@ function AgentsPage() {
   }
 
   const onDelete = async (a) => {
+    // 删除前提示该 Agent 上是否有应用、其中多少在运行,避免误删后失去对这些应用的部署/管理能力。
+    const onThis = (store.apps || []).filter((x) => (x.agentId || "default") === a.id);
+    const running = onThis.filter((x) => x.status === "running" || x.status === "static").length;
+    let msg = `确认移除 Agent「${a.name}」?`;
+    if (onThis.length) {
+      msg += `\n\n该 Agent 上有 ${onThis.length} 个应用` + (running ? `(其中 ${running} 个运行中)` : "") +
+        `,移除后将无法对它们部署/启停/看日志;目标机上已在跑的服务不受影响、仍会继续运行。`;
+    }
+    msg += `\n\n此操作不可恢复。`;
+    if (!confirm(msg)) return;
     try { await removeAgentNode(a.id); toast(`已移除 Agent ${a.name}`); reload(); }
     catch (e) { toast(e.message || "删除失败", { tone: "error" }); }
   };

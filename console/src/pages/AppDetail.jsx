@@ -434,7 +434,17 @@ function ConfigTab({ app }) {
             <Select value={draft.healthType} onChange={(v) => set("healthType", v)} disabled={!edit}
               options={["HTTP 200", "端口探活", "进程存活", "无"]} />
           </Field>
-          <Field label="目标">{ipt("health")}</Field>
+          {draft.healthType === "端口探活" ? (
+            <Field label="目标" hint="对「端口」做 TCP 探活,无需另填地址">
+              <input className="input mono" style={{ fontSize: 12.5 }} disabled value={draft.port ? ":" + draft.port : "(未填端口)"} />
+            </Field>
+          ) : draft.healthType === "进程存活" || draft.healthType === "无" ? (
+            <Field label="目标" hint="不做 HTTP/TCP 探活,仅判进程托管态">
+              <input className="input" disabled value={draft.healthType === "无" ? "跳过探活(仅判进程存活)" : "仅判进程存活"} />
+            </Field>
+          ) : (
+            <Field label="健康检查 URL">{ipt("health")}</Field>
+          )}
         </div>
         <div style={sec}>备份与钩子</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>

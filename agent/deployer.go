@@ -90,7 +90,9 @@ type DeployResult struct {
 	Steps   []Step `json:"steps"`
 }
 
-const healthRetries = 5
+// 健康检查启动宽限:JVM/Spring 等冷启动常需 20~30s 才 bind 端口,窗口过短会把"还在启动"
+// 误判为失败并回滚(现场表现:健康检查不过,但手动起又正常)。retries×interval ≈ 30s 宽限。
+const healthRetries = 15
 const healthInterval = 2 * time.Second
 
 // ---------- systemd Runner ----------

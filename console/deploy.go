@@ -129,7 +129,8 @@ type appConfig struct {
 	Path           string            `json:"path"`
 	Workdir        string            `json:"workdir"`
 	Health         string            `json:"health"`
-	Port           int               `json:"port"` // 应用端口,用于"端口探活"健康检查
+	HealthType     string            `json:"healthType"` // HTTP 200 / 端口探活 / 进程存活 / 无;决定 healthSpec 生成何种探活
+	Port           int               `json:"port"`       // 应用端口,用于"端口探活"健康检查
 	Interp         string            `json:"interp"`
 	Jvm            string            `json:"jvm"`
 	User           string            `json:"user"`
@@ -372,7 +373,26 @@ func sha256Reader(r io.Reader) string {
 //   - 配了 http(s) URL → HTTP 探活(Agent 端 2xx/3xx 通过);
 //   - 否则进程类有端口 → tcp://127.0.0.1:<port> 端口探活(UI 的"端口探活"由此真正落地);
 //   - static-nginx 不做 TCP(无监听端口,由 reload + HTTP 判定),其它情况留空(退化为进程存活)。
+// healthSpec 据 healthType 生成 Agent 健康检查规格(healthType 为权威):
+//   HTTP 200 → health 的 http(s) URL;端口探活 → tcp://127.0.0.1:<port>;
+//   进程存活 / 无 → 空 → Agent 跳过 HTTP/TCP 探活,仅判进程托管态(active/online)= 跳过健康检查。
+// 历史数据无 healthType 时回退旧推断(health 含 http 前缀→HTTP,否则有端口→TCP),保持兼容。
 func healthSpec(app appConfig) string {
+	switch app.HealthType {
+	case "无", "进程存活":
+		return "" // 真正跳过探活(此前即便选这两项,只要 port>0 仍会被强制 TCP 探活,与预期不符)
+	case "HTTP 200":
+		if h := strings.TrimSpace(app.Health); strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") {
+			return h
+		}
+		return "" // 选了 HTTP 但目标非法 → 退化为仅进程存活,不做必失败的空探活
+	case "端口探活":
+		if app.Type != "static-nginx" && app.Port > 0 {
+			return fmt.Sprintf("tcp://127.0.0.1:%d", app.Port)
+		}
+		return ""
+	}
+	// 历史数据(无 healthType):沿用旧推断。
 	if strings.HasPrefix(app.Health, "http://") || strings.HasPrefix(app.Health, "https://") {
 		return app.Health
 	}

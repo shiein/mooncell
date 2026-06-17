@@ -13,7 +13,7 @@ import { AppsPage } from './pages/Apps.jsx';
 import { AppDetailPage } from './pages/AppDetail.jsx';
 import { UsersPage } from './pages/Users.jsx';
 import { AgentsPage } from './pages/Agents.jsx';
-import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, removeCabinetFile, setAppLifecycle } from './lib/api.js';
+import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, agentUndeploy, removeCabinetFile, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -214,6 +214,19 @@ function App() {
       setApps((s) => s.map((x) => (x.id === id ? next : x)));
       addAudit("修改配置", a0.name || id, "成功");
       toast("配置已保存");
+      return { ok: true };
+    },
+
+    // 删除应用:先停并移除目标机上的服务(尽力,失败仅告警不阻断),再删 Console 实体记录。
+    // 不阻断是因为用户已确认删除——即便 Agent 不可达,也应能清掉 Console 记录,孤儿服务以告警提示人工处理。
+    async deleteApp(app) {
+      let warn = "";
+      try { await agentUndeploy(app.id); }
+      catch (e) { warn = "(目标机服务下线失败:" + (e.message || e) + ",请手动确认是否残留进程)"; }
+      await remove("app", app.id);
+      setApps((s) => s.filter((x) => x.id !== app.id));
+      addAudit("删除应用", app.name, warn ? "部分成功" : "成功");
+      toast(`应用「${app.name}」已删除` + warn, { tone: warn ? "warn" : undefined, icon: "trash" });
       return { ok: true };
     },
 
