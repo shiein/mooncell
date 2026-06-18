@@ -20,7 +20,7 @@ type api struct {
 	clientsMu       sync.Mutex
 	cabinetDir      string
 	anonUpload      bool
-	cabinetMaxBytes int64  // 文件柜单文件上限(字节),来自 cabinet.max_upload_mb(默认 200MB)
+	cabinetMaxBytes int64  // 文件柜单文件上限(字节),来自 cabinet.max_upload_mb(默认 300MB)
 	agentBinDir     string // Agent 升级包(按架构)的存储目录
 	demoSeed        bool
 	maxUpload       int64                     // 部署制品上传硬上限(字节);超出在传输层截断回 413

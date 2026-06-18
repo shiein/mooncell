@@ -205,7 +205,7 @@ function CabinetPage() {
   const store = useMC();
   const [uploading, setUploading] = React.useState(false);
   const [prog, setProg] = React.useState(0);
-  const [limitMB, setLimitMB] = React.useState(200);
+  const [limitMB, setLimitMB] = React.useState(300);
   const fileRef = React.useRef(null);
   const canWrite = store.can("write");
 

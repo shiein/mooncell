@@ -65,7 +65,7 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// 文件柜单文件上限由 cabinet.max_upload_mb 配置(a.cabinetMaxBytes,默认 200MB)。ParseMultipartForm
+// 文件柜单文件上限由 cabinet.max_upload_mb 配置(a.cabinetMaxBytes,默认 300MB)。ParseMultipartForm
 // 的参数只是内存阈值,超出会落临时盘且 io.Copy 不限大小;必须用 MaxBytesReader 在传输层截断并回 413。
 
 // genCode 生成易读的 6 位提取码(去掉易混字符)。

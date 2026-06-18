@@ -94,7 +94,7 @@
     <div class="zone" id="zone">
       <div class="ic">⬆️</div>
       <div class="t">点击选择文件,或拖拽到此处</div>
-      <div class="h" id="hint">单文件 ≤ 200 MB · 上传后获得提取码</div>
+      <div class="h" id="hint">单文件 ≤ 300 MB · 上传后获得提取码</div>
       <div class="fname" id="fname"></div>
       <input type="file" id="file" hidden />
     </div>
@@ -144,7 +144,7 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var file = null;
-  var limitMB = 200; // 默认值,加载后用服务端真实上限覆盖
+  var limitMB = 300; // 默认值,加载后用服务端真实上限覆盖
 
   // 加载真实上限 + 匿名开关:据此更新提示、客户端预检上限;未开启则直接置灰上传。
   fetch("/api/pub/limits").then(function (r) { return r.json(); }).then(function (j) {
@@ -216,7 +216,7 @@
     xhr.onerror = function () {
       $("up").disabled = false; $("bar").hidden = true; $("barI").style.width = "0";
       // onerror = 传输层失败(非 HTTP 错误码)。最常见两因:反代请求体上限 / 文件超 200MB。
-      setMsg("upMsg", "上传中断(传输层失败)。常见原因:① Console 前的反向代理限制了请求体大小——nginx 需设 client_max_body_size(如 200m)并 reload;② 文件超过 200MB 上限。可按 F12 看 Network 里该请求的状态进一步确认。", true);
+      setMsg("upMsg", "上传中断(传输层失败)。常见原因:① Console 前的反向代理限制了请求体大小——nginx 需设 client_max_body_size(如 300m)并 reload;② 文件超过 300MB 上限。可按 F12 看 Network 里该请求的状态进一步确认。", true);
     };
     xhr.send(fd);
   };
