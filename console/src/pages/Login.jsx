@@ -49,6 +49,10 @@ function LoginPage({ onLogin }) {
           本地账号 · bcrypt · session + httpOnly cookie
         </div>
       </div>
+      <a href="/drop" className="link-btn fade-up" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, animationDelay: "60ms" }}>
+        <Icon name="upload" size={13} style={{ flex: "none" }} />
+        免登录文件投递 · 凭提取码取件
+      </a>
     </div>
   );
 }
