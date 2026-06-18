@@ -113,7 +113,7 @@ function Shell({ page, onNav, crumbs, theme, onTheme, user, role, onLogout, chil
       <Sidebar page={page} onNav={onNav} user={user} role={role} onLogout={onLogout} />
       <div className="main">
         <Topbar crumbs={crumbs} theme={theme} onTheme={onTheme} right={topRight} />
-        <div className="content"><div className="content-inner">{children}</div></div>
+        <div className="content"><div className="content-inner" key={page}>{children}</div></div>
       </div>
     </div>
   );

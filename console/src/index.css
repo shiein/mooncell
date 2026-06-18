@@ -466,7 +466,7 @@ a { color: var(--primary); text-decoration: none; }
 /* ---------- misc ---------- */
 .kbd { font-family: var(--font-mono); font-size: 11px; background: var(--muted); border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; }
 .divider-v { width: 1px; align-self: stretch; background: var(--border); }
-.fade-up { /* entrance kept static for capture-safety */ }
+.fade-up { /* 入场动画在下方 prefers-reduced-motion: no-preference 中启用 */ }
 @keyframes mc-fade-up { from { opacity: 0; transform: translateY(6px); } }
 .progress-track { height: 8px; border-radius: 99px; background: var(--muted); overflow: hidden; }
 .progress-fill { height: 100%; border-radius: 99px; background: var(--primary); transition: width .2s ease; }
@@ -480,3 +480,26 @@ a { color: var(--primary); text-decoration: none; }
 .upload-zone:hover, .upload-zone[data-drag="true"] { border-color: var(--primary); background: var(--primary-soft); }
 .app-row { cursor: pointer; }
 .code-chip { font-family: var(--font-mono); font-size: 12px; background: var(--muted); border-radius: 5px; padding: 2px 7px; color: var(--fg-secondary); }
+
+/* ---------- motion ----------
+   轻量、克制、可达性优先:仅做短促的入场/切换与按压反馈,时长 ≤ .3s。
+   一律包在 prefers-reduced-motion: no-preference 下,系统开启「减弱动态」即全部静止。 */
+@keyframes mc-page-in { from { opacity: 0; transform: translateY(8px); } }
+@keyframes mc-dialog-in { from { opacity: 0; transform: translateY(10px) scale(.985); } }
+/* 遮罩淡入复用已有的 mc-fade(from { opacity: 0 }) */
+
+/* 按压反馈对所有用户保留(位移极小,不构成动态干扰) */
+.btn:active:not(:disabled) { transform: translateY(.5px); }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* 页面切换:内容区按 page key 重挂载时轻微上浮淡入 */
+  .content-inner { animation: mc-page-in .28s cubic-bezier(.2,.7,.3,1) both; }
+  /* 通用入场:登录卡、预检结论等带 .fade-up 的元素 */
+  .fade-up { animation: mc-fade-up .32s cubic-bezier(.2,.7,.3,1) both; }
+  /* 弹窗:遮罩淡入 + 对话框上浮微缩放 */
+  .dialog-overlay { animation: mc-fade .16s ease both; }
+  .dialog { animation: mc-dialog-in .22s cubic-bezier(.2,.8,.3,1.02) both; }
+  /* 可点击的卡片(button.card,如总览应用卡 / 新建类型选择):hover 微上浮 */
+  button.card { transition: transform .15s, box-shadow .15s, border-color .15s, background .15s; }
+  button.card:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+}
