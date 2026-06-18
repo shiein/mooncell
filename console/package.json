@@ -17,6 +17,13 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
+  "comment:browserslist": "与 vite.config.js 的构建目标对齐:钉死低版本浏览器,让 autoprefixer/Tailwind 确定性地按 chrome92 生成前缀,不随其默认查询漂移。",
+  "browserslist": [
+    "chrome >= 92",
+    "edge >= 92",
+    "firefox >= 91",
+    "safari >= 15"
+  ],
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@vitejs/plugin-react": "^4.3.4",
