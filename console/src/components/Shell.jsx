@@ -50,7 +50,6 @@ function Sidebar({ page, onNav, user, role, onLogout }) {
             onClick={() => onNav(n.id)}>
             <Icon name={n.icon} size={16} />
             <span style={{ flex: 1 }}>{n.label}</span>
-            <span style={{ fontSize: 10, color: "var(--muted-fg)", fontWeight: 400 }}>{n.en}</span>
           </button>
         ))}
       </nav>
