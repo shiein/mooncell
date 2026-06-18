@@ -102,16 +102,19 @@ function Field({ label, hint, children, style }) {
   );
 }
 
-function Select({ options, value, onChange, ...rest }) {
+function Select({ options, value, onChange, className = "", ...rest }) {
   return (
-    <select className="select-el" value={value} onChange={(e) => onChange && onChange(e.target.value)} {...rest}>
-      {options.map((o) => {
-        const v = typeof o === "string" ? o : o.value;
-        const l = typeof o === "string" ? o : o.label;
-        const d = typeof o === "object" && !!o.disabled;
-        return <option key={v} value={v} disabled={d}>{l}</option>;
-      })}
-    </select>
+    <span className="select-wrap">
+      <select className={`select-el ${className}`} value={value} onChange={(e) => onChange && onChange(e.target.value)} {...rest}>
+        {options.map((o) => {
+          const v = typeof o === "string" ? o : o.value;
+          const l = typeof o === "string" ? o : o.label;
+          const d = typeof o === "object" && !!o.disabled;
+          return <option key={v} value={v} disabled={d}>{l}</option>;
+        })}
+      </select>
+      <Icon name="chevronD" size={14} className="select-caret" aria-hidden="true" />
+    </span>
   );
 }
 

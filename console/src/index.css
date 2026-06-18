@@ -329,6 +329,14 @@ a { color: var(--primary); text-decoration: none; }
 }
 .textarea { height: auto; padding: 8px 11px; resize: vertical; }
 .input:focus, .select-el:focus, .textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+/* select:去掉原生箭头,改用自绘 chevron(随主题用 currentColor),与 input 风格统一 */
+.select-wrap { position: relative; display: block; width: 100%; }
+.select-el { -webkit-appearance: none; -moz-appearance: none; appearance: none; padding-right: 30px; cursor: pointer; }
+.select-el:hover:not(:disabled):not(:focus) { border-color: var(--border-strong); background: var(--muted); }
+.select-el:disabled { opacity: .55; cursor: not-allowed; }
+.select-el::-ms-expand { display: none; }
+.select-caret { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--muted-fg); pointer-events: none; transition: color .15s; }
+.select-wrap:hover .select-caret { color: var(--fg-secondary); }
 .input::placeholder { color: var(--muted-fg); }
 .input-sm { height: 28px; font-size: 12.5px; border-radius: 6px; }
 .field-label { font-size: 12.5px; font-weight: 500; color: var(--fg-secondary); display: block; margin-bottom: 5px; }
