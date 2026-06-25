@@ -70,13 +70,13 @@ func (a *agent) prepareRestore(w http.ResponseWriter, r *http.Request) (DeployCo
 	return cfg, req.Backup, true
 }
 
-// runRestore 按类型还原:static-nginx 切换 bind mount 到历史 release;进程类用备份制品重跑流水线。
+// runRestore 按类型还原:static-nginx 切换软链到历史 release;进程类用备份制品重跑流水线。
 func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) DeployResult {
 	if emit == nil {
 		emit = func(Step) {}
 	}
 	if cfg.Type == "static-nginx" {
-		// static 还原也走 releaseId 幂等(防重复切挂载/reload);runIdempotent 内部已加同应用串行锁。
+		// static 还原也走 releaseId 幂等(防重复切软链/reload);runIdempotent 内部已加同应用串行锁。
 		// 恢复源(releaseTS=backup)纳入指纹:同 releaseId 还原到不同 release 不会被误判为已成功跳过。
 		return a.runIdempotent("restore", cfg, "src="+backup, emit, func(e func(Step)) DeployResult { return a.restoreStatic(cfg, backup, e) })
 	}
@@ -98,7 +98,7 @@ func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) Dep
 	return a.runIdempotent("restore", cfg, "src="+backup, emit, func(e func(Step)) DeployResult { return a.runDeploy(cfg, tmp, e) })
 }
 
-// restoreStatic 把静态站点 bind mount 切回指定历史 release(<BinPath>-releases/<ts>/),失败回滚挂载。
+// restoreStatic 把静态站点软链切回指定历史 release(<BinPath>-releases/<ts>/),失败回滚软链。
 func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step)) DeployResult {
 	res := DeployResult{Version: cfg.Version}
 	add := func(name string, ok bool, logs ...string) {
@@ -119,15 +119,15 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 	}
 	add("校验 release", true, releaseDir)
 
-	prevTarget := currentMountSource(cfg.BinPath)
+	prevTarget, _ := os.Readlink(cfg.BinPath)
 	add("记录当前指向", true, "当前 → "+prevTarget)
 
-	if err := switchBindMount(releaseDir, cfg.BinPath); err != nil {
-		add("切换挂载", false, err.Error())
+	if err := switchSymlink(releaseDir, cfg.BinPath); err != nil {
+		add("切换软链", false, err.Error())
 		res.Result = "failed"
 		return res
 	}
-	add("切换挂载", true, cfg.BinPath+" → "+releaseDir)
+	add("切换软链", true, cfg.BinPath+" → "+releaseDir)
 	// reload 失败即视为还原失败,触发回滚——不再丢弃错误、不再无条件标成功。
 	reloadOK := true
 	if ran, log, err := runReload(cfg.ReloadCmd, cfg.ReloadArg); ran {
@@ -152,11 +152,11 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 		return res
 	}
 	// 切回失败必须如实反映——否则切回没成功却因 reload/health 没报错被误记为已回滚。
-	swErr := switchBindMount(prevTarget, cfg.BinPath)
+	swErr := switchSymlink(prevTarget, cfg.BinPath)
 	rlogs := []string{"切回 " + prevTarget}
 	if swErr != nil {
 		rlogs = append(rlogs, "切回失败: "+swErr.Error())
-		add("回滚 · 挂载", false, rlogs...)
+		add("回滚 · 软链", false, rlogs...)
 		res.Result = "failed"
 		return res
 	}
@@ -166,7 +166,7 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 	}
 	var rh []string
 	ok := rerr == nil && healthCheck(cfg.Health, &rh)
-	add("回滚 · 挂载", ok, append(rlogs, rh...)...)
+	add("回滚 · 软链", ok, append(rlogs, rh...)...)
 	if ok {
 		res.Result = "rolledback"
 	} else {
@@ -231,7 +231,7 @@ func (a *agent) listReleases(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"backups": []BackupInfo{}})
 		return
 	}
-	cur := currentMountSource(binPath) // 当前挂载源指向的 release(标注用)
+	cur, _ := os.Readlink(binPath) // 当前指向的 release(标注用)
 	list := []BackupInfo{}
 	for _, e := range entries {
 		if !e.IsDir() {

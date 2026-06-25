@@ -58,7 +58,7 @@ type DeployConfig struct {
 	ID             string            `json:"id"`
 	Name           string            `json:"name"`
 	Type           string            `json:"type"`    // native-binary | java-jar | static-nginx;空默认 native-binary
-	BinPath        string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root bind mount 挂载点路径
+	BinPath        string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
 	Workdir        string            `json:"workdir"`
 	Runner         string            `json:"runner"`      // systemd(默认)| pm2;决定进程托管方式
 	Interpreter    string            `json:"interpreter"` // python:解释器路径(支持 venv,如 .../venv/bin/python);空则 python3
@@ -806,7 +806,7 @@ func (a *agent) runDeployIdempotent(op string, cfg DeployConfig, artifact string
 	return a.runIdempotent(op, cfg, "", emit, func(e func(Step)) DeployResult { return a.runDeploy(cfg, artifact, e) })
 }
 
-// runDeploy 按应用类型分发:static-nginx 走 bind mount 切换,tomcat-war 走容器 WAR 替换,
+// runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
 // 其余(native-binary/java-jar/python)复用 systemd 进程流水线。
 // emit 在每步完成时回调(用于 SSE 实时流);同步 JSON 端点传 nil 即可。
 func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
@@ -980,7 +980,7 @@ func (a *agent) rollbackSystemd(cfg DeployConfig, bkDir string) ([]string, bool)
 	return rlog, ok
 }
 
-// ---------- 静态站点(bind mount 切换)----------
+// ---------- 静态站点(软链切换)----------
 
 // sniffArchive 按魔数(非扩展名)判断压缩格式:gzip(.tar.gz)/ zip / tar;非压缩单文件返回空。
 func sniffArchive(path string) string {
@@ -1225,69 +1225,22 @@ func extractArchiveSmart(archive, dest, format string) error {
 	return flattenSingleTopDir(dest)
 }
 
-// switchBindMount 将 target 目录 bind 挂载到 mountPoint,替代软链——
-// 软链存储的是宿主机绝对路径,Docker 容器内该路径不存在导致断链;
-// bind mount 是内核级目录映射,对容器透明(只要挂载点在容器挂载的卷范围内)。
-// 若 mountPoint 已有 bind mount,先 umount 再重新挂载。
-func switchBindMount(target, mountPoint string) error {
-	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		return fmt.Errorf("创建挂载点失败: %w", err)
+// switchSymlink 原子切换软链 link → target:先建临时软链再 rename 覆盖,避免出现 link 短暂消失的窗口。
+func switchSymlink(target, link string) error {
+	tmp := link + ".tmp"
+	os.Remove(tmp)
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
 	}
-	if isMountPoint(mountPoint) {
-		if out, err := exec.Command("umount", mountPoint).CombinedOutput(); err != nil {
-			return fmt.Errorf("umount %s 失败: %w (%s)", mountPoint, err, strings.TrimSpace(string(out)))
-		}
-	}
-	if out, err := exec.Command("mount", "--bind", target, mountPoint).CombinedOutput(); err != nil {
-		return fmt.Errorf("mount --bind %s → %s 失败: %w (%s)", target, mountPoint, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// isMountPoint 检查 path 是否是一个挂载点(通过 /proc/mounts 判断)。
-func isMountPoint(path string) bool {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	data, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[1] == abs {
-			return true
-		}
-	}
-	return false
-}
-
-// currentMountSource 返回 mountPoint 当前 bind mount 的源路径;未挂载则返回空字符串。
-func currentMountSource(mountPoint string) string {
-	abs, err := filepath.Abs(mountPoint)
-	if err != nil {
-		return ""
-	}
-	data, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[1] == abs {
-			return fields[0]
-		}
-	}
-	return ""
+	return os.Rename(tmp, link)
 }
 
 func (a *agent) staticBinPathIsDeployRoot(binPath string) bool {
 	return a != nil && a.cfg != nil && dirEqualsRoot(binPath, a.cfg.Paths.DeployRoots)
 }
 
-// runDeployStatic 静态站点部署:解包到带时间戳的 release 目录,bind mount 对外暴露,失败回滚到旧 release。
-// cfg.BinPath 是对外 web root 挂载点路径(如 /srv/apps/site/current);releases 存于 <BinPath>-releases/<ts>/。
+// runDeployStatic 静态站点部署:解包到带时间戳的 release 目录,原子切换软链对外暴露,失败回滚到旧 release。
+// cfg.BinPath 是对外 web root 软链路径(如 /srv/apps/site/current);releases 存于 <BinPath>-releases/<ts>/。
 func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
 	res := DeployResult{Version: cfg.Version}
 	add := func(name string, ok bool, logs ...string) {
@@ -1297,34 +1250,29 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	}
 
 	// 1. 校验制品
-	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "bind mount "+cfg.BinPath)
+	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "软链 "+cfg.BinPath)
 	if a.staticBinPathIsDeployRoot(cfg.BinPath) {
 		add("校验目标", false, "static-nginx BinPath 不能等于 deploy_root: "+cfg.BinPath)
 		res.Result = "failed"
 		return res
 	}
-	// bind mount 部署要求对外路径是 Mooncell 托管的挂载点,或尚不存在(首次部署创建为挂载点)。
-	// 若它已是真实目录(非挂载点)/普通文件,直接挂载会覆盖原有内容,有数据丢失风险。
-	// 提前拦截:已是挂载点→放行(后续重挂),真实目录/文件→拒绝,不存在→放行。
-	if fi, err := os.Stat(cfg.BinPath); err == nil {
-		if !fi.IsDir() {
-			add("校验目标", false, fmt.Sprintf(
-				"目标路径已是普通文件,bind mount 部署要求该路径为挂载点或尚不存在:请改用一个不存在的新路径,或先移走/删除 %s 后再部署",
-				cfg.BinPath))
-			res.Result = "failed"
-			return res
+	// 软链部署要求对外路径是 Mooncell 托管的软链,或尚不存在(首次部署创建为软链)。
+	// 若它已是真实目录/普通文件,原子切换(rename 软链覆盖)会被内核以 EEXIST 拒绝,报错晦涩。
+	// 提前拦截给人话提示——Lstat 不跟随软链:已是软链→放行(后续重指),真实目录/文件→拒绝,不存在→放行。
+	if fi, err := os.Lstat(cfg.BinPath); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		kind := "普通文件"
+		if fi.IsDir() {
+			kind = "目录"
 		}
-		if !isMountPoint(cfg.BinPath) {
-			add("校验目标", false, fmt.Sprintf(
-				"目标路径已是真实目录,bind mount 部署要求该路径为挂载点或尚不存在:请改用一个不存在的新路径,或先移走/删除 %s 后再部署",
-				cfg.BinPath))
-			res.Result = "failed"
-			return res
-		}
+		add("校验目标", false, fmt.Sprintf(
+			"目标路径已是真实%s,软链部署要求该路径为软链或尚不存在:请改用一个不存在的新路径,或先移走/删除 %s 后再部署",
+			kind, cfg.BinPath))
+		res.Result = "failed"
+		return res
 	}
 
-	// 2. 记录当前挂载源(用于回滚);首次部署无旧挂载
-	prevTarget := currentMountSource(cfg.BinPath)
+	// 2. 记录当前软链指向(用于回滚);首次部署无旧目标
+	prevTarget, _ := os.Readlink(cfg.BinPath)
 	if prevTarget == "" {
 		add("备份当前版本", true, "首次部署,无旧 release 需记录")
 	} else {
@@ -1355,13 +1303,13 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	}
 	add("解包制品", true, format+" 解包 + 智能去顶层目录 → "+newRelease)
 
-	// 4. bind mount 切换
-	if err := switchBindMount(newRelease, cfg.BinPath); err != nil {
-		add("切换挂载", false, err.Error())
+	// 4. 原子切换软链
+	if err := switchSymlink(newRelease, cfg.BinPath); err != nil {
+		add("切换软链", false, err.Error())
 		res.Result = "failed"
 		return res
 	}
-	add("切换挂载", true, cfg.BinPath+" → "+newRelease)
+	add("切换软链", true, cfg.BinPath+" → "+newRelease)
 
 	// 5. 可选 reload 钩子(白名单动作,如 nginx-reload):失败即视为部署失败,触发回滚——
 	//    reload 没成功就意味着新版本没真正生效,不能报成功。
@@ -1375,7 +1323,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	var hlog []string
 	if reloadOK && healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
-		// bind mount release 也按份数滚动清理
+		// 软链 release 也按份数滚动清理
 		a.rotateReleases(releasesDir, cfg.BackupKeep)
 		res.Result = "success"
 		return res
@@ -1385,16 +1333,16 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	}
 	add("健康检查", false, hlog...)
 
-	// 7. 失败 → 回滚挂载
+	// 7. 失败 → 回滚软链
 	if prevTarget == "" {
 		add("回滚", false, "首次部署无旧 release 可回滚")
 		res.Result = "failed"
 		return res
 	}
 	rlog := []string{"切回 " + prevTarget}
-	if err := switchBindMount(prevTarget, cfg.BinPath); err != nil {
+	if err := switchSymlink(prevTarget, cfg.BinPath); err != nil {
 		rlog = append(rlog, "回滚失败: "+err.Error())
-		add("回滚 · 挂载", false, rlog...)
+		add("回滚 · 软链", false, rlog...)
 		res.Result = "failed"
 		return res
 	}
@@ -1406,7 +1354,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	var rh []string
 	ok := rerr == nil && healthCheck(cfg.Health, &rh)
 	rlog = append(rlog, rh...)
-	add("回滚 · 挂载", ok, rlog...)
+	add("回滚 · 软链", ok, rlog...)
 	os.RemoveAll(newRelease) // 失效 release 清理
 	if ok {
 		res.Result = "rolledback"
@@ -1416,7 +1364,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	return res
 }
 
-// rotateReleases 按份数滚动保留 release 目录;当前挂载源指向的目录永不删除。
+// rotateReleases 按份数滚动保留 release 目录;当前软链指向的目录永不删除。
 func (a *agent) rotateReleases(releasesDir string, keep int) {
 	if keep <= 0 {
 		keep = 5
@@ -1425,10 +1373,10 @@ func (a *agent) rotateReleases(releasesDir string, keep int) {
 	if err != nil {
 		return
 	}
-	// 当前挂载源指向的 release 永不删除——即便它不是最新(如还原到旧版本后再滚动),也不能删掉正在对外服务的目录。
+	// 当前软链指向的 release 永不删除——即便它不是最新(如还原到旧版本后再滚动),也不能删掉正在对外服务的目录。
 	binPath := strings.TrimSuffix(releasesDir, "-releases")
 	current := ""
-	if t := currentMountSource(binPath); t != "" {
+	if t, err := os.Readlink(binPath); err == nil {
 		current = filepath.Base(t)
 	}
 	var dirs []string

@@ -430,7 +430,7 @@ func TestPlaceArtifactRejectsRootDir(t *testing.T) {
 	}
 }
 
-// static-nginx 的 BinPath 是对外挂载点;不能直接等于 deploy_root,否则会写 <root>-releases 并尝试替换根。
+// static-nginx 的 BinPath 是对外软链;不能直接等于 deploy_root,否则会写 <root>-releases 并尝试替换根。
 func TestStaticDeployRejectsRootBinPath(t *testing.T) {
 	root := t.TempDir()
 	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{root}}}}
@@ -446,8 +446,8 @@ func TestStaticDeployRejectsRootBinPath(t *testing.T) {
 	}
 }
 
-// 软链部署:目标路径若已是真实目录(非挂载点),必须提前拒绝并给人话提示,
-// 而不是在 switchBindMount 阶段挂载覆盖原有内容。
+// 软链部署:目标路径若已是真实目录(非软链),必须提前拒绝并给人话提示,
+// 而不是在 switchSymlink 阶段甩出 "rename ... file exists"(EEXIST)。
 func TestStaticDeployRejectsRealDirTarget(t *testing.T) {
 	root := t.TempDir()
 	binPath := filepath.Join(root, "site")
@@ -467,20 +467,13 @@ func TestStaticDeployRejectsRealDirTarget(t *testing.T) {
 	if !fileExists(filepath.Join(binPath, "old")) {
 		t.Fatal("拒绝后不应破坏原目录内容")
 	}
-	if !strings.Contains(strings.Join(msgs, " "), "bind mount 部署要求该路径为挂载点或尚不存在") {
-		t.Fatalf("应给出 bind mount 用法提示, got logs=%v", msgs)
+	if !strings.Contains(strings.Join(msgs, " "), "软链部署要求该路径为软链或尚不存在") {
+		t.Fatalf("应给出软链用法提示, got logs=%v", msgs)
 	}
 }
 
-// bind mount 部署:首次部署(目标不存在)与既有挂载点(后续重挂)都应通过目标校验并成功切换。
-// 需要 Linux root 权限(mount --bind)。
-func TestStaticDeployAcceptsMountAndAbsent(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("bind mount 需要 Linux")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("bind mount 需要 root 权限")
-	}
+// 软链部署:首次部署(目标不存在)与既有软链(后续重指)都应通过目标校验并成功切换。
+func TestStaticDeployAcceptsSymlinkAndAbsent(t *testing.T) {
 	root := t.TempDir()
 	binPath := filepath.Join(root, "site")
 	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{root}}}}
@@ -489,16 +482,16 @@ func TestStaticDeployAcceptsMountAndAbsent(t *testing.T) {
 		makeTarGz(t, p, map[string]string{"index.html": "ok"})
 		return p
 	}
-	// 首次:目标不存在 → 创建挂载点
+	// 首次:目标不存在 → 创建软链
 	if res := a.runDeployStatic(DeployConfig{ID: "s", Type: "static-nginx", BinPath: binPath, Version: "v1", BackupKeep: 3}, mk(), func(Step) {}); res.Result != "success" {
 		t.Fatalf("首次部署应成功,got %q (steps=%+v)", res.Result, res.Steps)
 	}
-	if !isMountPoint(binPath) {
-		t.Fatalf("首次部署后目标应为挂载点")
+	if fi, err := os.Lstat(binPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("首次部署后目标应为软链, err=%v", err)
 	}
-	// 再次:目标已是挂载点 → 重挂
+	// 再次:目标已是软链 → 原子重指
 	if res := a.runDeployStatic(DeployConfig{ID: "s", Type: "static-nginx", BinPath: binPath, Version: "v2", BackupKeep: 3}, mk(), func(Step) {}); res.Result != "success" {
-		t.Fatalf("二次部署(重挂)应成功,got %q", res.Result)
+		t.Fatalf("二次部署(重指软链)应成功,got %q", res.Result)
 	}
 }
 
@@ -668,14 +661,7 @@ func TestWithinRootsSymlinkEscape(t *testing.T) {
 }
 
 // static 部署:reload 失败必须阻断部署(不报 success)。测试环境无 nginx,nginx-reload 必失败。
-// 需要 Linux root 权限(mount --bind)。
 func TestStaticDeployReloadFailureBlocks(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("bind mount 需要 Linux")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("bind mount 需要 root 权限")
-	}
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "site")
 	arch := filepath.Join(dir, "site.tar.gz")
@@ -772,15 +758,8 @@ func TestRunDeployPm2Orchestration(t *testing.T) {
 	}
 }
 
-// rotateReleases:当前挂载源指向的 release 永不被滚动删除(即便它是最老的)。
-// 需要 Linux root 权限(mount --bind)。
+// rotateReleases:当前软链指向的 release 永不被滚动删除(即便它是最老的)。
 func TestRotateReleasesKeepsCurrent(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("bind mount 需要 Linux")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("bind mount 需要 root 权限")
-	}
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "site")
 	releasesDir := binPath + "-releases"
@@ -790,17 +769,15 @@ func TestRotateReleasesKeepsCurrent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// bind mount 指向最老的 release(模拟「还原到旧版本」后的状态)
-	if err := switchBindMount(filepath.Join(releasesDir, names[0]), binPath); err != nil {
-		t.Fatalf("bind mount 失败: %v", err)
-	}
+	// 软链指向最老的 release(模拟「还原到旧版本」后的状态)
+	os.Symlink(filepath.Join(releasesDir, names[0]), binPath)
 
 	a := &agent{}
 	a.rotateReleases(releasesDir, 2) // 只保留 2 份
 
 	// 当前指向(最老)必须存活;最新的也应在
 	if !fileExists(filepath.Join(releasesDir, names[0])) {
-		t.Error("当前挂载源指向的 release 不应被删除")
+		t.Error("当前软链指向的 release 不应被删除")
 	}
 	if !fileExists(filepath.Join(releasesDir, names[4])) {
 		t.Error("最新 release 应保留")

@@ -86,7 +86,7 @@ func TestPutAppConfigValidation(t *testing.T) {
 		t.Fatalf("合法配置应 200,得 %d", c)
 	}
 	// static-nginx + 合法 Docker 容器名应通过(Docker 部署的 nginx)。
-	goodDocker := `{"name":"site","type":"static-nginx","runner":"bind mount","path":"/data/web/site","backupKeep":5,"agentId":"default","reload":true,"nginxContainer":"nginx_proxy-1"}`
+	goodDocker := `{"name":"site","type":"static-nginx","runner":"软链","path":"/data/web/site","backupKeep":5,"agentId":"default","reload":true,"nginxContainer":"nginx_proxy-1"}`
 	if c := put(goodDocker); c != http.StatusOK {
 		t.Fatalf("合法容器名配置应 200,得 %d", c)
 	}
@@ -107,7 +107,7 @@ func TestPutAppConfigValidation(t *testing.T) {
 		{"备份份数越界", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":999}`},
 		{"port 为字符串(类型不符)", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","port":"8080","agentId":"default","backupKeep":5}`},
 		{"backupKeep 为字符串(类型不符)", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":"5"}`},
-		{"nginx 容器名含注入字符", `{"name":"a","type":"static-nginx","runner":"bind mount","path":"/data/web/a","agentId":"default","backupKeep":5,"reload":true,"nginxContainer":"ng;rm -rf /"}`},
+		{"nginx 容器名含注入字符", `{"name":"a","type":"static-nginx","runner":"软链","path":"/data/web/a","agentId":"default","backupKeep":5,"reload":true,"nginxContainer":"ng;rm -rf /"}`},
 		{"pm2 进程名用在非 pm2 runner", `{"name":"a","type":"node","runner":"systemd","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"my-proc"}`},
 		{"pm2 进程名含注入字符", `{"name":"a","type":"node","runner":"pm2","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"p;rm -rf /"}`},
 	} {

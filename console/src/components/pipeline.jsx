@@ -7,7 +7,7 @@ import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
 // hostingDesc:据应用类型/Runner 描述托管方式(部署成功文案用),避免硬编码 systemd 误导
 // 多 Agent / pm2 / tomcat / static 场景。
 function hostingDesc(app) {
-  if (app.type === "static-nginx") return "已 bind mount 切换对外暴露";
+  if (app.type === "static-nginx") return "已原子切换软链对外暴露";
   if (app.type === "tomcat-war") return "WAR 已替换,Tomcat 容器自动展开新版本";
   return `Agent 已落盘并由 ${app.runner === "pm2" ? "pm2" : "systemd"} 托管`;
 }
@@ -56,7 +56,7 @@ function startLogs(app, pid) {
     case "systemd": return [`systemctl daemon-reload`, `systemctl start deploy-${app.id}.service`, `进程已启动 · pid ${pid} · 由 systemd 托管(崩溃自动拉起)`];
     case "pm2": return [`pm2 start ecosystem.config.js --only ${app.id}`, `pm2: [${app.id}](0) ✓ online · pid ${pid}`];
     case "tomcat": return [`执行 ${app.workdir}/bin/startup.sh`, `Tomcat started · pid ${pid}`];
-    default: return [`bind mount 切换 → 新 release`, `无常驻进程 · 由 Web 服务器直接 serve`];
+    default: return [`原子切换软链 → 新 release`, `无常驻进程 · 由 Web 服务器直接 serve`];
   }
 }
 
@@ -89,8 +89,8 @@ function makeDeployPlan(app, opt) {
     id: "replace", label: "替换制品", dur: 1500,
     logs: isStatic ? [
       `解压至 /data/web/${app.id}-releases/${ts}/`,
-      `bind mount 切换 /data/web/${app.id} → ${app.id}-releases/${ts}`,
-      { text: "bind mount 切换完成 · root 指向新 release,无需 reload", cls: "ok" },
+      `软链切换 /data/web/${app.id} → ${app.id}-releases/${ts}`,
+      { text: "原子切换完成 · root 指向软链,无需 reload", cls: "ok" },
     ] : [
       `落盘 tmp/upload_${opt.sha.slice(0, 6)} · 二次校验通过`,
       `rename 原子替换 ${app.path}`,
@@ -122,7 +122,7 @@ function makeDeployPlan(app, opt) {
       id: "rb-restore", label: "回滚 · 还原备份", dur: 1700, rollback: true,
       logs: [
         `读取 backups/${app.id}/${ts}/meta.json · ${app.version}`,
-        isStatic ? `bind mount 指回旧目录` : `rename 还原 ${app.path}`,
+        isStatic ? `软链指回旧目录(原子)` : `rename 还原 ${app.path}`,
       ],
     });
     if (!isStatic) steps.push({ id: "rb-start", label: "回滚 · 重启服务", dur: 1600, rollback: true, logs: startLogs(app, pid + 1) });
@@ -157,13 +157,13 @@ function makeRestorePlan(app, backup) {
     logs: [
       `读取 backups/${app.id}/${backup.dir}/ · ${backup.version} (${backup.size})`,
       `sha256 校验通过`,
-      isStatic ? "bind mount 切换至备份目录" : `rename 原子替换 ${app.path}`,
+      isStatic ? "软链切换至备份目录(原子)" : `rename 原子替换 ${app.path}`,
     ],
   });
   if (!isStatic) steps.push({ id: "start", label: "启动服务", dur: 1700, logs: startLogs(app, pid) });
   steps.push({
     id: "health", label: "健康检查", dur: 2000,
-    logs: isStatic ? [{ text: "bind mount 切换完成 · 无需健康检查", cls: "ok" }] : [
+    logs: isStatic ? [{ text: "软链切换完成 · 无需健康检查", cls: "ok" }] : [
       `GET ${app.health} → 200 OK · 74ms`,
       { text: `健康检查通过 · ${backup.version} 已恢复运行`, cls: "ok" },
     ],

@@ -73,7 +73,7 @@ function CreateAppDialog({ open, onClose }) {
   // slice 后可能再造出尾部 "-",故二次剥除;全空(纯非 ASCII 名)兜底为 "app"。应用名本身可中文,id 只是内部 slug。
   const appId = () => (form.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 24).replace(/-+$/, "") || "app";
   // 落盘路径:预检与创建共用同一计算,避免"预检校验 A 路径、实际部署落盘 B 路径"不一致。
-  // python/node → 入口脚本;static → web root 目录(bind mount);go/java → 制品文件(不能是目录)。
+  // python/node → 入口脚本;static → web root 目录(软链);go/java → 制品文件(不能是目录)。
   const binPathOf = (id) => {
     if (type === "python" || type === "node")
       return `/srv/apps/${id}/${form.entry || (type === "node" ? "server.js" : "app.py")}`;
@@ -149,11 +149,11 @@ function CreateAppDialog({ open, onClose }) {
   const typeEntries = Object.entries(DEPLOY_TYPES);
   const schema = type ? APP_SCHEMAS[type] : [];
   const runnersOf = type ? DEPLOY_TYPES[type].runners : [];
-  // Runner 可用性据选中 Agent 的真实能力清单:仅静态类(无进程/bind mount)无运行时依赖恒可用;
+  // Runner 可用性据选中 Agent 的真实能力清单:仅静态类(无进程/软链)无运行时依赖恒可用;
   // tomcat/pm2/systemd 等均按 caps 判定。能力未知(caps===null=Agent 不可达)才降级不禁用、留预检兜底;
   // caps 已加载但缺该 key → fail-closed 视为不可用(与 Agent 预检一致,不放过未自检出的能力)。
   const capOk = (r) => {
-    if (r === "无进程" || r === "bind mount" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有
+    if (r === "无进程" || r === "软链" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有
     if (!caps) return true; // Agent 不可达降级
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : false; // caps 已加载却无此 key → fail-closed
@@ -170,7 +170,7 @@ function CreateAppDialog({ open, onClose }) {
     const r = form.runner;
     const inType = (type ? DEPLOY_TYPES[type].runners : []).includes(r);
     let available = true;
-    if (r !== "无进程" && r !== "bind mount" && r !== "nohup" && caps) {
+    if (r !== "无进程" && r !== "软链" && r !== "nohup" && caps) {
       const c = caps.find((x) => x.key === r);
       available = c ? c.ok : false; // 与 capOk 一致:caps 已加载却缺 key → 不可用
     }

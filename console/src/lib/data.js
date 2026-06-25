@@ -9,22 +9,22 @@ const MIN = 60e3, HOUR = 3600e3, DAY = 24 * HOUR;
 const ago = (ms) => NOW - ms;
 
 // Runner 与 Agent 实际支持对齐:进程类支持 systemd / pm2 / nohup(nohup 托管模式,无监管、崩了不自动拉起);
-// static bind mount 托管、tomcat 容器托管。
+// static 软链托管、tomcat 容器托管。
 const DEPLOY_TYPES = {
   "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".jar" },
   "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war" },
   "native-binary":    { label: "原生二进制",    tone: "cyan",    runners: ["systemd", "pm2", "nohup"], artifactExt: "" },
   "python":       { label: "Python",       tone: "info",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".py / .tar.gz" },
   "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".js / .tar.gz" },
-  "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["bind mount"], artifactExt: ".tar.gz / .zip" },
+  "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["软链"], artifactExt: ".tar.gz / .zip" },
 };
 
 // 进程类应用:走 systemd / pm2 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。
-// static-nginx 走 bind mount 切换、tomcat-war 走容器,不在内。
+// static-nginx 走软链切换、tomcat-war 走容器,不在内。
 const PROCESS_TYPES = ["native-binary", "java-jar", "python", "node"];
 const isProcessType = (t) => PROCESS_TYPES.includes(t);
 
-// 所有有真机 Deployer 的类型:进程类 + static-nginx(bind mount)+ tomcat-war(容器)。
+// 所有有真机 Deployer 的类型:进程类 + static-nginx(软链)+ tomcat-war(容器)。
 // 决定真机部署/还原/备份是否走 Agent(日志另判,见 isProcessType)。
 const REAL_TYPES = [...PROCESS_TYPES, "static-nginx", "tomcat-war"];
 const isRealType = (t) => REAL_TYPES.includes(t);
@@ -110,7 +110,7 @@ const INITIAL_APPS = [
     path: "/data/web/dq-frontend → releases/20260610_1421/", workdir: "/data/web",
     health: "—", healthType: "无",
     logPaths: ["/var/log/nginx/dq-access.log", "/var/log/nginx/dq-error.log"],
-    jvm: "部署后 nginx -s reload: 否(bind mount 切换)", user: "nginx",
+    jvm: "部署后 nginx -s reload: 否(软链切换)", user: "nginx",
     backupKeep: 5, lastDeploy: ago(2 * DAY), uptime: "—", mem: "—", cpu: "—",
     artifactName: "dq-frontend-dist", extraFiles: [],
   },

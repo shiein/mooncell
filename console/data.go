@@ -106,7 +106,7 @@ func (a *api) deleteEntity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "服务端权威记录不可前端删除"})
 		return
 	}
-	// 应用不允许走通用元数据删除:只删 Console 元数据会在 Agent 侧残留 systemd/pm2/bind mount 资源,
+	// 应用不允许走通用元数据删除:只删 Console 元数据会在 Agent 侧残留 systemd/pm2/软链资源,
 	// 且审计「删除应用」名不副实。真正删除须先 DELETE /api/agent/apps/{id} 下线,再删元数据。
 	if kind == "app" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "应用不能仅删元数据;请先经 Agent 下线(DELETE /api/agent/apps/{id})再删除"})
