@@ -27,7 +27,7 @@ var appTypeRunners = map[string][]string{
 	"java-jar":      {"systemd", "pm2", "nohup"},
 	"python":        {"systemd", "pm2", "nohup"},
 	"node":          {"pm2", "systemd", "nohup"},
-	"static-nginx":  {"软链", "无进程"},
+	"static-nginx":  {"bind mount", "无进程"},
 	"tomcat-war":    {"tomcat"},
 }
 

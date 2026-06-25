@@ -29,13 +29,13 @@ function OverviewTab({ app, releases }) {
     const iv = setInterval(tick, 10000);
     return () => { alive = false; clearInterval(iv); };
   }, [app.id, real]);
-  // 容器/软链托管(tomcat/static):真实类型但平台不托管进程,不能显示「未运行」误导。
+  // 容器/bind mount 托管(tomcat/static):真实类型但平台不托管进程,不能显示「未运行」误导。
   const nonProcessReal = isRealType(app.type) && !isProcessType(app.type);
   // 真实进程类的进程行优先用 live;未拉到时显式标注,不回退 mock pid/uptime。
   const procRow = real
     ? (live ? (live.active ? `pid ${live.pid || "?"} · ${live.state}` : `未运行 · ${live.state || "inactive"}`) : "查询中…")
     : nonProcessReal
-      ? (app.type === "tomcat-war" ? "Tomcat 容器托管 · 无平台进程" : "nginx 软链托管 · 无平台进程")
+      ? (app.type === "tomcat-war" ? "Tomcat 容器托管 · 无平台进程" : "nginx bind mount 托管 · 无平台进程")
       : (app.pid ? `pid ${app.pid} · 运行 ${app.uptime}` : "未运行");
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
@@ -46,7 +46,7 @@ function OverviewTab({ app, releases }) {
           <InfoRow label="进程" mono>{procRow}</InfoRow>
           <InfoRow label="资源" mono>{real
             ? (live && live.active ? `CPU ${live.cpu || "—"} · 内存 ${live.mem || "—"}` : "—")
-            : nonProcessReal ? "—(容器/软链托管,平台不采集)"
+            : nonProcessReal ? "—(容器/bind mount 托管,平台不采集)"
             : (app.pid ? `CPU ${app.cpu} · 内存 ${app.mem}` : "—")}</InfoRow>
           <InfoRow label="Runner"><span className="code-chip">{app.runner}</span></InfoRow>
         </div>
@@ -362,7 +362,7 @@ function ConfigTab({ app }) {
     getAgentCapabilities(app.agentId).then((c) => setCaps(c && c.capabilities ? c.capabilities : null));
   }, [app.agentId]);
   const capOk = (r) => {
-    if (r === "无进程" || r === "软链" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有(与新建向导一致)
+    if (r === "无进程" || r === "bind mount" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有(与新建向导一致)
     if (!caps) return true;
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : false;

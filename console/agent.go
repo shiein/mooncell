@@ -402,7 +402,7 @@ func (a *api) streamAgentResp(w http.ResponseWriter, resp *http.Response, err er
 }
 
 // agentListBackups 透传历史备份列表(Agent 据已存应用配置服务端派生)。
-// static-nginx 的历史版本是 release 软链,改查 /releases(binPath 服务端从应用配置取)。
+// static-nginx 的历史版本是 release bind mount,改查 /releases(binPath 服务端从应用配置取)。
 func (a *api) agentListBackups(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	cl, _, ok := a.requireAppRouting(w, id)

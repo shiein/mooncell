@@ -94,7 +94,7 @@ test('tomcat-war 的 tomcat Runner 置灰(caps 缺 tomcat key → fail-closed)',
   await expect(page.locator('option[value="tomcat"]')).toBeDisabled();
 });
 
-test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ page }) => {
+test('切换类型后陈旧 Runner 自动纠正(systemd → bind mount)', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: '应用 Applications' }).click();
   await page.getByRole('button', { name: /新建应用/ }).click();
@@ -104,12 +104,12 @@ test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ p
   const runnerSel = page.locator('select').filter({ has: page.locator('option[value="systemd"]') });
   await runnerSel.selectOption('systemd');
   await expect(runnerSel).toHaveValue('systemd');
-  // 退回选 static-nginx(runner 仅 软链)→ 陈旧的 systemd 应被自动清空、回落 软链
+  // 退回选 static-nginx(runner 仅 bind mount)→ 陈旧的 systemd 应被自动清空、回落 bind mount
   await page.getByRole('button', { name: '上一步', exact: true }).click();
   await page.getByRole('button', { name: /Static \/ Nginx/ }).click();
   await page.getByRole('button', { name: '下一步', exact: true }).click();
-  const staticSel = page.locator('select').filter({ has: page.locator('option[value="软链"]') });
-  await expect(staticSel).toHaveValue('软链');
+  const staticSel = page.locator('select').filter({ has: page.locator('option[value="bind mount"]') });
+  await expect(staticSel).toHaveValue('bind mount');
 });
 
 test('真实应用部署弹窗无"示例制品演示"入口(必须真实文件)', async ({ page }) => {
