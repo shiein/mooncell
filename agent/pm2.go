@@ -121,6 +121,24 @@ func pm2Online(name string) bool {
 	return p != "" && p != "0"
 }
 
+// 进程态轮询预算:pm2 托管的慢启动进程(尤其 Java/JVM;接管模式 restart 时旧实例端口可能未及时释放,
+// 新实例瞬时 BindException 崩溃后被 pm2 自动重启)在固定 1s 采样点常处于 launching/errored 窗口,
+// `pm2 pid` 此刻返回 0,单次采样会把好进程误判成未起。给足预算轮询等其稳定 online,与 HTTP 探活同理。
+const pm2OnlineRetries = 15
+const pm2OnlineInterval = time.Second
+
+// pm2OnlineWithin 在预算内轮询进程状态:一旦 online 立即返回 true;耗尽预算仍未 online 才返回 false。
+// 立即先查一次(健康进程零额外延迟,与原 1s 单采样等速),不在线再按 interval 轮询容忍慢启动/重启窗口。
+func pm2OnlineWithin(name string, retries int, interval time.Duration) bool {
+	for i := 0; i < retries; i++ {
+		if pm2Online(name) {
+			return true
+		}
+		time.Sleep(interval)
+	}
+	return false
+}
+
 // pm2Start 以 ecosystem 文件启动(先 delete 再 start,保证用最新配置),返回 pid。
 func pm2Start(cfg DeployConfig, eco string) (string, error) {
 	name := unitName(cfg.ID)
@@ -220,9 +238,10 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	}
 	time.Sleep(time.Second)
 
-	// 健康检查:HTTP 探活;未配置 HTTP 时退化为查 pm2 进程状态,避免启动失败被判成功。
+	// 健康检查:先在预算内轮询确认 pm2 进程稳定 online(Java 等慢启动/接管重启窗口容错,见 pm2OnlineWithin),
+	// 再做可选 HTTP 探活;未配置 HTTP 时即以进程态为准,避免启动失败被判成功。
 	var hlog []string
-	if processHealthy(cfg.Health, pm2Online(name), &hlog) {
+	if processHealthy(cfg.Health, pm2OnlineWithin(name, pm2OnlineRetries, pm2OnlineInterval), &hlog) {
 		add("健康检查", true, hlog...)
 		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
 		res.Result = "success"
@@ -271,7 +290,7 @@ func (a *agent) rollbackPm2(cfg DeployConfig, bkDir string) ([]string, bool) {
 	}
 	time.Sleep(time.Second)
 	var rh []string
-	ok := processHealthy(cfg.Health, pm2Online(name), &rh) // 回滚同样确认 pm2 进程真起来
+	ok := processHealthy(cfg.Health, pm2OnlineWithin(name, pm2OnlineRetries, pm2OnlineInterval), &rh) // 回滚同样确认 pm2 进程真起来(慢启动容错)
 	rlog = append(rlog, rh...)
 	return rlog, ok
 }

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // execStart:native-binary / python(venv 解释器)的命令生成。
@@ -778,6 +779,44 @@ func TestRunDeployPm2Orchestration(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Errorf("pm2 调用应包含 %q,实际:\n%s", want, log)
 		}
+	}
+}
+
+// pm2 进程态判定:慢启动/接管重启窗口下 pm2 pid 先返回 0 再转为真实 pid。
+// 单次采样(pm2Online)会把好进程误判成未起;pm2OnlineWithin 应轮询容忍、等其稳定 online。
+func TestPm2OnlineWithinToleratesRestartWindow(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "n")
+	// pm2 pid:前两次返回 0(模拟 errored/重启窗口),第三次起返回真实 pid。
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = pid ]; then\n" +
+		"  n=$(cat " + counter + " 2>/dev/null || echo 0); n=$((n+1)); echo $n > " + counter + "\n" +
+		"  if [ $n -ge 3 ]; then echo 12345; else echo 0; fi; exit 0\n" +
+		"fi\necho ok\n"
+	if err := os.WriteFile(filepath.Join(dir, "pm2"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// 单次采样(第一次)进程显示未在线——这正是原 bug 误判的那一下。
+	if pm2Online("app") {
+		t.Fatal("首次采样进程应为未在线(模拟重启窗口),否则用例没覆盖到 bug 场景")
+	}
+	// 轮询应容忍前几次 0,等到进程转为 online。
+	if !pm2OnlineWithin("app", 10, 5*time.Millisecond) {
+		t.Fatal("进程在预算内转为 online,pm2OnlineWithin 应判在线")
+	}
+}
+
+// pm2 进程态判定:进程始终未起,轮询耗尽预算必须如实返回 false(不能把真失败拖成成功)。
+func TestPm2OnlineWithinFailsWhenNeverOnline(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pm2"), []byte("#!/bin/sh\n[ \"$1\" = pid ] && echo 0\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if pm2OnlineWithin("app", 3, 5*time.Millisecond) {
+		t.Fatal("进程始终未在线,轮询耗尽预算应返回 false")
 	}
 }
 
