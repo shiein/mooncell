@@ -627,8 +627,8 @@ func (a *api) applyLifecycleState(appID string, body []byte) {
 	}
 }
 
-// addRunnerQuery 据服务端派生的 runner 往 query 注入定位参数:pm2→runner+pm2Name、nohup→runner+binPath。
-// 集中一处,避免某条链路(此前的下线)漏传 pm2Name 导致只删 deploy-<id>、接管的真实进程残留。
+// addRunnerQuery 据服务端派生的 runner 往 query 注入定位参数:pm2→runner+pm2Name、nohup→runner+binPath、
+// 软链(static-nginx)→binPath。集中一处,避免某条链路(此前的下线)漏传 pm2Name/binPath 导致残留。
 func (a *api) addRunnerQuery(q url.Values, id, runner string) {
 	switch runner {
 	case "pm2":
@@ -639,6 +639,8 @@ func (a *api) addRunnerQuery(q url.Values, id, runner string) {
 	case "nohup":
 		q.Set("runner", "nohup")
 		q.Set("binPath", a.appBinPathOf(id))
+	case "软链":
+		q.Set("binPath", a.appBinPathOf(id)) // Agent 据此删除对外软链下线 web root
 	}
 }
 

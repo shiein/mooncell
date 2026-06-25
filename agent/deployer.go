@@ -1226,13 +1226,34 @@ func extractArchiveSmart(archive, dest, format string) error {
 }
 
 // switchSymlink 原子切换软链 link → target:先建临时软链再 rename 覆盖,避免出现 link 短暂消失的窗口。
+// target 须为绝对路径;软链存储为相对路径(相对于 link 所在目录),而非宿主机绝对路径——
+// 绝对软链在 Docker 容器内不存在该路径导致断链;相对软链在 host 与容器内都能解析
+// (release 按设计就在 <BinPath>-releases 下、与软链同一被挂载目录里)。
 func switchSymlink(target, link string) error {
+	rel, err := filepath.Rel(filepath.Dir(link), target)
+	if err != nil {
+		return err
+	}
 	tmp := link + ".tmp"
 	os.Remove(tmp)
-	if err := os.Symlink(target, tmp); err != nil {
+	if err := os.Symlink(rel, tmp); err != nil {
 		return err
 	}
 	return os.Rename(tmp, link)
+}
+
+// resolveSymlinkTarget 将 os.Readlink 的结果(相对或绝对)解析为绝对路径。
+// 空串(首次部署 BinPath 不存在,Readlink 失败)原样返回,保持「prevTarget=="" 表示无旧版本」语义;
+// 相对路径相对于 link 所在目录(与 switchSymlink 写入时的 filepath.Rel 对称);
+// 绝对路径(历史遗留的绝对软链)原样返回。
+func resolveSymlinkTarget(link, target string) string {
+	if target == "" {
+		return "" // 不能落到下面的 Join:filepath.Join(dir(link), "")==dir(link),会把首次部署误判成有旧版本→回滚指回父目录
+	}
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target)
+	}
+	return filepath.Join(filepath.Dir(link), target)
 }
 
 func (a *agent) staticBinPathIsDeployRoot(binPath string) bool {
@@ -1273,6 +1294,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 
 	// 2. 记录当前软链指向(用于回滚);首次部署无旧目标
 	prevTarget, _ := os.Readlink(cfg.BinPath)
+	prevTarget = resolveSymlinkTarget(cfg.BinPath, prevTarget) // 相对软链→绝对,供回滚 switchSymlink 使用
 	if prevTarget == "" {
 		add("备份当前版本", true, "首次部署,无旧 release 需记录")
 	} else {

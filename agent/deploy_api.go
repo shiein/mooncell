@@ -282,7 +282,11 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 		pm2("delete", pn)
 	}
 	// nohup 托管:Console 传 binPath 时停掉进程并清理 pidfile/spec(无监管,不停会留孤儿进程)。
+	// static-nginx(软链托管):Console 传 binPath 时删除对外软链下线 web root(release 目录保留,与制品/备份保留一致)。
 	if bp := strings.TrimSpace(r.URL.Query().Get("binPath")); bp != "" && withinRoots(bp, a.cfg.Paths.DeployRoots) {
+		if fi, err := os.Lstat(bp); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			os.Remove(bp) // 软链→删除即下线;Lstat 不跟随,不会误删 release 内容
+		}
 		nohupStop(DeployConfig{BinPath: bp})
 		os.Remove(nohupSpecPath(bp))
 	}

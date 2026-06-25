@@ -489,9 +489,25 @@ func TestStaticDeployAcceptsSymlinkAndAbsent(t *testing.T) {
 	if fi, err := os.Lstat(binPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("首次部署后目标应为软链, err=%v", err)
 	}
+	// 软链须为相对路径(相对于 link 所在目录)——绝对软链在 Docker 容器内不存在该路径导致断链。
+	target, err := os.Readlink(binPath)
+	if err != nil {
+		t.Fatalf("Readlink 失败: %v", err)
+	}
+	if filepath.IsAbs(target) {
+		t.Fatalf("软链应为相对路径(容器透明),实际为绝对路径 %q", target)
+	}
+	// 相对软链在 host 上能正确解析到真实 release 目录
+	if resolved, err := filepath.EvalSymlinks(binPath); err != nil || !fileExists(resolved) {
+		t.Fatalf("相对软链应能解析到真实 release 目录, resolved=%q err=%v", resolved, err)
+	}
 	// 再次:目标已是软链 → 原子重指
 	if res := a.runDeployStatic(DeployConfig{ID: "s", Type: "static-nginx", BinPath: binPath, Version: "v2", BackupKeep: 3}, mk(), func(Step) {}); res.Result != "success" {
 		t.Fatalf("二次部署(重指软链)应成功,got %q", res.Result)
+	}
+	// 重指后软链仍须为相对路径
+	if target, err := os.Readlink(binPath); err != nil || filepath.IsAbs(target) {
+		t.Fatalf("重指后软链仍应为相对路径, got %q err=%v", target, err)
 	}
 }
 
@@ -672,6 +688,13 @@ func TestStaticDeployReloadFailureBlocks(t *testing.T) {
 	if res.Result == "success" {
 		t.Fatalf("reload 失败时部署不应报 success,got %q", res.Result)
 	}
+	// 首次部署失败时,web root 软链不得被「回滚」指回父目录——这会把整个部署根(含所有 release、上传包)
+	// 对外目录遍历暴露。该症状源于 prevTarget 空串语义被破坏(resolveSymlinkTarget 把 "" 解析成 dir(link))。
+	if t2, err := os.Readlink(binPath); err == nil {
+		if resolveSymlinkTarget(binPath, t2) == filepath.Dir(binPath) {
+			t.Fatalf("首次部署失败后 web root 不应指回父目录 %q(目录遍历暴露)", filepath.Dir(binPath))
+		}
+	}
 }
 
 // writeExtracted:单文件超出解包上限必须报错,不允许静默截断落一个残缺文件。
@@ -769,8 +792,10 @@ func TestRotateReleasesKeepsCurrent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// 软链指向最老的 release(模拟「还原到旧版本」后的状态)
-	os.Symlink(filepath.Join(releasesDir, names[0]), binPath)
+	// 软链指向最老的 release(模拟「还原到旧版本」后的状态);用 switchSymlink 走真实相对软链路径。
+	if err := switchSymlink(filepath.Join(releasesDir, names[0]), binPath); err != nil {
+		t.Fatalf("switchSymlink 失败: %v", err)
+	}
 
 	a := &agent{}
 	a.rotateReleases(releasesDir, 2) // 只保留 2 份

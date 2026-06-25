@@ -120,6 +120,7 @@ func (a *agent) restoreStatic(cfg DeployConfig, releaseTS string, emit func(Step
 	add("校验 release", true, releaseDir)
 
 	prevTarget, _ := os.Readlink(cfg.BinPath)
+	prevTarget = resolveSymlinkTarget(cfg.BinPath, prevTarget) // 相对软链→绝对,供回滚 switchSymlink 使用
 	add("记录当前指向", true, "当前 → "+prevTarget)
 
 	if err := switchSymlink(releaseDir, cfg.BinPath); err != nil {
