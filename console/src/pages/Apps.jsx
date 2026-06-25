@@ -276,6 +276,12 @@ function CreateAppDialog({ open, onClose }) {
               {(type === "python" || type === "node") ? "(由应用名与入口文件自动生成)" : ""}
             </div>
           ) : null}
+          {/* 静态站点部署机制说明:相对软链原子切换 + 路径要求,避免误填真实目录被拒。 */}
+          {type === "static-nginx" ? (
+            <div style={{ fontSize: 11.5, color: "var(--muted-fg)", background: "var(--muted)", borderRadius: 8, padding: "8px 12px", lineHeight: 1.65 }}>
+              <b style={{ color: "var(--fg)" }}>静态站点部署说明：</b>制品会解包到 <span className="mono" style={{ color: "var(--fg)" }}>&lt;目标目录&gt;-releases/&lt;时间戳&gt;/</span>，再把「目标目录」这条<b>相对软链</b>原子切换到新版本——切换瞬时生效、<b>无需 reload</b>；相对软链在 Docker 容器的路径映射下也能正确解析（宿主机与容器内都透明）。「目标目录」须是 Mooncell 托管的软链或尚不存在的新路径，<b>不能是已存在的真实目录/文件</b>（否则部署会被拒绝，以免覆盖你的数据）。nginx 的 root/alias 指向此路径即可。
+            </div>
+          ) : null}
           {selectedRunner() === "pm2" ? (
             <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署自动取该进程运行路径(pm_exec_path)替换文件并 pm2 restart,无需手动对齐路径(上面填的目标路径在接管模式下被忽略);留空 = Mooncell 托管(deploy-<id>,写 ecosystem)">
               <input className="input mono" style={{ fontSize: 12.5 }} placeholder="如 my-app 或 0(留空=托管)"
