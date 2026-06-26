@@ -284,7 +284,7 @@ function CreateAppDialog({ open, onClose }) {
             </div>
           ) : null}
           {selectedRunner() === "pm2" ? (
-            <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署自动取该进程运行路径(pm_exec_path)替换文件并 pm2 restart,无需手动对齐路径(上面填的目标路径在接管模式下被忽略);留空 = Mooncell 托管(deploy-<id>,写 ecosystem)">
+            <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署自动定位该进程实际运行的制品并替换 + pm2 restart(Java 取启动参数里的 -jar 的 jar,node/python/原生取 pm_exec_path),无需手动对齐路径(上面填的目标路径在接管模式下被忽略);留空 = Mooncell 托管(deploy-<id>,写 ecosystem)">
               <input className="input mono" style={{ fontSize: 12.5 }} placeholder="如 my-app 或 0(留空=托管)"
                 value={form.pm2Name || ""} onChange={(e) => setForm({ ...form, pm2Name: e.target.value })} />
             </Field>

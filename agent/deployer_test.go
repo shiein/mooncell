@@ -82,27 +82,50 @@ func TestPm2ProcNameAndAdopt(t *testing.T) {
 	}
 }
 
-// 接管模式:从 pm2 jlist 按进程名或数字 id 取真实运行路径 pm_exec_path;找不到/无路径报错。
-func TestParsePm2ExecPath(t *testing.T) {
+// 接管模式:从 pm2 jlist 按进程名/数字 id 解析部署目标。非 java 用 pm_exec_path;
+// java-jar 必须解析出 .jar(pm_exec_path 是 java 解释器时从 args 取),绝不返回 java 二进制。
+func TestParsePm2DeployTarget(t *testing.T) {
 	jlist := `[
 		{"name":"web","pm_id":0,"pm2_env":{"pm_exec_path":"/srv/apps/web/server.js"}},
 		{"name":"gw","pm_id":3,"pm2_env":{"pm_exec_path":"/home/app/gateway"}},
 		{"name":"noPath","pm_id":4,"pm2_env":{"pm_exec_path":""}}
 	]`
-	if p, err := parsePm2ExecPath(jlist, "gw"); err != nil || p != "/home/app/gateway" {
-		t.Fatalf("按名取路径失败: %q err=%v", p, err)
+	// 非 java:pm_exec_path 即目标(脚本/二进制)。
+	if p, err := parsePm2DeployTarget(jlist, "gw", "native-binary"); err != nil || p != "/home/app/gateway" {
+		t.Fatalf("native 按名取目标失败: %q err=%v", p, err)
 	}
-	if p, err := parsePm2ExecPath(jlist, "0"); err != nil || p != "/srv/apps/web/server.js" {
-		t.Fatalf("按数字 id 取路径失败: %q err=%v", p, err)
+	if p, err := parsePm2DeployTarget(jlist, "0", "node"); err != nil || p != "/srv/apps/web/server.js" {
+		t.Fatalf("node 按数字 id 取目标失败: %q err=%v", p, err)
 	}
-	if _, err := parsePm2ExecPath(jlist, "ghost"); err == nil {
+	if _, err := parsePm2DeployTarget(jlist, "ghost", "node"); err == nil {
 		t.Fatal("找不到进程应报错")
 	}
-	if _, err := parsePm2ExecPath(jlist, "noPath"); err == nil {
+	if _, err := parsePm2DeployTarget(jlist, "noPath", "node"); err == nil {
 		t.Fatal("无 pm_exec_path 应报错")
 	}
-	if _, err := parsePm2ExecPath("not-json", "x"); err == nil {
+	if _, err := parsePm2DeployTarget("not-json", "x", "node"); err == nil {
 		t.Fatal("非法 JSON 应报错")
+	}
+
+	// java-jar 核心回归:`pm2 start <java> -- -jar nlq.jar` → pm_exec_path 是 java,目标必须是 args 里的 jar。
+	javaList := `[
+		{"name":"nlq","pm_id":1,"pm2_env":{"pm_exec_path":"/home/apps/jdk/bin/java","args":["-jar","/home/apps/nlq2/nlq.jar"]}},
+		{"name":"nlq-i","pm_id":2,"pm2_env":{"pm_exec_path":"/home/apps/nlq2/nlq.jar","args":[]}},
+		{"name":"nlq-bad","pm_id":3,"pm2_env":{"pm_exec_path":"/home/apps/jdk/bin/java","args":["-Xmx512m"]}},
+		{"name":"nlq-str","pm_id":4,"pm2_env":{"pm_exec_path":"/home/apps/jdk/bin/java","args":"-jar /home/apps/nlq2/nlq.jar"}}
+	]`
+	if p, err := parsePm2DeployTarget(javaList, "nlq", "java-jar"); err != nil || p != "/home/apps/nlq2/nlq.jar" {
+		t.Fatalf("java 接管:应取 args 里的 jar 而非 java 解释器,得 %q err=%v", p, err)
+	}
+	if p, err := parsePm2DeployTarget(javaList, "nlq-i", "java-jar"); err != nil || p != "/home/apps/nlq2/nlq.jar" {
+		t.Fatalf("java(--interpreter java 启动):pm_exec_path 即 jar,得 %q err=%v", p, err)
+	}
+	if p, err := parsePm2DeployTarget(javaList, "nlq-str", "java-jar"); err != nil || p != "/home/apps/nlq2/nlq.jar" {
+		t.Fatalf("java args 为字符串形态也应解析出 jar,得 %q err=%v", p, err)
+	}
+	// pm_exec_path 是 java 且 args 无 jar:必须报错而非返回 java(否则会覆盖 JDK)。
+	if p, err := parsePm2DeployTarget(javaList, "nlq-bad", "java-jar"); err == nil {
+		t.Fatalf("java 无法定位 jar 时必须报错,却返回了 %q", p)
 	}
 }
 

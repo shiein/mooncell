@@ -32,36 +32,86 @@ func pm2ProcName(cfg DeployConfig) string {
 	return unitName(cfg.ID)
 }
 
-// pm2ExecPath 取 pm2 进程的真实运行文件完整路径(pm_exec_path),供接管模式自动定位部署目标——
-// 用户无需手动对齐路径,Mooncell 永远 deploy 到 pm2 真正在跑的那个文件。用 jlist(JSON)而非
-// describe(文本)以稳健解析;进程不存在/无路径则报错。
-func pm2ExecPath(nameOrID string) (string, error) {
+// pm2DeployTarget 取接管模式下应被部署(备份+替换)的真实文件路径。用 jlist(JSON)而非 describe(文本)稳健解析。
+// 关键:pm_exec_path 是「pm2 实际执行的那个文件」——node/python/native 下它就是脚本/二进制(即部署目标),
+// 但 java-jar 下,若用户以 `pm2 start <java> -- -jar app.jar` 启动,pm_exec_path 是 **java 解释器**(不是 jar)!
+// 直接拿它当目标会把新 jar 覆盖到 java 二进制上、毁掉 JDK。故对 java-jar 必须解析出真正的 .jar(见 parsePm2DeployTarget)。
+func pm2DeployTarget(nameOrID, typ string) (string, error) {
 	out, err := pm2("jlist")
 	if err != nil {
 		return "", fmt.Errorf("pm2 jlist 失败: %s", out)
 	}
-	return parsePm2ExecPath(out, nameOrID)
+	return parsePm2DeployTarget(out, nameOrID, typ)
 }
 
-// parsePm2ExecPath 从 pm2 jlist 的 JSON 里按进程名或数字 id 找出 pm_exec_path(纯函数,便于测试)。
-func parsePm2ExecPath(jlist, nameOrID string) (string, error) {
-	var apps []struct {
-		Name   string `json:"name"`
-		PmID   int    `json:"pm_id"`
-		Pm2Env struct {
-			PmExecPath string `json:"pm_exec_path"`
-		} `json:"pm2_env"`
+// pm2Proc 是 pm2 jlist 里单个进程的关心字段。args 在不同 pm2 版本可能是 []string 或空格分隔字符串,故 RawMessage 兜底。
+type pm2Proc struct {
+	Name   string `json:"name"`
+	PmID   int    `json:"pm_id"`
+	Pm2Env struct {
+		PmExecPath string          `json:"pm_exec_path"`
+		Args       json.RawMessage `json:"args"`
+	} `json:"pm2_env"`
+}
+
+// pm2Args 把 pm2_env.args 归一为 []string(兼容数组或单字符串两种形态)。
+func pm2Args(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
 	}
+	var arr []string
+	if json.Unmarshal(raw, &arr) == nil {
+		return arr
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.Fields(s)
+	}
+	return nil
+}
+
+// firstJar 返回参数里的 jar 路径:优先取紧跟 -jar 的那个,否则取第一个 .jar 结尾的 token。
+func firstJar(args []string) string {
+	for i, a := range args {
+		if a == "-jar" && i+1 < len(args) && strings.HasSuffix(args[i+1], ".jar") {
+			return args[i+1]
+		}
+	}
+	for _, a := range args {
+		if strings.HasSuffix(a, ".jar") {
+			return a
+		}
+	}
+	return ""
+}
+
+// parsePm2DeployTarget 从 pm2 jlist 按进程名/数字 id 解析接管模式的部署目标(纯函数,便于测试)。
+//   - 非 java-jar:pm_exec_path 即被执行的脚本/二进制,直接作为目标;
+//   - java-jar:pm_exec_path 是 .jar(--interpreter java 启动)→ 用之;否则它是 java 解释器
+//     (`pm2 start <java> -- -jar app.jar` 启动)→ 必须从 args 里定位 .jar;找不到则拒绝(绝不覆盖 java)。
+func parsePm2DeployTarget(jlist, nameOrID, typ string) (string, error) {
+	var apps []pm2Proc
 	if err := json.Unmarshal([]byte(jlist), &apps); err != nil {
 		return "", fmt.Errorf("解析 pm2 jlist 失败: %v", err)
 	}
 	for _, p := range apps {
-		if p.Name == nameOrID || fmt.Sprint(p.PmID) == nameOrID {
-			if strings.TrimSpace(p.Pm2Env.PmExecPath) == "" {
-				return "", fmt.Errorf("pm2 进程 %s 无 pm_exec_path", nameOrID)
-			}
-			return p.Pm2Env.PmExecPath, nil
+		if p.Name != nameOrID && fmt.Sprint(p.PmID) != nameOrID {
+			continue
 		}
+		exec := strings.TrimSpace(p.Pm2Env.PmExecPath)
+		if exec == "" {
+			return "", fmt.Errorf("pm2 进程 %s 无 pm_exec_path", nameOrID)
+		}
+		if typ != "java-jar" || strings.HasSuffix(exec, ".jar") {
+			return exec, nil
+		}
+		// java-jar 且 pm_exec_path 不是 jar(是 java 解释器):从启动参数里找真正的 jar。
+		if jar := firstJar(pm2Args(p.Pm2Env.Args)); jar != "" {
+			return jar, nil
+		}
+		return "", fmt.Errorf("接管的 pm2 进程 %s 的 pm_exec_path 是 java 解释器(%s)、启动参数中也未找到 .jar,"+
+			"无法安全定位部署目标(拒绝覆盖 java 二进制)。请用绝对路径 jar 启动(pm2 start <绝对路径>.jar --interpreter java),"+
+			"或确认启动参数含 -jar <jar 路径>", nameOrID, exec)
 	}
 	return "", fmt.Errorf("pm2 中找不到进程 %s", nameOrID)
 }
@@ -161,17 +211,18 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 
 	archived := scriptArchived(cfg, artifact) // python/node 多文件压缩包 → 解包到目录(依赖 Type,不依赖 BinPath)
 
-	// 接管模式:部署目标自动取该 pm2 进程真实运行的文件(pm_exec_path),覆盖 Console 下发的 BinPath。
-	// 用户只填进程名即可,不必手动对齐路径;同时也校验了进程存在(取不到=进程不存在)。
+	// 接管模式:部署目标取该 pm2 进程真正应被替换的文件(覆盖 Console 下发的 BinPath)。
+	// 对 java-jar 必须是 .jar 而非 java 解释器(见 pm2DeployTarget),否则会覆盖 java 二进制毁掉 JDK。
+	// 用户只填进程名即可,不必手动对齐路径;取不到目标=进程不存在或无法安全定位,直接失败不替换。
 	if pm2Adopt(cfg) {
-		execPath, perr := pm2ExecPath(pm2ProcName(cfg))
+		target, perr := pm2DeployTarget(pm2ProcName(cfg), cfg.Type)
 		if perr != nil {
-			add("校验目标", false, "接管模式无法定位进程运行路径:"+perr.Error()+"(请确认该 pm2 进程已存在)")
+			add("校验目标", false, "接管模式无法定位部署目标:"+perr.Error()+"(请确认该 pm2 进程已存在)")
 			res.Result = "failed"
 			return res
 		}
-		cfg.BinPath = execPath
-		add("接管目标", true, "pm2 进程 "+pm2ProcName(cfg)+" 运行于 "+execPath+";部署将备份并替换此文件后 restart")
+		cfg.BinPath = target
+		add("接管目标", true, "pm2 进程 "+pm2ProcName(cfg)+" 部署目标 "+target+";将备份并替换此文件后 restart")
 	}
 
 	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "目标 "+cfg.BinPath, "Runner pm2")
