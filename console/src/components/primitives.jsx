@@ -230,6 +230,40 @@ function ToastHost() {
 }
 const toast = (msg, opts) => window.__mcToast && window.__mcToast(msg, opts);
 
+// ---------- Confirm(命令式确认框,替代浏览器原生 confirm) ----------
+// 用法:const ok = await confirmDialog({ title, message, confirmText, cancelText, tone, icon });
+// tone="danger" 用 destructive 红色按钮;返回 Promise<boolean>(取消/Esc/点遮罩 = false)。
+function ConfirmHost() {
+  const [st, setSt] = React.useState(null); // { ...opts, resolve } | null
+  React.useEffect(() => {
+    window.__mcConfirm = (opts) => new Promise((resolve) => {
+      setSt((prev) => {
+        if (prev) prev.resolve(false); // 已有未决确认框:旧的按取消收尾,避免悬挂
+        return { ...opts, resolve };
+      });
+    });
+    return () => { window.__mcConfirm = null; };
+  }, []);
+  if (!st) return null;
+  const done = (ok) => { const r = st.resolve; setSt(null); r(ok); };
+  const danger = st.tone === "danger";
+  return (
+    <Dialog open onClose={() => done(false)} width={st.width || 460} title={st.title || "确认操作"}
+      foot={<React.Fragment>
+        <Btn variant="ghost" onClick={() => done(false)}>{st.cancelText || "取消"}</Btn>
+        <Btn variant={danger ? "destructive" : "primary"} icon={st.icon || (danger ? "trash" : "check")}
+          onClick={() => done(true)}>{st.confirmText || "确认"}</Btn>
+      </React.Fragment>}>
+      <div style={{ fontSize: 13, lineHeight: 1.65, color: "var(--fg)", whiteSpace: "pre-wrap" }}>{st.message}</div>
+    </Dialog>
+  );
+}
+// confirmDialog:字符串或选项对象皆可;ConfirmHost 未挂载时降级到原生 confirm 兜底。
+const confirmDialog = (opts) => {
+  const o = typeof opts === "string" ? { message: opts } : (opts || {});
+  return window.__mcConfirm ? window.__mcConfirm(o) : Promise.resolve(window.confirm(o.message || ""));
+};
+
 function CopyChip({ text, label }) {
   const [ok, setOk] = React.useState(false);
   return (
@@ -246,5 +280,6 @@ function CopyChip({ text, label }) {
 
 export {
   Icon, Spinner, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch,
-  Tabs, Seg, Dialog, Progress, Sparkline, EmptyState, ToastHost, toast, CopyChip,
+  Tabs, Seg, Dialog, Progress, Sparkline, EmptyState, ToastHost, toast,
+  ConfirmHost, confirmDialog, CopyChip,
 };

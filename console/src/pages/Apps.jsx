@@ -1,7 +1,7 @@
 // Mooncell — 应用列表 + 新建应用向导(JSON Schema 动态表单 + 预检)
 import React from 'react';
 import { useMC, DEPLOY_TYPES, isProcessType, timeAgo } from '../lib/data.js';
-import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, EmptyState } from '../components/primitives.jsx';
+import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, EmptyState, confirmDialog } from '../components/primitives.jsx';
 import { DeployDialog } from '../components/pipeline.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { listAgentNodes, precheckApp, getAgentCapabilities } from '../lib/api.js';
@@ -339,7 +339,12 @@ function AppsPage() {
     (!q.trim() || a.name.includes(q) || a.id.includes(q.toLowerCase()))
   );
   const onDelete = async (a) => {
-    if (!confirm(`确认删除应用「${a.name}」?\n\n这会停止并移除目标机上的服务(Runner: ${a.runner}),并删除该应用记录。\n此操作不可恢复。`)) return;
+    const ok = await confirmDialog({
+      title: "删除应用",
+      message: `确认删除应用「${a.name}」?\n\n这会停止并移除目标机上的服务(Runner: ${a.runner}),并删除该应用记录。\n此操作不可恢复。`,
+      confirmText: "删除", tone: "danger",
+    });
+    if (!ok) return;
     await store.deleteApp(a);
   };
   const counts = {

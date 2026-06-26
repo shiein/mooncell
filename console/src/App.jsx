@@ -5,7 +5,7 @@ import {
   MCStore, INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
   tsDir, MC_DAY, fmtBytes,
 } from './lib/data.js';
-import { ToastHost, toast } from './components/primitives.jsx';
+import { ToastHost, ConfirmHost, toast } from './components/primitives.jsx';
 import { Shell } from './components/Shell.jsx';
 import { LoginPage } from './pages/Login.jsx';
 import { OverviewPage, CabinetPage, AuditPage } from './pages/Overview.jsx';
@@ -326,6 +326,7 @@ function App() {
         ) : null}
       </div>
       <ToastHost />
+      <ConfirmHost />
     </MCStore.Provider>
   );
 }

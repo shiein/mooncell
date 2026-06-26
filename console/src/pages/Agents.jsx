@@ -1,7 +1,7 @@
 // Mooncell — Agent 管理(仅 admin):注册 / 删除 / 连通性测试 / 自更新(按架构推送升级包)
 import React from 'react';
 import { useMC, fmtTime } from '../lib/data.js';
-import { Btn, Field, Icon, Badge, Spinner, EmptyState, Dialog, Select, toast } from '../components/primitives.jsx';
+import { Btn, Field, Icon, Badge, Spinner, EmptyState, Dialog, Select, toast, confirmDialog } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import {
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
@@ -52,7 +52,8 @@ function AgentsPage() {
         `,移除后将无法对它们部署/启停/看日志;目标机上已在跑的服务不受影响、仍会继续运行。`;
     }
     msg += `\n\n此操作不可恢复。`;
-    if (!confirm(msg)) return;
+    const ok = await confirmDialog({ title: "移除 Agent", message: msg, confirmText: "移除", tone: "danger" });
+    if (!ok) return;
     try { await removeAgentNode(a.id); toast(`已移除 Agent ${a.name}`); reload(); }
     catch (e) { toast(e.message || "删除失败", { tone: "error" }); }
   };
@@ -63,7 +64,16 @@ function AgentsPage() {
     const arch = archOf(inf.os);
     const target = arch && binByArch[arch];
     if (!target) { toast(`未找到 linux/${arch || "?"} 的升级包,请先上传`, { tone: "warn" }); return; }
-    if (!confirm(`将把 ${a.name} 从 ${inf.version || "?"} 更新到 ${target.version}(linux/${arch}),Agent 会就地重启。继续?`)) return;
+    // 版本号相同也允许更新:常用于忘记改版本号时强制重新推送覆盖(Agent 端只校验声明版本==二进制自报版本,不拒同版本)。
+    const same = inf.version && inf.version === target.version;
+    const ok = await confirmDialog({
+      title: same ? "重新推送当前版本" : "更新 Agent",
+      message: same
+        ? `${a.name} 当前已是 ${target.version}。将重新推送 linux/${arch} 升级包并就地重启(版本号不变,用于忘改版本号时强制覆盖)。继续?`
+        : `将把 ${a.name} 从 ${inf.version || "?"} 更新到 ${target.version}(linux/${arch}),Agent 会就地重启。继续?`,
+      confirmText: same ? "重新推送" : "更新", icon: "rotate",
+    });
+    if (!ok) return;
     setUpdating((m) => ({ ...m, [a.id]: true }));
     try {
       const r = await updateAgentNode(a.id);
@@ -112,8 +122,8 @@ function AgentsPage() {
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                       <Btn size="sm" variant="ghost" icon="zap" title="连通性测试"
                         onClick={() => { setInfo((m) => ({ ...m, [a.id]: undefined })); pingAgentNode(a.id).then((res) => setInfo((m) => ({ ...m, [a.id]: res && res.ok ? { ok: true, version: res.version, os: res.os } : { ok: false } }))); }}></Btn>
-                      <Btn size="sm" variant={isLatest ? "ghost" : "primary"} icon="rotate" disabled={!canUpdate || updating[a.id] || isLatest}
-                        title={!inf || !inf.ok ? "Agent 不可达" : !target ? `未上传 linux/${arch || "?"} 升级包` : isLatest ? "已是最新" : `更新到 ${target.version}`}
+                      <Btn size="sm" variant={isLatest ? "ghost" : "primary"} icon="rotate" disabled={!canUpdate || updating[a.id]}
+                        title={!inf || !inf.ok ? "Agent 不可达" : !target ? `未上传 linux/${arch || "?"} 升级包` : isLatest ? `已是最新 ${target.version} · 点击可强制重新推送(忘改版本号时用)` : `更新到 ${target.version}`}
                         onClick={() => doUpdate(a)}>{updating[a.id] ? <Spinner size={12} /> : "更新"}</Btn>
                       {a.id === "default" ? null : <Btn size="sm" variant="ghost" icon="trash" title="移除" onClick={() => onDelete(a)}></Btn>}
                     </div>
