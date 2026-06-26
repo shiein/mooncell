@@ -356,13 +356,17 @@ async function uploadChunked(file, onProgress) {
   return uploadId;
 }
 
-async function deployViaAgentStream(appId, version, releaseId, file, onEvent, onUpload) {
+// 部署制品来源三选一:artifactId(制品库已留存,优先)> file(本次上传)> 都无则报错。
+// artifactId 模式免重复上传——多 Agent 部署同一制品 / 重部署历史制品时尤其有用。
+async function deployViaAgentStream(appId, version, releaseId, file, onEvent, onUpload, artifactId) {
   try {
     const fd = new FormData();
     fd.append('version', version || '');
     fd.append('releaseId', releaseId || '');
-    // 大制品:先分块上传(断点续传)到 Console,再用 uploadId 触发部署;小制品直接随表单上传。
-    if (file && file.size > CHUNK_THRESHOLD) {
+    if (artifactId) {
+      fd.append('artifactId', artifactId);
+    } else if (file && file.size > CHUNK_THRESHOLD) {
+      // 大制品:先分块上传(断点续传)到 Console,再用 uploadId 触发部署;小制品直接随表单上传。
       const uploadId = await uploadChunked(file, onUpload);
       fd.append('uploadId', uploadId);
     } else {
@@ -456,12 +460,38 @@ async function streamAppLogs(appId, { tail = 200, signal, onLine, agentId, runne
   return { ended: true };
 }
 
+// ---------- 制品仓库(版本化制品库)----------
+// 上传一次 → 留存 → 可部署到任意应用/Agent,或一键重部署历史制品。复用文件柜地基,无 TTL。
+async function listArtifacts() {
+  try {
+    const r = await fetch('/api/artifacts', { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return (await r.json()).artifacts || [];
+  } catch (e) { return null; }
+}
+
+async function uploadArtifact(file, version) {
+  const fd = new FormData();
+  fd.append('file', file);
+  if (version) fd.append('version', version);
+  const r = await fetch('/api/artifacts', { method: 'POST', body: fd, credentials: 'same-origin' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '上传失败');
+  return d; // { artifact, deduped? }
+}
+
+async function deleteArtifact(id) {
+  const r = await fetch(`/api/artifacts/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'same-origin' });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); }
+}
+
 export {
   login, logout, getSession,
   listUsers, createUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
+  listArtifacts, uploadArtifact, deleteArtifact,
   getAgentCapabilities, getAgentSystem, getAgentPing, getAgentMetrics, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,

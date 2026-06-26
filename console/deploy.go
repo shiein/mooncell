@@ -90,6 +90,17 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 			return "日志路径含空项", false
 		}
 	}
+	// envVars 校验:name 非空、不得重名(重名会在拍平时互相覆盖,与用户预期不符)。
+	seen := map[string]bool{}
+	for _, e := range app.EnvVars {
+		if strings.TrimSpace(e.Name) == "" {
+			return "环境变量名不能为空", false
+		}
+		if seen[e.Name] {
+			return "环境变量名重复: " + e.Name, false
+		}
+		seen[e.Name] = true
+	}
 	// 健康检查方式 fail-closed:显式选了方式就必须给出可用目标,杜绝"选了 HTTP/端口却因空值/0
 	// 被 healthSpec 静默降级为仅进程存活"——那样部署只看进程 active 即判成功,与用户预期不符。
 	switch app.HealthType {
@@ -159,8 +170,32 @@ type appConfig struct {
 	NginxContainer string            `json:"nginxContainer"` // static-nginx:nginx 为 Docker 部署时的容器名(空=宿主机 nginx,走 nginx -s reload)
 	Pm2Name        string            `json:"pm2Name"`        // pm2 接管模式:填已有 pm2 进程名/ID 则部署只 pm2 restart 它、不写 ecosystem;空=Mooncell 托管
 	LogPaths       []string          `json:"logPaths"`       // 该应用声明的日志文件路径(文件 tail 授权白名单)
-	Env            map[string]string `json:"env"`
+	Env            map[string]string `json:"env"`            // 旧形态:平铺 env(历史数据兼容,下发 Agent 用)
+	EnvVars        []EnvVar          `json:"envVars"`        // 新形态:带 secret 标记的结构化 env;下发时拍平到 Env,secret 值在前端掩码、不进审计明文
 	Stage          string            `json:"stage"` // 环境分组:dev/test/prod(空=prod);仅用于分组/筛选,不影响部署行为
+}
+
+// EnvVar 是单条环境变量:name 唯一,value 为明文(内网落盘可接受),secret=true 时前端掩码回显、
+// 不进审计/日志明文。下发 Agent 时一律拍平为 name→value(Agent 侧无敏感概念,仅作进程环境)。
+type EnvVar struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Secret bool   `json:"secret"`
+}
+
+// flattenEnv 把结构化 envVars 拍平为 name→value map(下发 Agent 用)。
+// 优先用 envVars(新形态);为空时回退旧 Env map(历史数据兼容)。重名以靠后者覆盖(与 map 语义一致)。
+func flattenEnv(app appConfig) map[string]string {
+	if len(app.EnvVars) == 0 {
+		return app.Env
+	}
+	out := make(map[string]string, len(app.EnvVars))
+	for _, e := range app.EnvVars {
+		if n := strings.TrimSpace(e.Name); n != "" {
+			out[n] = e.Value
+		}
+	}
+	return out
 }
 
 // validStages 是允许的环境分组值(空串视为 prod,在校验里放行)。
@@ -283,8 +318,8 @@ func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID st
 	} else {
 		cfg.Args = app.Jvm
 	}
-	if len(app.Env) > 0 {
-		cfg.Env = app.Env
+	if env := flattenEnv(app); len(env) > 0 {
+		cfg.Env = env
 	}
 	return cfg
 }
@@ -466,19 +501,28 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
 	uploadID := r.FormValue("uploadId")
+	artifactID := r.FormValue("artifactId") // 制品仓库:引用已留存制品,免重复上传
 
 	appRaw, ok := a.store.getEntity("app", id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法部署"})
 		return
 	}
-	// 制品来源:uploadId(分块上传已收齐的临时文件)优先;否则取本次 multipart 的 artifact 文件。
+	// 制品来源优先级:artifactId(制品库已留存)> uploadId(分块上传临时文件)> 本次 multipart artifact。
 	var file interface {
 		io.Reader
 		io.Seeker
 		io.Closer
 	}
-	if uploadID != "" {
+	switch {
+	case artifactID != "":
+		f, ok := a.openArtifactFile(artifactID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "制品库中不存在该制品"})
+			return
+		}
+		file = f
+	case uploadID != "":
 		f, ok := a.openUploadArtifact(uploadID)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "上传未完成或会话不存在"})
@@ -486,10 +530,10 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		}
 		defer a.finishUpload(uploadID) // 部署消费后删会话与临时文件
 		file = f
-	} else {
+	default:
 		f, _, err := r.FormFile("artifact")
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品(或 uploadId)"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品(或 uploadId / artifactId)"})
 			return
 		}
 		file = f

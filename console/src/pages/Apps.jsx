@@ -1,7 +1,7 @@
 // Mooncell — 应用列表 + 新建应用向导(JSON Schema 动态表单 + 预检)
 import React from 'react';
 import { useMC, DEPLOY_TYPES, isProcessType, timeAgo, STAGES, stageOf } from '../lib/data.js';
-import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, Badge, EmptyState, confirmDialog } from '../components/primitives.jsx';
+import { Dialog, Btn, Field, Select, Switch, Checkbox, Icon, Spinner, TypeBadge, StatusBadge, Badge, EmptyState, confirmDialog } from '../components/primitives.jsx';
 import { DeployDialog } from '../components/pipeline.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { listAgentNodes, precheckApp, getAgentCapabilities } from '../lib/api.js';
@@ -427,16 +427,16 @@ function AppsPage() {
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
           <thead><tr>
-            {canWrite ? <th style={{ width: 34 }}><input type="checkbox" checked={allSelected} onChange={toggleAll}
-              disabled={selectable.length === 0} style={{ accentColor: "var(--primary)", cursor: "pointer" }} aria-label="全选可启停应用" /></th> : null}
+            {canWrite ? <th style={{ width: 34 }}><Checkbox checked={allSelected} onChange={toggleAll}
+              disabled={selectable.length === 0} ariaLabel="全选可启停应用" /></th> : null}
             <th>应用</th><th>类型</th><th>Runner</th><th>状态</th><th>版本</th><th>端口</th><th>最近部署</th><th style={{ width: 170 }}></th>
           </tr></thead>
           <tbody>
             {list.map((a) => (
               <tr key={a.id} className="app-row" onClick={() => store.nav("app-detail", { appId: a.id })}>
                 {canWrite ? <td onClick={(e) => e.stopPropagation()}>
-                  {isProcessType(a.type) ? <input type="checkbox" checked={sel.has(a.id)} onChange={() => toggleSel(a.id)}
-                    style={{ accentColor: "var(--primary)", cursor: "pointer" }} aria-label={`选择 ${a.name}`} /> : null}
+                  {isProcessType(a.type) ? <Checkbox checked={sel.has(a.id)} onChange={() => toggleSel(a.id)}
+                    ariaLabel={`选择 ${a.name}`} /> : null}
                 </td> : null}
                 <td>
                   <div style={{ display: "flex", alignItems: "center", gap: 7 }}>

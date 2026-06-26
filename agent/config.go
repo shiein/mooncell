@@ -80,6 +80,9 @@ func unsafeAgentConfigReason(cfg *Config) string {
 	if !externalBind(cfg.Server.Addr) {
 		return ""
 	}
+	if strings.TrimSpace(cfg.Security.Token) == "" {
+		return "server.addr 对外监听时 Agent token 不能为空(空 token 可被空 Bearer 绕过鉴权)"
+	}
 	if cfg.Security.Token == defaultAgentToken {
 		return "server.addr 对外监听时不能使用默认 Agent token"
 	}

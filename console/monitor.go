@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -77,17 +78,29 @@ func (a *api) monitorAgentIDs() []string {
 	return ids
 }
 
-// sampleMetrics 对每台 Agent 采一次资源水位落库;不可达则跳过(不写 0 值污染曲线)。
+// sampleMetrics 对每台 Agent 并发采一次资源水位落库;不可达则跳过(不写 0 值污染曲线)。
+// HTTP 慢调用(5s 超时)并发,落库在主 goroutine 串行(SQLite 单连接,避免连接争用)。
 func (a *api) sampleMetrics() {
 	now := time.Now().UnixMilli()
+	type job struct{ id string; cl *agentClient }
+	var jobs []job
 	for _, id := range a.monitorAgentIDs() {
-		cl := a.resolveAgentByID(id)
-		if cl == nil {
-			continue
+		if cl := a.resolveAgentByID(id); cl != nil {
+			jobs = append(jobs, job{id, cl})
 		}
-		status, body, err := cl.get("/api/system")
+	}
+	type result struct {
+		id         string
+		cpu, mem, disk float64
+		ok         bool
+	}
+	resCh := make(chan result, len(jobs))
+	monitorWorkerPool(len(jobs), monitorConcurrency, func(i int) {
+		j := jobs[i]
+		status, body, err := j.cl.get("/api/system")
 		if err != nil || status != http.StatusOK {
-			continue
+			resCh <- result{id: j.id}
+			return
 		}
 		var s struct {
 			CPUPercent  float64 `json:"cpuPercent"`
@@ -95,9 +108,16 @@ func (a *api) sampleMetrics() {
 			DiskPercent float64 `json:"diskPercent"`
 		}
 		if json.Unmarshal(body, &s) != nil {
-			continue
+			resCh <- result{id: j.id}
+			return
 		}
-		a.store.insertMetric(id, now, s.CPUPercent, s.MemPercent, s.DiskPercent)
+		resCh <- result{id: j.id, cpu: s.CPUPercent, mem: s.MemPercent, disk: s.DiskPercent, ok: true}
+	})
+	close(resCh)
+	for r := range resCh {
+		if r.ok {
+			a.store.insertMetric(r.id, now, r.cpu, r.mem, r.disk)
+		}
 	}
 }
 
@@ -111,12 +131,22 @@ type monApp struct {
 	LastDeploy int64  `json:"lastDeploy"`
 }
 
-// checkAppsHealth 巡检所有进程类应用的真机运行态并权威写回。
+// checkAppsHealth 并发巡检所有进程类应用的真机运行态,主 goroutine 串行权威写回。
+// HTTP 慢调用并发;applyMonitorState 是 read-modify-write(改 app 实体),在主 goroutine 串行执行,
+// 既避免 SQLite 单连接争用,也避免并发改同一实体(虽然单轮内每 app 只处理一次,串行更稳妥)。
 func (a *api) checkAppsHealth() {
 	raws, err := a.store.appsRaw()
 	if err != nil {
 		return
 	}
+	// path 在收集阶段(主 goroutine)预算好:appStatusPath 内部会 getEntity 查 SQLite(单连接),
+	// 放进 worker 并发跑会被串行化、抵消并发收益。worker 只跑纯 HTTP。
+	type job struct {
+		app  monApp
+		cl   *agentClient
+		path string
+	}
+	var jobs []job
 	for _, raw := range raws {
 		var app monApp
 		if json.Unmarshal(raw, &app) != nil || app.ID == "" {
@@ -132,9 +162,21 @@ func (a *api) checkAppsHealth() {
 		if cl == nil {
 			continue
 		}
-		status, body, err := cl.get(a.appStatusPath(app.ID, app.Runner))
+		jobs = append(jobs, job{app, cl, a.appStatusPath(app.ID, app.Runner)})
+	}
+	type result struct {
+		app          monApp
+		active       bool
+		pid, cpu, mem string
+		ok           bool
+	}
+	resCh := make(chan result, len(jobs))
+	monitorWorkerPool(len(jobs), monitorConcurrency, func(i int) {
+		j := jobs[i]
+		status, body, err := j.cl.get(j.path)
 		if err != nil || status != http.StatusOK {
-			continue // Agent/应用不可达:不臆造掉线(可能只是 Agent 网络问题)
+			resCh <- result{app: j.app}
+			return // Agent/应用不可达:不臆造掉线(可能只是 Agent 网络问题)
 		}
 		var st struct {
 			Active bool   `json:"active"`
@@ -143,10 +185,48 @@ func (a *api) checkAppsHealth() {
 			Mem    string `json:"mem"`
 		}
 		if json.Unmarshal(body, &st) != nil {
-			continue
+			resCh <- result{app: j.app}
+			return
 		}
-		a.applyMonitorState(app, st.Active, st.Pid, st.Cpu, st.Mem)
+		resCh <- result{app: j.app, active: st.Active, pid: st.Pid, cpu: st.Cpu, mem: st.Mem, ok: true}
+	})
+	close(resCh)
+	for r := range resCh {
+		if r.ok {
+			a.applyMonitorState(r.app, r.active, r.pid, r.cpu, r.mem)
+		}
 	}
+}
+
+// monitorConcurrency 是巡检并发度上限:单轮时间从「Agent 数 + 应用数 之和 × 超时」
+// 收敛到「最慢那一个 × ceil(任务数/并发度)」。8 对内网几十台规模够用且不压垮 Agent。
+const monitorConcurrency = 8
+
+// monitorWorkerPool 把 n 个任务按下标分发给最多 concurrency 个 worker 并发执行,等待全部完成。
+// n<=0 时直接返回;concurrency>n 时按 n 起 worker。任务函数不得 panic(由调用方保证)。
+func monitorWorkerPool(n, concurrency int, task func(i int)) {
+	if n <= 0 {
+		return
+	}
+	if concurrency < 1 || concurrency > n {
+		concurrency = n
+	}
+	idx := make(chan int, n)
+	for i := 0; i < n; i++ {
+		idx <- i
+	}
+	close(idx)
+	var wg sync.WaitGroup
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range idx {
+				task(i)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // applyMonitorState 据巡检到的真机运行态保守更新应用实体的权威 status/pid/cpu/mem + lastCheck,

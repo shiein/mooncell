@@ -348,6 +348,55 @@ function LogViewer({ app }) {
   );
 }
 
+// ---------- 环境变量编辑器(带敏感值标记)----------
+// secret=true 的值:回显掩码(••••••••),编辑时需点眼睛临时揭示;落库仍明文(内网可接受),
+// 但不进审计明文(后端 putAppConfig 不审计 env,部署审计只记 app 名)。
+const MASK = "••••••••";
+function EnvEditor({ vars, editable, onChange }) {
+  const list = Array.isArray(vars) ? vars : [];
+  const [revealed, setRevealed] = React.useState({}); // 按 index 临时揭示 secret 值
+  const set = (i, patch) => onChange(list.map((v, idx) => (idx === i ? { ...v, ...patch } : v)));
+  const add = () => onChange([...list, { name: "", value: "", secret: false }]);
+  const del = (i) => onChange(list.filter((_, idx) => idx !== i));
+
+  if (list.length === 0 && !editable) {
+    return <div style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>未配置环境变量</div>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {list.map((v, i) => {
+        const showVal = editable && (!v.secret || revealed[i]);
+        return (
+          <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input className="input mono" style={{ fontSize: 12.5, width: 200, flex: "none" }}
+              disabled={!editable} placeholder="变量名" value={v.name}
+              onChange={(e) => set(i, { name: e.target.value })} />
+            <input className={"input mono" + (v.secret ? "" : "")} style={{ fontSize: 12.5, flex: 1 }}
+              disabled={!showVal} placeholder={v.secret ? "敏感值(已掩码)" : "变量值"}
+              value={showVal ? v.value : (v.value ? MASK : "")}
+              onChange={(e) => set(i, { value: e.target.value })} />
+            {editable ? (
+              <React.Fragment>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--fg-secondary)", flex: "none", width: 92, cursor: "pointer" }}>
+                  <Switch on={!!v.secret} onChange={(on) => set(i, { secret: on })} />敏感
+                </label>
+                {v.secret ? (
+                  <Btn size="sm" variant="ghost" icon="eye" title={revealed[i] ? "隐藏" : "显示明文"}
+                    onClick={() => setRevealed((r) => ({ ...r, [i]: !r[i] }))} />
+                ) : null}
+                <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => del(i)} />
+              </React.Fragment>
+            ) : (
+              v.secret ? <Badge tone="warn" style={{ flex: "none" }}>敏感</Badge> : null
+            )}
+          </div>
+        );
+      })}
+      {editable ? <Btn size="sm" variant="outline" icon="plus" onClick={add} style={{ alignSelf: "flex-start" }}>添加环境变量</Btn> : null}
+    </div>
+  );
+}
+
 // ---------- 配置 ----------
 function ConfigTab({ app }) {
   const store = useMC();
@@ -480,6 +529,9 @@ function ConfigTab({ app }) {
               value={draft.pm2Name || ""} onChange={(e) => set("pm2Name", e.target.value)} />
           </Field>
         ) : null}
+        <Field label="环境变量" hint="标记为「敏感」的值在配置页掩码回显、不进审计明文;下发 Agent 时一律作为进程环境注入">
+          <EnvEditor vars={draft.envVars} editable={edit} onChange={(v) => set("envVars", v)} />
+        </Field>
         <Field label="日志文件路径(每行一条,在线 tail 需具体文件,不支持通配/~)">
           <textarea className="textarea mono" style={{ fontSize: 12.5 }} rows={2} disabled={!edit}
             value={(draft.logPaths || []).join("\n")} onChange={(e) => set("logPaths", e.target.value.split("\n").filter(Boolean))}></textarea>

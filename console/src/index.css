@@ -348,6 +348,50 @@ a { color: var(--primary); text-decoration: none; }
 .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
 .switch[data-on="true"]::after { transform: translateX(16px); }
 
+/* ---------- checkbox(自绘,替代原生 input[type=checkbox])---------- */
+/* 国产化浏览器(UOS/麒麟)原生 checkbox 外观不一,统一用 button + 自绘方框 + 勾,套设计系统 token。 */
+.mc-check {
+  display: inline-flex; align-items: center; gap: 7px; padding: 0; border: none; background: none;
+  cursor: pointer; color: var(--fg); font-size: 13px; user-select: none;
+}
+.mc-check:disabled { cursor: not-allowed; opacity: .5; }
+.mc-check-box {
+  width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid var(--border-strong);
+  background: var(--card); display: inline-flex; align-items: center; justify-content: center;
+  transition: background .15s, border-color .15s; flex: none;
+}
+.mc-check[data-on="true"] .mc-check-box { background: var(--primary); border-color: var(--primary); }
+.mc-check:focus-visible .mc-check-box { outline: 2px solid var(--primary); outline-offset: 2px; }
+.mc-check:active:not(:disabled) .mc-check-box { transform: scale(.94); }
+.mc-check-label { font-size: 13px; }
+
+/* ---------- 全局原生外观兜底 ---------- */
+/* 按钮/输入跨浏览器去原生外观:UOS/麒麟等国产化浏览器对未样式化 button/input 渲染差异较大,
+   appearance:none + 显式重置确保 .btn / .input / .select-el / .textarea 之外的原生控件
+   也不会带浏览器默认 chrome(背景/边框/内阴影)。file/radio/checkbox 在各组件里单独处理。 */
+button { background: none; border: none; color: inherit; }
+input[type="text"], input[type="password"], input[type="number"], input[type="email"],
+input[type="search"], input[type="url"], input[type="tel"], textarea {
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+}
+/* 原生 file input:可见的那个(Agents 升级包)去按钮化,与 .input 风格统一;隐藏的(display:none)不受影响。 */
+input[type="file"].input {
+  -webkit-appearance: none; appearance: none; padding: 6px 11px; height: auto;
+  border: 1px solid var(--border-strong); background: var(--card); color: var(--fg);
+  font-size: 12.5px; cursor: pointer; border-radius: var(--radius);
+}
+input[type="file"].input::-webkit-file-upload-button {
+  -webkit-appearance: none; appearance: none; border: none; background: var(--primary);
+  color: var(--primary-fg); padding: 4px 10px; border-radius: 4px; margin-right: 10px;
+  font-size: 12px; cursor: pointer; font-family: inherit;
+}
+input[type="file"].input::-webkit-file-upload-button:hover { background: var(--primary-hover); }
+input[type="file"].input::file-selector-button {
+  border: none; background: var(--primary); color: var(--primary-fg); padding: 4px 10px;
+  border-radius: 4px; margin-right: 10px; font-size: 12px; cursor: pointer; font-family: inherit;
+}
+input[type="file"].input::file-selector-button:hover { background: var(--primary-hover); }
+
 /* ---------- tabs ---------- */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); }
 .tab {

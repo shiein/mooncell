@@ -70,6 +70,16 @@ func openDB(cfg *Config) *Store {
 			disk     REAL
 		);
 		CREATE INDEX IF NOT EXISTS idx_metrics_agent_ts ON metrics(agent_id, ts);
+		CREATE TABLE IF NOT EXISTS artifacts (
+			id         TEXT    PRIMARY KEY,
+			name       TEXT    NOT NULL,
+			version    TEXT    NOT NULL DEFAULT '',
+			sha256     TEXT    NOT NULL,
+			size       INTEGER NOT NULL DEFAULT 0,
+			uploader   TEXT    NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_sha ON artifacts(sha256);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
 	}

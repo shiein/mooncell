@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -63,6 +64,10 @@ func (a *api) addAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "名称/地址/token 不能为空"})
 		return
 	}
+	if !validAgentAddr(body.Addr) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "地址须为 host:port 形态(如 10.0.0.5:9100),不能带 scheme 或路径"})
+		return
+	}
 	id := fmt.Sprintf("ag%d", time.Now().UnixNano())
 	if err := a.store.addAgent(id, body.Name, body.Addr, body.Token); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "注册失败"})
@@ -102,4 +107,30 @@ func (a *api) pingAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	status, body, err := cl.get("/api/ping")
 	relayAgent(w, status, body, err)
+}
+
+// validAgentAddr 校验 Agent 地址须为 host:port 形态(如 10.0.0.5:9100、host.local:9100)。
+// 拒绝带 scheme(http://…)、路径(含 /)、端口缺失或非数字等畸形输入——
+// newAgentClient 会拼成 "http://"+addr,误填 scheme/路径会拼出畸形 URL。
+// admin-only 故 SSRF 风险低,但早拦避免后续路由/连接报错难定位。
+func validAgentAddr(addr string) bool {
+	if addr == "" || strings.ContainsAny(addr, "/?#") {
+		return false
+	}
+	if strings.Contains(addr, "://") {
+		return false // 误带 scheme
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" || port == "" {
+		return false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

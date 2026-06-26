@@ -17,11 +17,18 @@ type Config struct {
 	Admin    AdminConfig    `toml:"admin"`
 	Agent    AgentConfig    `toml:"agent"`
 	Cabinet  CabinetConfig  `toml:"cabinet"`
+	Artifact ArtifactConfig `toml:"artifact"`
 	AgentBin AgentBinConfig `toml:"agent_bin"`
 	Demo     DemoConfig     `toml:"demo"`
 	Deploy   DeployUpload   `toml:"deploy"`
 	Audit    AuditConfig    `toml:"audit"`
 	Monitor  MonitorConfig  `toml:"monitor"`
+}
+
+// ArtifactConfig 制品仓库:版本化制品库的落盘目录。上传一次 → 留存 → 可部署到 N 台 Agent /
+// 一键重部署任意历史制品。复用文件柜的二进制落盘 + sha256 校验地基,但无 TTL(手动管理)。
+type ArtifactConfig struct {
+	Dir string `toml:"dir"`
 }
 
 // MonitorConfig:部署后持续健康巡检 + Agent 资源指标留存。
@@ -99,6 +106,7 @@ func loadConfig(path string) *Config {
 		Admin:    AdminConfig{Username: "admin", Password: defaultAdminPassword},
 		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
 		Cabinet:  CabinetConfig{Dir: "cabinet", MaxUploadMB: 300},
+		Artifact: ArtifactConfig{Dir: "artifacts"},
 		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 		Audit:    AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
 		Monitor:  MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
@@ -131,8 +139,14 @@ func unsafeConsoleConfigReason(cfg *Config) string {
 	if !externalBind(cfg.Server.Addr) {
 		return ""
 	}
+	if strings.TrimSpace(cfg.Admin.Password) == "" {
+		return "server.addr 对外监听时管理员密码不能为空"
+	}
 	if cfg.Admin.Password == defaultAdminPassword {
 		return "server.addr 对外监听时不能使用默认管理员密码"
+	}
+	if strings.TrimSpace(cfg.Agent.Token) == "" {
+		return "server.addr 对外监听时 Agent token 不能为空(空 token 可被空 Bearer 绕过鉴权)"
 	}
 	if cfg.Agent.Token == defaultAgentToken {
 		return "server.addr 对外监听时不能使用默认 Agent token"

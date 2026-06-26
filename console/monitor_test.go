@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 )
 
@@ -116,5 +117,40 @@ func TestMetricsStore(t *testing.T) {
 	}
 	if pts3, _ := s.listMetrics("default", 0); len(pts3) != 1 {
 		t.Errorf("裁剪后 default 应剩 1,实际 %d", len(pts3))
+	}
+}
+
+// TestMonitorWorkerPool 验证有界并发池:每个下标恰好执行一次,且并发度不超上限。
+func TestMonitorWorkerPool(t *testing.T) {
+	n := 50
+	var done int64
+	var inflight int64
+	var maxInflight int64
+	monitorWorkerPool(n, 8, func(i int) {
+		cur := atomic.AddInt64(&inflight, 1)
+		for {
+			mi := atomic.LoadInt64(&maxInflight)
+			if cur <= mi || atomic.CompareAndSwapInt64(&maxInflight, mi, cur) {
+				break
+			}
+		}
+		atomic.AddInt64(&done, 1)
+		atomic.AddInt64(&inflight, -1)
+	})
+	if int(done) != n {
+		t.Errorf("应执行 %d 次,实际 %d", n, done)
+	}
+	if maxInflight > 8 {
+		t.Errorf("并发度应 ≤ 8,实际峰值 %d", maxInflight)
+	}
+}
+
+// TestMonitorWorkerPoolEmpty 验证空任务与边界收敛(concurrency>n 时按 n 起 worker)。
+func TestMonitorWorkerPoolEmpty(t *testing.T) {
+	monitorWorkerPool(0, 8, func(i int) { t.Error("空任务不应执行") })
+	called := 0
+	monitorWorkerPool(3, 100, func(i int) { called++ })
+	if called != 3 {
+		t.Errorf("n=3 应执行 3 次,实际 %d", called)
 	}
 }

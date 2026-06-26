@@ -21,12 +21,13 @@ type api struct {
 	cabinetDir      string
 	anonUpload      bool
 	cabinetMaxBytes int64  // 文件柜单文件上限(字节),来自 cabinet.max_upload_mb(默认 300MB)
+	artifactDir     string // 制品仓库(版本化制品库)的落盘目录
 	agentBinDir     string // Agent 升级包(按架构)的存储目录
 	demoSeed        bool
 	maxUpload       int64                     // 部署制品上传硬上限(字节);超出在传输层截断回 413
 	uploads         map[string]*uploadSession // 分块上传会话(按 uploadId)
 	uploadsMu       sync.Mutex
-	busy            map[string]int // 在飞操作的应用(部署/还原/启停/下线)引用计数:健康巡检跳过,避免误判掉线
+	busy            map[string]int // 在飞操作的应用(部署/还原/启停/下线)引用计数:健康巡检跳过,避免误判掉线。进程内状态 → Console 须单实例运行(见 README 约束)
 	busyMu          sync.Mutex
 }
 

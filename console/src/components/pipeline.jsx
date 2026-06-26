@@ -2,7 +2,7 @@
 import React from 'react';
 import { useMC, tsDir, DEPLOY_TYPES, isProcessType, isRealType, nextVersion, randSha, fmtClock, fmtTime } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
-import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
+import { deployViaAgentStream, restoreViaAgentStream, listArtifacts } from '../lib/api.js';
 
 // hostingDesc:据应用类型/Runner 描述托管方式(部署成功文案用),避免硬编码 systemd 误导
 // 多 Agent / pm2 / tomcat / static 场景。
@@ -319,6 +319,9 @@ function DeployDialog({ app, open, onClose }) {
   const [drag, setDrag] = React.useState(false);
   const [realFile, setRealFile] = React.useState(null); // 真实上传的 File(native-binary 走真机部署)
   const [real, setReal] = React.useState(null);         // 真实部署结果:{loading}|{error}|{result,steps}
+  // 制品库集成:可选用已留存制品(artifactId)替代本次上传,免重复传大文件。
+  const [artifacts, setArtifacts] = React.useState(null); // null=未加载;数组=已加载(可能为空)
+  const [pickedArt, setPickedArt] = React.useState(null); // 选中的制品条目
   const up = useUploadSim();
   const pipe = usePipeline();
   const inputRef = React.useRef(null);
@@ -326,38 +329,45 @@ function DeployDialog({ app, open, onClose }) {
   React.useEffect(() => {
     if (open) {
       setStage("upload"); setSimulateFail(false); up.reset(); pipe.reset();
-      setRealFile(null); setReal(null);
+      setRealFile(null); setReal(null); setPickedArt(null);
       setVersion(nextVersion(app && app.version));
+      // 懒加载制品库列表(打开对话框才拉,避免主页空载请求)。
+      listArtifacts().then((rows) => setArtifacts(Array.isArray(rows) ? rows : []));
     }
   }, [open, app && app.id]);
   const sha = React.useMemo(() => randSha(), [open, up.file && up.file.name]);
   if (!app) return null;
 
-  // 真实类型应用:必须上传真实文件并走 Agent;禁用示例制品 / 模拟失败,且不持久化假状态。
+  // 真实类型应用:必须上传真实文件(或选制品库已留存制品)并走 Agent;禁用示例制品 / 模拟失败。
   const realTypeApp = isRealType(app.type);
-  const isReal = realTypeApp && !!realFile;
+  const isReal = realTypeApp && (!!realFile || !!pickedArt);
   const ext = DEPLOY_TYPES[app.type].artifactExt;
 
   const pickExample = () => {
-    setRealFile(null);
+    setRealFile(null); setPickedArt(null);
     const mb = 8 + Math.random() * 50;
     up.begin({ name: `${app.artifactName}-${version}${ext || ".tar.gz"}`, sizeMB: mb, size: mb.toFixed(1) + " MB" });
   };
   const pickReal = (f) => {
-    setRealFile(f);
+    setRealFile(f); setPickedArt(null);
     const mb = Math.max(1, f.size / 1048576);
     up.begin({ name: f.name, sizeMB: mb, size: mb < 1024 ? mb.toFixed(1) + " MB" : (mb / 1024).toFixed(2) + " GB" });
   };
+  const pickArtifact = (row) => {
+    setPickedArt(row); setRealFile(null);
+    up.begin({ name: row.name, sizeMB: Math.max(1, row.size / 1048576),
+      size: row.size < 1024 * 1024 * 1024 ? (row.size / 1048576).toFixed(1) + " MB" : (row.size / 1073741824).toFixed(2) + " GB" });
+  };
 
   const startDeploy = async () => {
-    if (realTypeApp && !realFile) return; // 真实应用必须有真实文件,绝不走模拟持久化假状态
+    if (realTypeApp && !realFile && !pickedArt) return; // 真实应用必须有真实来源,绝不走模拟持久化假状态
     if (isReal) {
       setStage("pipeline"); setReal({ streaming: true, steps: [] });
-      // 前端只提交 制品 + version + releaseId;Agent 配置由 Console 据已存应用配置服务端生成。
+      // 前端只提交 制品来源 + version + releaseId;Agent 配置由 Console 据已存应用配置服务端生成。
       const releaseId = (crypto.randomUUID && crypto.randomUUID()) || ("rel-" + Date.now() + "-" + Math.random().toString(36).slice(2));
       const res = await deployViaAgentStream(app.id, version, releaseId, realFile, (type, data) => {
         if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
-      });
+      }, pickedArt ? pickedArt.id : null);
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
       store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result || "failed", real: true });
@@ -384,7 +394,7 @@ function DeployDialog({ app, open, onClose }) {
       foot={stage === "upload" ? (
         <React.Fragment>
           <Btn variant="ghost" onClick={onClose}>取消</Btn>
-          <Btn variant="primary" icon="zap" disabled={up.phase !== "ready" || (realTypeApp && !realFile)} onClick={startDeploy}>{isReal ? "开始部署(真机)" : "开始部署"}</Btn>
+          <Btn variant="primary" icon="zap" disabled={up.phase !== "ready" || (realTypeApp && !realFile && !pickedArt)} onClick={startDeploy}>{isReal ? "开始部署(真机)" : "开始部署"}</Btn>
         </React.Fragment>
       ) : (
         <React.Fragment>
@@ -414,7 +424,31 @@ function DeployDialog({ app, open, onClose }) {
                 </div>
               ) : null}
             </div>
-          ) : (
+          ) : null}
+
+          {/* 制品库选择:已留存制品可免重复上传直接部署(多 Agent / 重部署历史制品时尤其有用)。
+              真实类型 + 选了制品库条目 → 走真机部署(artifactId);非真实类型选了也仅作演示来源。 */}
+          {up.phase === "idle" && artifacts && artifacts.length > 0 ? (
+            <div className="card" style={{ padding: "11px 14px" }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                <Icon name="archive" size={13} style={{ color: "var(--primary)" }} />从制品库选择(免重复上传)
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 160, overflowY: "auto" }}>
+                {artifacts.map((row) => (
+                  <button key={row.id} className="nav-item" data-active={String(pickedArt && pickedArt.id === row.id)}
+                    style={{ justifyContent: "flex-start", padding: "7px 10px" }}
+                    onClick={() => pickArtifact(row)}>
+                    <Icon name="fileText" size={13} />
+                    <span className="mono" style={{ fontSize: 12, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.name}</span>
+                    {row.version ? <span className="mono" style={{ fontSize: 11, color: "var(--muted-fg)" }}>{row.version}</span> : null}
+                    <span className="mono" style={{ fontSize: 11, color: "var(--muted-fg)" }}>{row.size < 1024 * 1024 * 1024 ? (row.size / 1048576).toFixed(1) + "MB" : (row.size / 1073741824).toFixed(2) + "GB"}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {up.phase !== "idle" ? (
             <div className="card" style={{ padding: 14 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <Icon name="fileText" size={18} style={{ color: "var(--primary)" }} />
@@ -433,7 +467,7 @@ function DeployDialog({ app, open, onClose }) {
                 <div className="mono" style={{ fontSize: 11, color: "var(--muted-fg)", marginTop: 8 }}>sha256: {sha}9c2e41ab07d6…</div>
               ) : null}
             </div>
-          )}
+          ) : null}
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <Field label="Release 版本号">

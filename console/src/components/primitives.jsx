@@ -122,6 +122,21 @@ function Switch({ on, onChange }) {
   return <button type="button" className="switch" data-on={String(!!on)} onClick={() => onChange && onChange(!on)} aria-pressed={!!on}></button>;
 }
 
+// Checkbox:自绘方框 + 勾,替代原生 input[type=checkbox](跨浏览器外观一致,套设计系统 token)。
+// 用 button + aria-pressed 而非隐藏 input,避免原生外观在 UOS/麒麟等国产化浏览器上不一致。
+function Checkbox({ checked, onChange, disabled, label, ariaLabel }) {
+  return (
+    <button type="button" className="mc-check" data-on={String(!!checked)} disabled={disabled}
+      aria-pressed={!!checked} aria-label={ariaLabel || label}
+      onClick={() => onChange && onChange(!checked)}>
+      <span className="mc-check-box">
+        {checked ? <Icon name="check" size={12} style={{ color: "var(--primary-fg)" }} /> : null}
+      </span>
+      {label ? <span className="mc-check-label">{label}</span> : null}
+    </button>
+  );
+}
+
 function Tabs({ tabs, active, onChange, style }) {
   return (
     <div className="tabs" style={style}>
@@ -279,7 +294,7 @@ function CopyChip({ text, label }) {
 }
 
 export {
-  Icon, Spinner, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch,
+  Icon, Spinner, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Checkbox,
   Tabs, Seg, Dialog, Progress, Sparkline, EmptyState, ToastHost, toast,
   ConfirmHost, confirmDialog, CopyChip,
 };

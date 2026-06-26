@@ -6,6 +6,7 @@ import { AGENT } from '../lib/data.js';
 const NAV_ITEMS = [
   { id: "overview", label: "总览", en: "Overview", icon: "gauge" },
   { id: "apps", label: "应用", en: "Applications", icon: "box" },
+  { id: "artifacts", label: "制品仓库", en: "Artifacts", icon: "archive" },
   { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder" },
   { id: "audit", label: "审计日志", en: "Audit", icon: "shield" },
   { id: "agents", label: "Agent 管理", en: "Agents", icon: "server", adminOnly: true },

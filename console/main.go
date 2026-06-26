@@ -34,7 +34,11 @@ func main() {
 	if agentBinDir == "" {
 		agentBinDir = "agentbin"
 	}
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}}
+	artifactDir := cfg.Artifact.Dir
+	if artifactDir == "" {
+		artifactDir = "artifacts"
+	}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, artifactDir: artifactDir, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}}
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
 	go func() {
@@ -117,6 +121,12 @@ func main() {
 	mux.HandleFunc("GET /api/pubfile/{code}/meta", a.pubfileMeta) // 凭码校验 + 文件信息(不计下载数),供 /drop 页用
 	mux.HandleFunc("POST /api/pub/cabinet", a.uploadCabinetAnon)  // 匿名上传(需 cabinet.anon_upload=true)
 	mux.HandleFunc("GET /api/pub/limits", a.pubLimits)            // 公开:文件柜上限 + 匿名开关(供 /drop 客户端预检)
+
+	// 制品仓库(版本化制品库):上传/删除限 write;列表/下载需登录。部署时可用 artifactId 引用已留存制品。
+	mux.HandleFunc("GET /api/artifacts", a.requireAuth(a.listArtifactsHandler))
+	mux.HandleFunc("POST /api/artifacts", writeRoles(a.uploadArtifact))
+	mux.HandleFunc("DELETE /api/artifacts/{id}", writeRoles(a.deleteArtifactHandler))
+	mux.HandleFunc("GET /api/artifacts/{id}/download", a.requireAuth(a.downloadArtifact))
 
 	// 独立免登录投递页:极简自包含 HTML,只上传 + 凭码下载,无列表(列表仅登录后 SPA 可见)。
 	mux.HandleFunc("GET /drop", a.dropPage)

@@ -23,4 +23,16 @@ func TestUnsafeAgentConfigReason(t *testing.T) {
 	if reason := unsafeAgentConfigReason(cfg); reason != "" {
 		t.Fatalf("对外监听但 token 已修改应允许,got %q", reason)
 	}
+
+	// 对外监听 + 空 token 应被拒绝(空 token 可被空 Bearer 绕过鉴权)。
+	cfg.Security.Token = ""
+	if reason := unsafeAgentConfigReason(cfg); !strings.Contains(reason, "token 不能为空") {
+		t.Fatalf("对外监听 + 空 token 应被拒绝,got %q", reason)
+	}
+
+	// 仅空格的 token 同样视为空。
+	cfg.Security.Token = "   "
+	if reason := unsafeAgentConfigReason(cfg); !strings.Contains(reason, "token 不能为空") {
+		t.Fatalf("对外监听 + 纯空白 token 应被拒绝,got %q", reason)
+	}
 }
