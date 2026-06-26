@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { id: "audit", label: "审计日志", en: "Audit", icon: "shield" },
   { id: "agents", label: "Agent 管理", en: "Agents", icon: "server", adminOnly: true },
   { id: "users", label: "用户管理", en: "Users", icon: "user", adminOnly: true },
+  { id: "system", label: "系统", en: "System", icon: "settings", adminOnly: true },
 ];
 
 const ROLE_LABEL = { admin: "管理员", operator: "运维", viewer: "只读" };

@@ -485,6 +485,29 @@ async function deleteArtifact(id) {
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); }
 }
 
+// ---------- Console 自更新(管理员从浏览器直传新 Console 二进制,本地校验后替换自身并 self-exec 重启)----------
+// getConsoleInfo:返回当前 Console 版本 + os/arch;升级后轮询此端点,版本变为新版即重启完成。
+async function getConsoleInfo() {
+  try {
+    const r = await fetch('/api/console/info', { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return await r.json(); // { version, os }
+  } catch (e) { return null; }
+}
+
+// consoleSelfUpdate:上传新 Console 二进制(multipart)触发自更新。后端校验 sha256 + ELF 架构 +
+// --selftest + --version 后替换自身并 self-exec 就地重启(同 PID)。返回 {ok, version, restart, old} 或抛错。
+async function consoleSelfUpdate(file, version, sha256) {
+  const fd = new FormData();
+  fd.append('binary', file);
+  if (version) fd.append('version', version);
+  if (sha256) fd.append('sha256', sha256);
+  const r = await fetch('/api/console/self-update', { method: 'POST', body: fd, credentials: 'same-origin' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '升级失败');
+  return d;
+}
+
 export {
   login, logout, getSession,
   listUsers, createUser, deleteUser,
@@ -495,4 +518,5 @@ export {
   getAgentCapabilities, getAgentSystem, getAgentPing, getAgentMetrics, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
+  getConsoleInfo, consoleSelfUpdate,
 };

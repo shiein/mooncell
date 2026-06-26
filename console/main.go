@@ -6,8 +6,13 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"runtime"
 	"time"
 )
+
+// consoleVersion 可在构建时用 -ldflags "-X main.consoleVersion=vX.Y.Z" 覆盖(发布打版用,与 agentVersion 对齐)。
+var consoleVersion = "dev"
 
 // 编译期把 vite 构建产物嵌入二进制。运行时从内存映像直接服务,无磁盘 IO。
 // 需先 `pnpm build` 生成 dist/ 再 `go build`。
@@ -16,6 +21,23 @@ import (
 var distFS embed.FS
 
 func main() {
+	// 轻量 flag:--version 打印版本;--selftest 仅证明本二进制能在本机执行 + 接受当前 config.toml
+	// (供自更新前置自检)。两者都不启动服务——selftest 不绑端口、不 openDB,避免与运行中的实例冲突
+	// (运行中实例持有端口与 SQLite 文件,新二进制 selftest 若绑端口/开库会与之冲突,把好包误判成坏包)。
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--version", "-v":
+			fmt.Println(consoleVersion)
+			return
+		case "--selftest":
+			// 只 loadConfig:校验配置可解析 + 通过 unsafeConsoleConfigReason 安全闸。
+			// 不校验内嵌 dist 完整性(go:embed 是编译期保证,运行期再校验无收益,保持最简)。
+			loadConfig("config.toml")
+			fmt.Println("ok " + consoleVersion + " " + runtime.GOOS + "/" + runtime.GOARCH)
+			return
+		}
+	}
+
 	cfg := loadConfig("config.toml")
 
 	store := openDB(cfg)
@@ -112,6 +134,11 @@ func main() {
 	mux.HandleFunc("GET /api/agent-binaries", a.requireAuth(a.listAgentBinaries))
 	mux.HandleFunc("POST /api/agent-binary", a.requireRole("admin")(a.uploadAgentBinary))
 	mux.HandleFunc("POST /api/agents/{id}/update", a.requireRole("admin")(a.updateAgent))
+
+	// Console 自更新:管理员从浏览器直传新 Console 二进制(含内嵌前端),本地校验后替换自身并 self-exec
+	// 就地重启(同 PID,适配 nohup 无监管场景)。info 供前端展示当前版本 + 升级后轮询确认重启完成。
+	mux.HandleFunc("GET /api/console/info", a.requireAuth(a.consoleInfo))
+	mux.HandleFunc("POST /api/console/self-update", a.requireRole("admin")(a.selfUpdate))
 
 	// 文件柜:上传/删除限 write;按 id 下载需登录;公开文件凭码免登录下载。
 	mux.HandleFunc("POST /api/cabinet", writeRoles(a.uploadCabinet))

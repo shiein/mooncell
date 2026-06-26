@@ -29,6 +29,7 @@ type api struct {
 	uploadsMu       sync.Mutex
 	busy            map[string]int // 在飞操作的应用(部署/还原/启停/下线)引用计数:健康巡检跳过,避免误判掉线。进程内状态 → Console 须单实例运行(见 README 约束)
 	busyMu          sync.Mutex
+	selfUpdateMu    sync.Mutex // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
 }
 
 func randomToken() string {
