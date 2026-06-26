@@ -3,7 +3,12 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
+
+// auditHydrateLimit 是 hydrate 下发的审计「最近一窗」条数:足够首屏总览与审计页常用查阅,
+// 又避免每次登录把无限增长的审计全量塞进前端。更早记录走 GET /api/audit 分页。
+const auditHydrateLimit = 500
 
 // 前端复数键 ↔ 实体 kind(单数)
 var kindOfKey = map[string]string{
@@ -49,7 +54,7 @@ func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	grouped, err := a.store.loadEntities()
+	grouped, err := a.store.loadEntities(auditHydrateLimit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取数据失败"})
 		return
@@ -63,6 +68,35 @@ func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// listAudit 处理 GET /api/audit?offset=&limit=:倒序(最近在前)分页审计,返回 {items,total}。
+// hydrate 只下发最近一窗,审计页「加载更多」用本端点翻到更早记录。
+func (a *api) listAudit(w http.ResponseWriter, r *http.Request) {
+	offset := atoiDefault(r.URL.Query().Get("offset"), 0)
+	if offset < 0 {
+		offset = 0
+	}
+	limit := atoiDefault(r.URL.Query().Get("limit"), 100)
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	items, total, err := a.store.pageAudit(offset, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取审计失败"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
+}
+
+func atoiDefault(s string, def int) int {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return def
 }
 
 // putEntity 处理 PUT /api/data/{kind}/{id}:upsert 单条业务实体。

@@ -127,7 +127,7 @@ func TestAppendAuditAndRelease(t *testing.T) {
 	if err := s.appendRelease("x", "v1", "success", "admin"); err != nil {
 		t.Fatalf("appendRelease err: %v", err)
 	}
-	got, err := s.loadEntities()
+	got, err := s.loadEntities(auditHydrateLimit)
 	if err != nil || len(got["audit"]) != 1 || len(got["release"]) != 1 {
 		t.Fatalf("审计/发布各应落库 1 条,得 audit=%d release=%d (err=%v)", len(got["audit"]), len(got["release"]), err)
 	}

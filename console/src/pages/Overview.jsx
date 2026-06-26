@@ -1,10 +1,10 @@
 // Mooncell — 总览(系统监控)/ 文件柜 / 审计日志
 import React from 'react';
 import { useMC, AGENT, genSeries, timeAgo, fmtTime, fmtBytes, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
-import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, EmptyState, Select, toast } from '../components/primitives.jsx';
+import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, EmptyState, Select, Spinner, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAgents } from '../lib/agent.js';
-import { uploadCabinetFile, getPubLimits } from '../lib/api.js';
+import { uploadCabinetFile, getPubLimits, listAuditPage } from '../lib/api.js';
 
 function StatCard({ label, value, unit, series, color, extra }) {
   return (
@@ -303,18 +303,46 @@ function CabinetPage() {
 }
 
 // ---------- 审计日志 ----------
+// 服务端倒序分页:挂载拉第一页 +「加载更多」翻更早记录(hydrate 只带最近一窗,审计无限增长不全量加载)。
+// 后端不可达(离线 / 纯前端)回退到 store.audit。筛选/搜索在「已加载记录」内进行(页底有提示)。
+const AUDIT_PAGE = 100;
 function AuditPage() {
   const store = useMC();
   const [actF, setActF] = React.useState("all");
   const [q, setQ] = React.useState("");
-  const acts = [...new Set(store.audit.map((a) => a.action))];
-  const list = store.audit.filter((a) =>
+  const [rows, setRows] = React.useState(null); // null=加载中;数组=已加载
+  const [total, setTotal] = React.useState(0);
+  const [more, setMore] = React.useState(false);
+
+  React.useEffect(() => {
+    let alive = true;
+    listAuditPage(0, AUDIT_PAGE).then((d) => {
+      if (!alive) return;
+      if (!d || !Array.isArray(d.items)) { setRows(store.audit); setTotal(store.audit.length); return; } // 回退
+      setRows(d.items); setTotal(d.total || d.items.length);
+    });
+    return () => { alive = false; };
+  }, []); // 仅挂载一次
+
+  const loadMore = async () => {
+    setMore(true);
+    const d = await listAuditPage((rows || []).length, AUDIT_PAGE);
+    setMore(false);
+    if (d && Array.isArray(d.items)) { setRows((s) => [...(s || []), ...d.items]); setTotal(d.total || total); }
+  };
+
+  const base = rows || [];
+  const acts = [...new Set(base.map((a) => a.action))];
+  const list = base.filter((a) =>
     (actF === "all" || a.action === actF) &&
-    (!q.trim() || a.target.includes(q) || a.user.includes(q)));
+    (!q.trim() || (a.target || "").includes(q) || (a.user || "").includes(q)));
+  const hasMore = base.length < total;
+  const filtering = actF !== "all" || !!q.trim();
+
   return (
     <div>
       <PageHead title="审计日志 Audit" desc="所有写操作留痕:谁、何时、对哪个对象、结果" />
-      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "center" }}>
         <div style={{ position: "relative", width: 260 }}>
           <Icon name="search" size={14} style={{ position: "absolute", left: 10, top: 10, color: "var(--muted-fg)" }} />
           <input className="input" style={{ paddingLeft: 32 }} placeholder="搜索对象 / 用户 …" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -322,6 +350,7 @@ function AuditPage() {
         <div style={{ width: 160 }}>
           <Select value={actF} onChange={setActF} options={[{ value: "all", label: "全部操作" }, ...acts]} />
         </div>
+        {rows !== null ? <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted-fg)" }}>已加载 {base.length} / {total} 条</span> : null}
       </div>
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
@@ -334,13 +363,20 @@ function AuditPage() {
                 <td><Badge tone={a.action === "部署" ? "primary" : a.action.includes("删除") ? "error" : a.action === "回滚" || a.action.includes("还原") ? "warn" : "default"}>{a.action}</Badge></td>
                 <td style={{ fontSize: 12.5 }}>{a.target}</td>
                 <td><Badge tone={a.result.includes("失败") ? "error" : "success"} dot>{a.result}</Badge></td>
-                <td><span className="mono" style={{ fontSize: 12, color: "var(--muted-fg)" }}>{a.ip}</span></td>
+                <td><span className="mono" style={{ fontSize: 12, color: "var(--muted-fg)" }}>{a.ip || "—"}</span></td>
               </tr>
             ))}
           </tbody>
         </table>
-        {list.length === 0 ? <EmptyState icon="shield" title="没有匹配的审计记录" /> : null}
+        {rows === null ? <div style={{ padding: 24, textAlign: "center" }}><Spinner size={16} /></div> :
+          list.length === 0 ? <EmptyState icon="shield" title="没有匹配的审计记录" /> : null}
       </div>
+      {hasMore ? (
+        <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, marginTop: 14 }}>
+          <Btn variant="outline" disabled={more} onClick={loadMore}>{more ? <Spinner size={13} /> : `加载更早记录(剩余 ${total - base.length} 条)`}</Btn>
+          {filtering ? <span style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>筛选/搜索仅作用于已加载记录</span> : null}
+        </div>
+      ) : null}
     </div>
   );
 }

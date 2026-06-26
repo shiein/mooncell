@@ -36,7 +36,7 @@ func main() {
 	}
 	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}}
 
-	// 文件柜过期清理 + 分块上传残留清理:启动即清一次,之后每小时一次。
+	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
 	go func() {
 		for {
 			if n := a.cleanupExpiredCabinet(); n > 0 {
@@ -44,6 +44,9 @@ func main() {
 			}
 			if n := a.cleanupStaleUploads(); n > 0 {
 				log.Printf("[upload] 清理过期上传会话 %d 个", n)
+			}
+			if n := a.store.trimAudit(cfg.Audit.Keep); n > 0 {
+				log.Printf("[audit] 保留最近 %d 条,清理较早审计 %d 条", cfg.Audit.Keep, n)
 			}
 			time.Sleep(time.Hour)
 		}
@@ -81,6 +84,7 @@ func main() {
 
 	// 业务数据持久化:读(hydrate)任意角色;写限 admin/operator。
 	mux.HandleFunc("POST /api/data", a.requireAuth(a.hydrate))
+	mux.HandleFunc("GET /api/audit", a.requireAuth(a.listAudit)) // 审计倒序分页(hydrate 只带最近一窗)
 	mux.HandleFunc("PUT /api/apps/{id}/config", writeRoles(a.putAppConfig)) // 类型化应用配置写入(服务端校验)
 	mux.HandleFunc("PUT /api/data/{kind}/{id}", writeRoles(a.putEntity))
 	mux.HandleFunc("DELETE /api/data/{kind}/{id}", writeRoles(a.deleteEntity))

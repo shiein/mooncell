@@ -222,6 +222,16 @@ async function hydrateData(seed) {
   }
 }
 
+// 审计倒序分页:hydrate 只带最近一窗(auditHydrateLimit),更早记录经此端点「加载更多」。
+// 返回 { items, total };后端不可达返回 null(调用方回退到 hydrate 已加载的 store.audit)。
+async function listAuditPage(offset, limit) {
+  try {
+    const r = await fetch(`/api/audit?offset=${offset}&limit=${limit}`, { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
 // 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅告警,不打断 UI)。
 // 注:kind=app 不走此通用入口(后端 403);应用配置改用 saveAppConfig(带服务端校验)。
 async function putEntity(kind, obj) {
@@ -444,6 +454,6 @@ export {
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
   getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus, setAppLifecycle,
-  hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
+  hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };

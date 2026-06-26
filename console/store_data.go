@@ -24,22 +24,77 @@ func (s *Store) countEntities() (int, error) {
 	return n, err
 }
 
-// loadEntities 按 kind 分组返回全部实体(原始 JSON),按插入顺序(seq)排列。
-func (s *Store) loadEntities() (map[string][]json.RawMessage, error) {
-	rows, err := s.db.Query("SELECT kind, data FROM entities ORDER BY seq")
-	if err != nil {
+// loadEntities 按 kind 分组返回实体(原始 JSON),按插入顺序(seq)排列。
+// 非 audit 实体全量返回(数量有界:app 按数量、cabinet 有 TTL 清理、backup 受 backupKeep 限制);
+// audit 为 append-only 无限增长,只取最近 auditLimit 条(更早记录经 GET /api/audit 分页查)。
+// auditLimit<=0 时退化为全量(供清理/统计等内部调用)。
+func (s *Store) loadEntities(auditLimit int) (map[string][]json.RawMessage, error) {
+	out := map[string][]json.RawMessage{}
+	// 每条查询用闭包包住 defer Close:MaxOpenConns=1 下必须先释放连接再发下一条查询。
+	collect := func(query string, args ...any) error {
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var kind, data string
+			if err := rows.Scan(&kind, &data); err != nil {
+				return err
+			}
+			out[kind] = append(out[kind], json.RawMessage(data))
+		}
+		return rows.Err()
+	}
+	if err := collect("SELECT kind, data FROM entities WHERE kind != 'audit' ORDER BY seq"); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := map[string][]json.RawMessage{}
-	for rows.Next() {
-		var kind, data string
-		if err := rows.Scan(&kind, &data); err != nil {
+	if auditLimit > 0 {
+		if err := collect("SELECT 'audit' AS kind, data FROM entities WHERE kind = 'audit' ORDER BY seq DESC LIMIT ?", auditLimit); err != nil {
 			return nil, err
 		}
-		out[kind] = append(out[kind], json.RawMessage(data))
+	} else if err := collect("SELECT 'audit' AS kind, data FROM entities WHERE kind = 'audit' ORDER BY seq"); err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// pageAudit 倒序(最近在前)分页返回审计实体的原始 JSON,并附总条数(供前端判断是否还有更早记录)。
+func (s *Store) pageAudit(offset, limit int) ([]json.RawMessage, int, error) {
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM entities WHERE kind = 'audit'").Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query("SELECT data FROM entities WHERE kind = 'audit' ORDER BY seq DESC LIMIT ? OFFSET ?", limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := []json.RawMessage{}
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, json.RawMessage(data))
+	}
+	return items, total, rows.Err()
+}
+
+// trimAudit 裁剪审计:只保留最近 keep 条(按 seq 降序),删除更早的;返回删除条数。keep<=0 不裁剪。
+func (s *Store) trimAudit(keep int) int {
+	if keep <= 0 {
+		return 0
+	}
+	res, err := s.db.Exec(
+		`DELETE FROM entities WHERE kind = 'audit' AND seq NOT IN (
+			SELECT seq FROM entities WHERE kind = 'audit' ORDER BY seq DESC LIMIT ?
+		)`, keep)
+	if err != nil {
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	return int(n)
 }
 
 // seedEntities 仅在实体表为空时按种子批量插入(单事务);返回是否实际种入。

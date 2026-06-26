@@ -20,6 +20,13 @@ type Config struct {
 	AgentBin AgentBinConfig `toml:"agent_bin"`
 	Demo     DemoConfig     `toml:"demo"`
 	Deploy   DeployUpload   `toml:"deploy"`
+	Audit    AuditConfig    `toml:"audit"`
+}
+
+// AuditConfig.Keep 是审计记录的保留条数:append-only 无限增长,每小时裁剪只留最近 Keep 条,
+// 更早的记录被清理(<=0 表示不裁剪)。hydrate 仅下发最近一窗,更早记录经 GET /api/audit 分页查。
+type AuditConfig struct {
+	Keep int `toml:"keep"`
 }
 
 // AgentBinConfig:Agent 升级包(按架构)的存储目录,默认 agentbin。
@@ -85,6 +92,7 @@ func loadConfig(path string) *Config {
 		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
 		Cabinet:  CabinetConfig{Dir: "cabinet", MaxUploadMB: 300},
 		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
+		Audit:    AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
 	}
 	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败(语法错误/权限等)→ 直接退出。
 	// 显式对外监听时若仍使用周知默认密码/token,同样拒绝启动。
