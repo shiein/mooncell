@@ -1,6 +1,6 @@
 // Mooncell — 应用详情:概览 / 部署记录 / 备份还原 / 实时日志 / 配置
 import React from 'react';
-import { useMC, DEPLOY_TYPES, isProcessType, isRealType, REL_STATUS, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
+import { useMC, DEPLOY_TYPES, isProcessType, isRealType, REL_STATUS, STAGES, stageOf, fmtTime, timeAgo, genLogLine, tsDir } from '../lib/data.js';
 import { Icon, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Tabs, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { Console, DeployDialog, RestoreDialog } from '../components/pipeline.jsx';
 import { listAgentBackups, streamAppLogs, getAppStatus, getAgentCapabilities, precheckApp } from '../lib/api.js';
@@ -421,6 +421,10 @@ function ConfigTab({ app }) {
           </Field>
           <Field label="启动用户">{ipt("user", false)}</Field>
           <Field label="端口"><input className="input mono" disabled={!edit} value={draft.port || ""} onChange={(e) => set("port", e.target.value)} /></Field>
+          <Field label="环境分组" hint="仅用于分组/筛选与批量操作,不影响部署行为">
+            <Select value={stageOf(draft)} onChange={(v) => set("stage", v)} disabled={!edit}
+              options={Object.entries(STAGES).map(([k, s]) => ({ value: k, label: s.label }))} />
+          </Field>
         </div>
         <div style={sec}>路径与启动</div>
         <Field label="制品路径">{ipt("path")}</Field>

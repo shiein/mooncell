@@ -46,6 +46,14 @@ const APP_STATUS = {
   static:    { label: "已发布", tone: "purple" },
 };
 
+// 环境分组(部署阶段),仅用于分组/筛选与批量操作,不影响部署行为。空/未知按 prod 归并。
+const STAGES = {
+  dev:  { label: "开发", tone: "info" },
+  test: { label: "测试", tone: "warn" },
+  prod: { label: "生产", tone: "success" },
+};
+const stageOf = (a) => (STAGES[a && a.stage] ? a.stage : "prod");
+
 const REL_STATUS = {
   success:    { label: "成功", tone: "success" },
   failed:     { label: "失败", tone: "error" },
@@ -92,7 +100,7 @@ const INITIAL_APPS = [
     logPaths: ["/srv/apps/algo/logs/algo.log"],
     jvm: "/srv/apps/algo/venv/bin/python", user: "appuser",
     backupKeep: 5, lastDeploy: ago(5 * HOUR), uptime: "—", mem: "—", cpu: "—",
-    artifactName: "algo-svc", extraFiles: ["requirements.txt"],
+    artifactName: "algo-svc", extraFiles: ["requirements.txt"], stage: "test",
   },
   {
     id: "msg-push", name: "消息推送服务", type: "node", runner: "pm2",
@@ -102,7 +110,7 @@ const INITIAL_APPS = [
     logPaths: ["/srv/apps/msg-push/logs/out.log", "/srv/apps/msg-push/logs/error.log"],
     jvm: "pm2 进程名: msg-push", user: "appuser",
     backupKeep: 5, lastDeploy: ago(3 * DAY), uptime: "3d 2h", mem: "210 MB", cpu: "0.9%",
-    artifactName: "msg-push", extraFiles: ["ecosystem.config.js"],
+    artifactName: "msg-push", extraFiles: ["ecosystem.config.js"], stage: "dev",
   },
   {
     id: "dq-frontend", name: "数据查询平台前端", type: "static-nginx", runner: "无进程",
@@ -112,7 +120,7 @@ const INITIAL_APPS = [
     logPaths: ["/var/log/nginx/dq-access.log", "/var/log/nginx/dq-error.log"],
     jvm: "部署后 nginx -s reload: 否(软链切换)", user: "nginx",
     backupKeep: 5, lastDeploy: ago(2 * DAY), uptime: "—", mem: "—", cpu: "—",
-    artifactName: "dq-frontend-dist", extraFiles: [],
+    artifactName: "dq-frontend-dist", extraFiles: [], stage: "test",
   },
   {
     id: "job-scheduler", name: "定时任务调度器", type: "java-jar", runner: "systemd",
@@ -122,7 +130,7 @@ const INITIAL_APPS = [
     logPaths: ["/srv/apps/scheduler/logs/scheduler.log"],
     jvm: "-Xmx512m", user: "appuser",
     backupKeep: 3, lastDeploy: ago(15 * DAY), uptime: "—", mem: "—", cpu: "—",
-    artifactName: "scheduler", extraFiles: [],
+    artifactName: "scheduler", extraFiles: [], stage: "dev",
   },
   {
     id: "legacy-portal", name: "旧版门户(归档)", type: "static-nginx", runner: "无进程",
@@ -320,7 +328,7 @@ function nextVersion(v) {
 }
 
 export {
-  MCStore, useMC, DEPLOY_TYPES, isProcessType, isRealType, fmtBytes, APP_STATUS, REL_STATUS,
+  MCStore, useMC, DEPLOY_TYPES, isProcessType, isRealType, fmtBytes, APP_STATUS, REL_STATUS, STAGES, stageOf,
   INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
   AGENT, genSeries, genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
   NOW as MC_NOW, MIN as MC_MIN, HOUR as MC_HOUR, DAY as MC_DAY,

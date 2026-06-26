@@ -69,6 +69,9 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 	if a.resolveAgentByID(app.AgentID) == nil {
 		return "目标 Agent 不存在: " + app.AgentID, false
 	}
+	if app.Stage != "" && !validStages[app.Stage] {
+		return "未知环境分组(仅 dev/test/prod): " + app.Stage, false
+	}
 	// static-nginx 的 Docker 容器名(可选):非空则须为合法容器名,与 Agent 端 reload 校验一致(fail-closed)。
 	if c := strings.TrimSpace(app.NginxContainer); c != "" && !nginxContainerRe.MatchString(c) {
 		return "nginx 容器名非法(仅字母数字与 _ . -,首字符字母数字): " + c, false
@@ -157,7 +160,11 @@ type appConfig struct {
 	Pm2Name        string            `json:"pm2Name"`        // pm2 接管模式:填已有 pm2 进程名/ID 则部署只 pm2 restart 它、不写 ecosystem;空=Mooncell 托管
 	LogPaths       []string          `json:"logPaths"`       // 该应用声明的日志文件路径(文件 tail 授权白名单)
 	Env            map[string]string `json:"env"`
+	Stage          string            `json:"stage"` // 环境分组:dev/test/prod(空=prod);仅用于分组/筛选,不影响部署行为
 }
+
+// validStages 是允许的环境分组值(空串视为 prod,在校验里放行)。
+var validStages = map[string]bool{"dev": true, "test": true, "prod": true}
 
 // agentDeployConfig 是 Console 下发给 Agent 的配置形态。fingerprint 也从同一结构派生,
 // 防止构造请求与本地幂等短路使用两套字段而漂移。

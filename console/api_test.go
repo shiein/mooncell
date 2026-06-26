@@ -95,6 +95,11 @@ func TestPutAppConfigValidation(t *testing.T) {
 	if c := put(goodPm2); c != http.StatusOK {
 		t.Fatalf("合法 pm2 接管名配置应 200,得 %d", c)
 	}
+	// 合法环境分组应通过。
+	goodStage := `{"name":"a","type":"native-binary","runner":"systemd","path":"/srv/apps/x/app","port":8080,"backupKeep":5,"agentId":"default","stage":"test"}`
+	if c := put(goodStage); c != http.StatusOK {
+		t.Fatalf("合法 stage 应 200,得 %d", c)
+	}
 	for _, tc := range []struct {
 		name, body string
 	}{
@@ -110,6 +115,7 @@ func TestPutAppConfigValidation(t *testing.T) {
 		{"nginx 容器名含注入字符", `{"name":"a","type":"static-nginx","runner":"软链","path":"/data/web/a","agentId":"default","backupKeep":5,"reload":true,"nginxContainer":"ng;rm -rf /"}`},
 		{"pm2 进程名用在非 pm2 runner", `{"name":"a","type":"node","runner":"systemd","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"my-proc"}`},
 		{"pm2 进程名含注入字符", `{"name":"a","type":"node","runner":"pm2","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"p;rm -rf /"}`},
+		{"未知环境分组", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":5,"stage":"staging"}`},
 	} {
 		if c := put(tc.body); c != http.StatusBadRequest {
 			t.Errorf("%s 应 400,得 %d", tc.name, c)

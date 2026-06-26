@@ -201,6 +201,25 @@ function App() {
       toast(`${app.name} 已${verb}`);
     },
 
+    // 批量启停:逐个走真机 lifecycle(权威状态回填,不伪造),汇总成一条 toast。
+    // 仅对进程类应用有意义;调用方应已筛选。失败的应用如实计入,不打断其余。
+    async bulkToggle(targets, on) {
+      const verb = on ? "启动" : "停止";
+      let ok = 0, fail = 0;
+      for (const app of targets) {
+        const st = await setAppLifecycle(app.id, on ? "start" : "stop");
+        if (!st) { fail++; continue; }
+        patchAppLocal(app.id, {
+          status: st.active ? "running" : "stopped",
+          pid: st.active && st.pid && st.pid !== "0" ? (Number(st.pid) || st.pid) : null,
+          uptime: st.active ? "刚刚" : "—", cpu: "—", mem: "—",
+        });
+        addAudit(on ? "启动服务" : "停止服务", app.name, "成功");
+        ok++;
+      }
+      toast(`批量${verb}:成功 ${ok}` + (fail ? ` · 失败 ${fail}(Agent 未响应或操作出错)` : ""), fail ? { tone: "warn", icon: "alert" } : undefined);
+    },
+
     addApp(app) {
       setApps((s) => [...s, app]); persist("app", app);
       addAudit("创建应用", app.name, "成功");

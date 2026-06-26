@@ -1,7 +1,7 @@
 // Mooncell — 应用列表 + 新建应用向导(JSON Schema 动态表单 + 预检)
 import React from 'react';
-import { useMC, DEPLOY_TYPES, isProcessType, timeAgo } from '../lib/data.js';
-import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, EmptyState, confirmDialog } from '../components/primitives.jsx';
+import { useMC, DEPLOY_TYPES, isProcessType, timeAgo, STAGES, stageOf } from '../lib/data.js';
+import { Dialog, Btn, Field, Select, Switch, Icon, Spinner, TypeBadge, StatusBadge, Badge, EmptyState, confirmDialog } from '../components/primitives.jsx';
 import { DeployDialog } from '../components/pipeline.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { listAgentNodes, precheckApp, getAgentCapabilities } from '../lib/api.js';
@@ -137,6 +137,7 @@ function CreateAppDialog({ open, onClose }) {
       logPaths: [form.logs || `/srv/apps/${id}/logs/app.log`],
       jvm: form.jvm || form.args || "", user: form.user || "appuser",
       agentId: form.agentId || "default",
+      stage: form.stage || "prod",
       reload: !!form.reload,
       nginxContainer: (form.nginxContainer || "").trim(),
       pm2Name: selectedRunner() === "pm2" ? (form.pm2Name || "").trim() : "",
@@ -296,10 +297,16 @@ function CreateAppDialog({ open, onClose }) {
               <input className="input mono" placeholder="5" value={form.backupKeep || ""} onChange={(e) => setForm({ ...form, backupKeep: e.target.value })} />
             </Field>
           </div>
-          <Field label="部署目标 Agent" hint="选择该应用部署到哪台 Agent">
-            <Select value={form.agentId || "default"} onChange={(v) => setForm({ ...form, agentId: v })}
-              options={agents.map((a) => ({ value: a.id, label: a.name + (a.addr ? " · " + a.addr : "") }))} />
-          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="部署目标 Agent" hint="选择该应用部署到哪台 Agent">
+              <Select value={form.agentId || "default"} onChange={(v) => setForm({ ...form, agentId: v })}
+                options={agents.map((a) => ({ value: a.id, label: a.name + (a.addr ? " · " + a.addr : "") }))} />
+            </Field>
+            <Field label="环境分组" hint="仅用于分组/筛选与批量操作,不影响部署行为">
+              <Select value={form.stage || "prod"} onChange={(v) => setForm({ ...form, stage: v })}
+                options={Object.entries(STAGES).map(([k, s]) => ({ value: k, label: s.label }))} />
+            </Field>
+          </div>
           <div style={{ fontSize: 11.5, color: "var(--muted-fg)", background: "var(--muted)", borderRadius: 8, padding: "8px 12px" }}>
             配置由部署类型的 JSON Schema 约束,前端动态渲染、后端与 Agent 双重校验;钩子仅限白名单内置动作,不支持自由脚本。
           </div>
@@ -328,16 +335,34 @@ function CreateAppDialog({ open, onClose }) {
 
 function AppsPage() {
   const store = useMC();
-  const { apps, releases } = store;
+  const { apps } = store;
   const [q, setQ] = React.useState("");
   const [typeF, setTypeF] = React.useState("all");
+  const [stageF, setStageF] = React.useState("all");
+  const [sel, setSel] = React.useState(() => new Set());
+  const [busy, setBusy] = React.useState(false);
   const [creating, setCreating] = React.useState(false);
   const [deployApp, setDeployApp] = React.useState(null);
+  const canWrite = store.can("write");
 
   const list = apps.filter((a) =>
     (typeF === "all" || a.type === typeF) &&
+    (stageF === "all" || stageOf(a) === stageF) &&
     (!q.trim() || a.name.includes(q) || a.id.includes(q.toLowerCase()))
   );
+  // 批量启停仅对进程类应用(systemd/pm2/nohup 有真机 lifecycle);static/tomcat 不可批量启停。
+  const selectable = list.filter((a) => isProcessType(a.type));
+  const selApps = apps.filter((a) => sel.has(a.id));
+  const allSelected = selectable.length > 0 && selectable.every((a) => sel.has(a.id));
+  const toggleSel = (id) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAll = () => setSel((s) => {
+    const n = new Set(s);
+    if (allSelected) selectable.forEach((a) => n.delete(a.id));
+    else selectable.forEach((a) => n.add(a.id));
+    return n;
+  });
+  const clearSel = () => setSel(new Set());
+
   const onDelete = async (a) => {
     const ok = await confirmDialog({
       title: "删除应用",
@@ -346,6 +371,22 @@ function AppsPage() {
     });
     if (!ok) return;
     await store.deleteApp(a);
+  };
+
+  const bulkLifecycle = async (on) => {
+    const targets = selApps.filter((a) => isProcessType(a.type));
+    if (!targets.length) return;
+    const verb = on ? "启动" : "停止";
+    const ok = await confirmDialog({
+      title: `批量${verb}`,
+      message: `确认${verb}选中的 ${targets.length} 个应用?将逐个经各自 Agent 执行真机${verb}。`,
+      confirmText: verb,
+    });
+    if (!ok) return;
+    setBusy(true);
+    await store.bulkToggle(targets, on);
+    setBusy(false);
+    clearSel();
   };
   const counts = {
     running: apps.filter((a) => a.status === "running" || a.status === "static").length,
@@ -367,18 +408,41 @@ function AppsPage() {
           <Select value={typeF} onChange={setTypeF}
             options={[{ value: "all", label: "全部类型" }, ...Object.entries(DEPLOY_TYPES).map(([k, t]) => ({ value: k, label: t.label }))]} />
         </div>
+        <div style={{ width: 140 }}>
+          <Select value={stageF} onChange={setStageF}
+            options={[{ value: "all", label: "全部环境" }, ...Object.entries(STAGES).map(([k, s]) => ({ value: k, label: s.label }))]} />
+        </div>
       </div>
+
+      {canWrite && selApps.length > 0 ? (
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", marginBottom: 14 }}>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selApps.length} 个</span>
+          <Btn size="sm" icon="play" disabled={busy} onClick={() => bulkLifecycle(true)}>批量启动</Btn>
+          <Btn size="sm" icon="stop" disabled={busy} onClick={() => bulkLifecycle(false)}>批量停止</Btn>
+          {busy ? <Spinner size={14} /> : null}
+          <Btn size="sm" variant="ghost" onClick={clearSel} style={{ marginLeft: "auto" }}>清除选择</Btn>
+        </div>
+      ) : null}
 
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
           <thead><tr>
+            {canWrite ? <th style={{ width: 34 }}><input type="checkbox" checked={allSelected} onChange={toggleAll}
+              disabled={selectable.length === 0} style={{ accentColor: "var(--primary)", cursor: "pointer" }} aria-label="全选可启停应用" /></th> : null}
             <th>应用</th><th>类型</th><th>Runner</th><th>状态</th><th>版本</th><th>端口</th><th>最近部署</th><th style={{ width: 170 }}></th>
           </tr></thead>
           <tbody>
             {list.map((a) => (
               <tr key={a.id} className="app-row" onClick={() => store.nav("app-detail", { appId: a.id })}>
+                {canWrite ? <td onClick={(e) => e.stopPropagation()}>
+                  {isProcessType(a.type) ? <input type="checkbox" checked={sel.has(a.id)} onChange={() => toggleSel(a.id)}
+                    style={{ accentColor: "var(--primary)", cursor: "pointer" }} aria-label={`选择 ${a.name}`} /> : null}
+                </td> : null}
                 <td>
-                  <div style={{ fontWeight: 600 }}>{a.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                    <span style={{ fontWeight: 600 }}>{a.name}</span>
+                    <Badge tone={STAGES[stageOf(a)].tone}>{STAGES[stageOf(a)].label}</Badge>
+                  </div>
                   <div className="mono" style={{ fontSize: 11, color: "var(--muted-fg)", marginTop: 1 }}>{a.path.split(" ")[0]}</div>
                 </td>
                 <td><TypeBadge type={a.type} /></td>
