@@ -26,6 +26,8 @@ type api struct {
 	maxUpload       int64                     // 部署制品上传硬上限(字节);超出在传输层截断回 413
 	uploads         map[string]*uploadSession // 分块上传会话(按 uploadId)
 	uploadsMu       sync.Mutex
+	busy            map[string]int // 在飞操作的应用(部署/还原/启停/下线)引用计数:健康巡检跳过,避免误判掉线
+	busyMu          sync.Mutex
 }
 
 func randomToken() string {

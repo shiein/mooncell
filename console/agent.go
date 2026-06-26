@@ -541,17 +541,24 @@ func (a *api) agentAppStatus(w http.ResponseWriter, r *http.Request) {
 	if a.unknownAgent(w, cl) {
 		return
 	}
+	status, body, err := cl.get(a.appStatusPath(id, runner))
+	relayAgent(w, status, body, err)
+}
+
+// appStatusPath 构造向 Agent 查应用运行态的路径(按 runner 透传 pm2Name/binPath 以定位无状态 Agent 的进程)。
+// 供 status 代理端点与健康巡检共用。
+func (a *api) appStatusPath(id, runner string) string {
 	path := "/api/apps/" + id + "/status"
-	if runner == "pm2" {
+	switch runner {
+	case "pm2":
 		path += "?runner=pm2"
 		if n := a.appPm2Name(id); n != "" {
 			path += "&pm2Name=" + url.QueryEscape(n)
 		}
-	} else if runner == "nohup" {
+	case "nohup":
 		path += "?runner=nohup&binPath=" + url.QueryEscape(a.appBinPathOf(id))
 	}
-	status, body, err := cl.get(path)
-	relayAgent(w, status, body, err)
+	return path
 }
 
 // agentLifecycle 服务端启停:按已存应用配置路由 Agent + runner,真机 start/stop 并落审计。
@@ -563,6 +570,8 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
 		return
 	}
+	a.markBusy(id)
+	defer a.unmarkBusy(id)
 	cl, runner, ok := a.requireAppRouting(w, id)
 	if !ok {
 		return
@@ -656,6 +665,8 @@ func (a *api) undeployPath(id, runner string) string {
 
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	a.markBusy(id)
+	defer a.unmarkBusy(id)
 	// 必须是已落库应用:防止 write 用户对 Console 未跟踪的任意 deploy-<id> 单元执行下线。
 	cl, runner, ok := a.requireAppRouting(w, id)
 	if !ok {
@@ -672,6 +683,8 @@ func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 // 成功后才删 Console 元数据并审计。前端不能走通用 /api/data 删除(那里禁止删 app,只会"前端假删、刷新复现")。
 func (a *api) appDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	a.markBusy(id)
+	defer a.unmarkBusy(id)
 	cl, runner, ok := a.requireAppRouting(w, id)
 	if !ok {
 		return

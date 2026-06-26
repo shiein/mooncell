@@ -442,6 +442,8 @@ func buildDeployBody(configJSON []byte, file io.Reader) (*io.PipeReader, string)
 // agentDeployStream 服务端部署:读已存应用配置 + 制品 + version/releaseId,生成 Agent 请求并透传 SSE。
 func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	a.markBusy(id)
+	defer a.unmarkBusy(id)
 	defer r.Body.Close()
 	// 传输层硬上限:仅 ParseMultipartForm 的内存阈值不足以防 DoS,超大制品会先落临时盘撑爆磁盘。
 	r.Body = http.MaxBytesReader(w, r.Body, a.maxUpload)
@@ -523,6 +525,8 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 // agentRestoreStream 服务端还原:读已存应用配置生成 Agent 请求(前端只提交 backup + version + releaseId)。
 func (a *api) agentRestoreStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	a.markBusy(id)
+	defer a.unmarkBusy(id)
 	defer r.Body.Close()
 	var req struct {
 		Backup    string `json:"backup"`

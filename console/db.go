@@ -62,6 +62,14 @@ func openDB(cfg *Config) *Store {
 			created_at  INTEGER NOT NULL,
 			PRIMARY KEY (op, app_id, release_id)
 		);
+		CREATE TABLE IF NOT EXISTS metrics (
+			agent_id TEXT    NOT NULL,
+			ts       INTEGER NOT NULL,
+			cpu      REAL,
+			mem      REAL,
+			disk     REAL
+		);
+		CREATE INDEX IF NOT EXISTS idx_metrics_agent_ts ON metrics(agent_id, ts);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
 	}

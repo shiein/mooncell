@@ -4,7 +4,7 @@ import { useMC, AGENT, genSeries, timeAgo, fmtTime, fmtBytes, tsDir, MC_NOW, MC_
 import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, EmptyState, Select, Spinner, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAgents } from '../lib/agent.js';
-import { uploadCabinetFile, getPubLimits, listAuditPage } from '../lib/api.js';
+import { uploadCabinetFile, getPubLimits, listAuditPage, getAgentMetrics } from '../lib/api.js';
 
 function StatCard({ label, value, unit, series, color, extra }) {
   return (
@@ -26,6 +26,18 @@ function AgentBlock({ agent, apps }) {
   const { name, addr, system, caps, online } = agent;
   const [cpuS, setCpuS] = React.useState(() => genSeries(AGENT.cpu, 9));
   const [memS, setMemS] = React.useState(() => genSeries(AGENT.mem, 4));
+
+  // 用巡检留存的真实历史初始化曲线(取最近 40 点);无数据则保持 mock 动画。之后由 system 轮询继续追加。
+  React.useEffect(() => {
+    let alive = true;
+    getAgentMetrics(agent.id, 60).then((pts) => {
+      if (!alive || !pts || !pts.length) return;
+      const last = pts.slice(-40);
+      setCpuS(last.map((p) => Math.round(p.cpu)));
+      setMemS(last.map((p) => Math.round(p.mem)));
+    });
+    return () => { alive = false; };
+  }, [agent.id]);
 
   React.useEffect(() => {
     if (!system) return;

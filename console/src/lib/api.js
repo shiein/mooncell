@@ -205,6 +205,15 @@ const getAgentCapabilities = (agentId) => agentGet(qa('/api/agent/capabilities',
 const getAgentSystem = (agentId) => agentGet(qa('/api/agent/system', agentId));
 const getAgentPing = (agentId) => agentGet(qa('/api/agent/ping', agentId));
 
+// 拉某 Agent 近 minutes 分钟的资源水位历史(巡检留存),用于总览曲线初始化;失败/无数据返回 null。
+async function getAgentMetrics(agentId, minutes = 60) {
+  try {
+    const r = await fetch(`/api/agents/${encodeURIComponent(agentId || 'default')}/metrics?minutes=${minutes}`, { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return (await r.json()).points || [];
+  } catch (e) { return null; }
+}
+
 // ---------- 业务数据持久化(SQLite 文档存储)----------
 // hydrateData:首启用 seed 种子初始化,始终返回库中当前全部数据;失败返回 null(前端回退 mock)。
 async function hydrateData(seed) {
@@ -453,7 +462,7 @@ export {
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
-  getAgentCapabilities, getAgentSystem, getAgentPing, precheckApp, getAppStatus, setAppLifecycle,
+  getAgentCapabilities, getAgentSystem, getAgentPing, getAgentMetrics, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
 };

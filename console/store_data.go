@@ -59,6 +59,64 @@ func (s *Store) loadEntities(auditLimit int) (map[string][]json.RawMessage, erro
 	return out, nil
 }
 
+// appsRaw 返回全部 app 实体原始 JSON(按 seq),供健康巡检遍历。
+func (s *Store) appsRaw() ([]json.RawMessage, error) {
+	rows, err := s.db.Query("SELECT data FROM entities WHERE kind = 'app' ORDER BY seq")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []json.RawMessage
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		out = append(out, json.RawMessage(data))
+	}
+	return out, rows.Err()
+}
+
+// MetricPoint 是某 Agent 某时刻的资源水位(供总览画真实历史曲线)。
+type MetricPoint struct {
+	Ts   int64   `json:"ts"`
+	Cpu  float64 `json:"cpu"`
+	Mem  float64 `json:"mem"`
+	Disk float64 `json:"disk"`
+}
+
+func (s *Store) insertMetric(agentID string, ts int64, cpu, mem, disk float64) {
+	s.db.Exec("INSERT INTO metrics (agent_id, ts, cpu, mem, disk) VALUES (?, ?, ?, ?, ?)", agentID, ts, cpu, mem, disk)
+}
+
+// listMetrics 返回某 Agent 自 since(含)起的指标时序(按时间升序)。
+func (s *Store) listMetrics(agentID string, since int64) ([]MetricPoint, error) {
+	rows, err := s.db.Query("SELECT ts, cpu, mem, disk FROM metrics WHERE agent_id = ? AND ts >= ? ORDER BY ts", agentID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MetricPoint{}
+	for rows.Next() {
+		var p MetricPoint
+		if err := rows.Scan(&p.Ts, &p.Cpu, &p.Mem, &p.Disk); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// trimMetrics 删除早于 before 的指标点(保留窗口外),返回删除条数。
+func (s *Store) trimMetrics(before int64) int {
+	res, err := s.db.Exec("DELETE FROM metrics WHERE ts < ?", before)
+	if err != nil {
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	return int(n)
+}
+
 // pageAudit 倒序(最近在前)分页返回审计实体的原始 JSON,并附总条数(供前端判断是否还有更早记录)。
 func (s *Store) pageAudit(offset, limit int) ([]json.RawMessage, int, error) {
 	var total int

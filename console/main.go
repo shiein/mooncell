@@ -34,7 +34,7 @@ func main() {
 	if agentBinDir == "" {
 		agentBinDir = "agentbin"
 	}
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}}
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
 	go func() {
@@ -51,6 +51,9 @@ func main() {
 			time.Sleep(time.Hour)
 		}
 	}()
+
+	// 持续健康巡检 + Agent 指标采集(独立周期,默认 30s)。interval<=0 关闭。
+	go a.runMonitor(cfg.Monitor.IntervalSeconds, cfg.Monitor.MetricsKeepHours)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
@@ -99,6 +102,7 @@ func main() {
 	mux.HandleFunc("POST /api/agents", a.requireRole("admin")(a.addAgent))
 	mux.HandleFunc("DELETE /api/agents/{id}", a.requireRole("admin")(a.deleteAgent))
 	mux.HandleFunc("GET /api/agents/{id}/ping", a.requireAuth(a.pingAgent))
+	mux.HandleFunc("GET /api/agents/{id}/metrics", a.requireAuth(a.listAgentMetrics)) // 资源水位历史(巡检留存)
 
 	// Agent 自更新:升级包按架构上传/列出(列表任意登录可见,上传与推送限 admin)。
 	mux.HandleFunc("GET /api/agent-binaries", a.requireAuth(a.listAgentBinaries))

@@ -21,6 +21,14 @@ type Config struct {
 	Demo     DemoConfig     `toml:"demo"`
 	Deploy   DeployUpload   `toml:"deploy"`
 	Audit    AuditConfig    `toml:"audit"`
+	Monitor  MonitorConfig  `toml:"monitor"`
+}
+
+// MonitorConfig:部署后持续健康巡检 + Agent 资源指标留存。
+// IntervalSeconds<=0 关闭巡检(回滚开关);MetricsKeepHours 是指标时序保留窗口(小时)。
+type MonitorConfig struct {
+	IntervalSeconds  int `toml:"interval_seconds"`
+	MetricsKeepHours int `toml:"metrics_keep_hours"`
 }
 
 // AuditConfig.Keep 是审计记录的保留条数:append-only 无限增长,每小时裁剪只留最近 Keep 条,
@@ -93,6 +101,7 @@ func loadConfig(path string) *Config {
 		Cabinet:  CabinetConfig{Dir: "cabinet", MaxUploadMB: 300},
 		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 		Audit:    AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
+		Monitor:  MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
 	}
 	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败(语法错误/权限等)→ 直接退出。
 	// 显式对外监听时若仍使用周知默认密码/token,同样拒绝启动。
