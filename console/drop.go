@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"net/http"
 )
@@ -14,7 +15,13 @@ import (
 var dropHTML []byte
 
 func (a *api) dropPage(w http.ResponseWriter, r *http.Request) {
+	// 自包含页含内联 <script>:用 per-response nonce 放行该脚本,仍禁全局 'unsafe-inline' script。
+	// 内联 <style> 由 style-src 'unsafe-inline' 覆盖(与全局一致),无需 nonce。
+	nonce := randomToken()[:16]
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(dropHTML)
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; script-src 'self' 'nonce-"+nonce+"'; style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+	w.Write(bytes.Replace(dropHTML, []byte("<script>"), []byte(`<script nonce="`+nonce+`">`), 1))
 }

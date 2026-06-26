@@ -122,7 +122,26 @@ func main() {
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Addr, cfg.Server.Port)
 	log.Printf("Mooncell Console 运行于 http://%s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, securityHeaders(mux)); err != nil {
 		log.Fatalf("[server] %v", err)
 	}
+}
+
+// securityHeaders 给所有响应注入基础安全头(纵深防御,内网/对外皆生效)。
+// CSP:SPA 产物为外链 JS、无内联脚本,故 script 仅同源;React 大量内联 style 属性,style 必须放开
+// 'unsafe-inline'(样式注入风险远低于脚本);img 放开 data:(favicon/内联图标);连接同源(SSE/fetch)。
+// /drop 自包含页含内联 <script>,由其 handler 用 per-response nonce 单独覆盖 CSP,不在此放开 inline script。
+func securityHeaders(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; font-src 'self' data:; connect-src 'self'; " +
+		"object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+		h.Set("Content-Security-Policy", csp)
+		next.ServeHTTP(w, r)
+	})
 }
