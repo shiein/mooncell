@@ -176,7 +176,9 @@ func (a *api) unknownAgent(w http.ResponseWriter, cl *agentClient) bool {
 //  1. 浏览器中途断开时,继续读尽 Agent 流(只停止向浏览器写),确保仍能拿到权威 done;
 //  2. 即便 Console↔Agent 也断流没拿到 done,再向 Agent 查询权威幂等记录对账——
 //     Agent 真机已完成的部署绝不会被误记为失败,也不会漏记幂等导致重试时重复部署。
-func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentClient, resp *http.Response, err error, action, appID, releaseID, fingerprint string) {
+// streamAndAudit 透传 Agent 的部署/还原 SSE 给浏览器,并据权威 done 结果落审计/发布/幂等记录。
+// 返回最终 (result, version) 供调用方在成功后做旁路动作(如部署成功自动归档制品);早返回回空串。
+func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentClient, resp *http.Response, err error, action, appID, releaseID, fingerprint string) (string, string) {
 	user := a.sessionUser(r)
 	op := "deploy"
 	if action == "还原" {
@@ -185,14 +187,14 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 	if err != nil {
 		a.store.appendAudit(user, action, appID, "失败·Agent不可达")
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Agent 不可达", "detail": err.Error(), "online": false})
-		return
+		return "", ""
 	}
 	defer resp.Body.Close()
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "不支持流式响应"})
-		return
+		return "", ""
 	}
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "no-cache")
@@ -248,6 +250,7 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 	if result == "success" || result == "rolledback" || result == "failed" {
 		a.applyAppRuntimeState(appID, version, result) // 服务端权威更新应用 version/status/lastDeploy
 	}
+	return result, version
 }
 
 // applyAppRuntimeState 在真机部署/还原结束后,由 Console 服务端权威更新应用实体状态,

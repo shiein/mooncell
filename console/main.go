@@ -60,7 +60,7 @@ func main() {
 	if artifactDir == "" {
 		artifactDir = "artifacts"
 	}
-	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, artifactDir: artifactDir, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}}
+	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, artifactDir: artifactDir, artifactKeep: cfg.Artifact.KeepPerApp, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}}
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
 	go func() {
@@ -154,6 +154,7 @@ func main() {
 	mux.HandleFunc("POST /api/artifacts", writeRoles(a.uploadArtifact))
 	mux.HandleFunc("DELETE /api/artifacts/{id}", writeRoles(a.deleteArtifactHandler))
 	mux.HandleFunc("GET /api/artifacts/{id}/download", a.requireAuth(a.downloadArtifact))
+	mux.HandleFunc("POST /api/artifacts/{id}/pin", writeRoles(a.pinArtifactHandler)) // ⭐标记/取消重要(豁免滚动淘汰)
 
 	// 独立免登录投递页:极简自包含 HTML,只上传 + 凭码下载,无列表(列表仅登录后 SPA 可见)。
 	mux.HandleFunc("GET /drop", a.dropPage)

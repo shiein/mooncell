@@ -485,6 +485,17 @@ async function deleteArtifact(id) {
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); }
 }
 
+// ⭐ 标记/取消重要:被标记的制品豁免每应用滚动淘汰,永久保留。
+async function pinArtifact(id, pinned) {
+  const r = await fetch(`/api/artifacts/${encodeURIComponent(id)}/pin`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned }), credentials: 'same-origin',
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '操作失败');
+  return d;
+}
+
 // ---------- Console 自更新(管理员从浏览器直传新 Console 二进制,本地校验后替换自身并 self-exec 重启)----------
 // getConsoleInfo:返回当前 Console 版本 + os/arch;升级后轮询此端点,版本变为新版即重启完成。
 async function getConsoleInfo() {
@@ -514,7 +525,7 @@ export {
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
-  listArtifacts, uploadArtifact, deleteArtifact,
+  listArtifacts, uploadArtifact, deleteArtifact, pinArtifact,
   getAgentCapabilities, getAgentSystem, getAgentPing, getAgentMetrics, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,

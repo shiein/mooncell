@@ -22,7 +22,8 @@ func openDB(cfg *Config) *Store {
 	// sqlite 写串行,限制连接数避免 "database is locked"
 	db.SetMaxOpenConns(1)
 
-	migrateDeploys(db) // 旧库 deploys(单列 release_id 主键)→ 复合主键前的一次性迁移
+	migrateDeploys(db)   // 旧库 deploys(单列 release_id 主键)→ 复合主键前的一次性迁移
+	migrateArtifacts(db) // 旧库 artifacts 补 app_id/source/pinned 列(自动归档 + ⭐保留)
 
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
@@ -77,7 +78,10 @@ func openDB(cfg *Config) *Store {
 			sha256     TEXT    NOT NULL,
 			size       INTEGER NOT NULL DEFAULT 0,
 			uploader   TEXT    NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL
+			created_at INTEGER NOT NULL,
+			app_id     TEXT    NOT NULL DEFAULT '',  -- 来源应用(自动归档时记录;手动上传为空)
+			source     TEXT    NOT NULL DEFAULT 'manual', -- manual=手动上传 / auto=部署成功自动归档
+			pinned     INTEGER NOT NULL DEFAULT 0    -- 1=⭐重要节点,豁免滚动淘汰
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_sha ON artifacts(sha256);
 	`); err != nil {
@@ -139,6 +143,36 @@ func (s *Store) deleteAgent(id string) error {
 
 // migrateDeploys 把旧的「单列 release_id 主键」deploys 表迁移到复合主键前清理:
 // 旧表无 op 列时直接 DROP(幂等去重记录非持久业务数据,丢弃可接受),由后续 CREATE 重建新结构。
+// migrateArtifacts 给旧库的 artifacts 表补 app_id/source/pinned 列(自动归档 + ⭐保留特性)。
+// 全新库由 CREATE TABLE 直接带列;已存在的列 ADD 会报错,逐列检查后再加(幂等)。
+func migrateArtifacts(db *sql.DB) {
+	rows, err := db.Query(`PRAGMA table_info(artifacts)`)
+	if err != nil {
+		return // 表尚不存在(全新库):CREATE TABLE 已带列,无需迁移
+	}
+	defer rows.Close()
+	has := map[string]bool{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return
+		}
+		has[name] = true
+	}
+	for _, c := range []struct{ name, ddl string }{
+		{"app_id", `ALTER TABLE artifacts ADD COLUMN app_id TEXT NOT NULL DEFAULT ''`},
+		{"source", `ALTER TABLE artifacts ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`},
+		{"pinned", `ALTER TABLE artifacts ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if !has[c.name] {
+			db.Exec(c.ddl)
+			log.Printf("[db] 迁移 artifacts → 增加 %s 列", c.name)
+		}
+	}
+}
+
 func migrateDeploys(db *sql.DB) {
 	rows, err := db.Query(`PRAGMA table_info(deploys)`)
 	if err != nil {

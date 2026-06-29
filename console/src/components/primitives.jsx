@@ -9,6 +9,7 @@ const IC = {
   shield: <g><path d="M12 3.5l7 2.8v5.2c0 4.6-3 7.6-7 9-4-1.4-7-4.4-7-9V6.3z" fill="none"/><path d="M9 11.7l2.2 2.2 3.8-4" fill="none"/></g>,
   server: <g><rect x="3.5" y="4.5" width="17" height="6.5" rx="1.5" fill="none"/><rect x="3.5" y="13" width="17" height="6.5" rx="1.5" fill="none"/><circle cx="7" cy="7.7" r="1" fill="currentColor" stroke="none"/><circle cx="7" cy="16.2" r="1" fill="currentColor" stroke="none"/></g>,
   archive: <g><rect x="3.5" y="4.5" width="17" height="5" rx="1" fill="none"/><path d="M5.5 9.5v8a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-8M10 13h4" fill="none"/></g>,
+  star: <path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" fill="none"/>,
   fileText: <g><path d="M6 3.5h8l4 4V20.5h-12z" fill="none"/><path d="M14 3.5V8h4M9 12h6M9 15.5h6" fill="none"/></g>,
   search: <g><circle cx="11" cy="11" r="6.5" fill="none"/><path d="M16 16l4.5 4.5" fill="none"/></g>,
   upload: <g><path d="M12 16V4.5M7.5 8.5L12 4l4.5 4.5" fill="none"/><path d="M4.5 16.5v3h15v-3" fill="none"/></g>,

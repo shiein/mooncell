@@ -30,6 +30,9 @@ type Config struct {
 // 一键重部署任意历史制品。复用文件柜的二进制落盘 + sha256 校验地基,但无 TTL(手动管理)。
 type ArtifactConfig struct {
 	Dir string `toml:"dir"`
+	// KeepPerApp:每个应用「自动归档(部署成功沉淀)」制品的滚动保留份数,超出淘汰最旧的。
+	// ⭐ 标记重要与手动上传的制品不计入、永不自动淘汰。<=0 关闭自动归档(回滚开关)。
+	KeepPerApp int `toml:"keep_per_app"`
 }
 
 // MonitorConfig:部署后持续健康巡检 + Agent 资源指标留存。
@@ -107,7 +110,7 @@ func loadConfig(path string) *Config {
 		Admin:    AdminConfig{Username: "admin", Password: defaultAdminPassword},
 		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
 		Cabinet:  CabinetConfig{Dir: "cabinet", MaxUploadMB: 300},
-		Artifact: ArtifactConfig{Dir: "artifacts"},
+		Artifact: ArtifactConfig{Dir: "artifacts", KeepPerApp: 5}, // 每应用自动归档默认保留最近 5 份(⭐/手动不计)
 		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 		Audit:    AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
 		Monitor:  MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},

@@ -51,3 +51,55 @@ func TestArtifactStoreRoundtrip(t *testing.T) {
 		t.Fatal("删除后 getArtifact 不应命中")
 	}
 }
+
+// TestArtifactRetention 覆盖自动归档的每应用滚动淘汰 + ⭐豁免 + 手动豁免。
+func TestArtifactRetention(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	mk := func(id string, ts int64, source, app string) {
+		if err := s.addArtifact(ArtifactRow{ID: id, Name: id + ".jar", Sha256: id, Size: 1, Uploader: "u", CreatedAt: ts, AppID: app, Source: source}); err != nil {
+			t.Fatalf("addArtifact %s: %v", id, err)
+		}
+	}
+	// app "svc" 4 个自动条目(新→旧:a4>a3>a2>a1)+ 1 个手动 + 另一 app 的自动(不应受影响)。
+	mk("a1", 1000, "auto", "svc")
+	mk("a2", 2000, "auto", "svc")
+	mk("a3", 3000, "auto", "svc")
+	mk("a4", 4000, "auto", "svc")
+	mk("m1", 2500, "manual", "svc")
+	mk("o1", 1500, "auto", "other")
+
+	// keep=2:svc 自动条目超出最近 2 份的应淘汰 → a2、a1。
+	ev, err := s.evictableAutoArtifacts("svc", 2)
+	if err != nil {
+		t.Fatalf("evictableAutoArtifacts: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range ev {
+		got[r.ID] = true
+		if r.Source != "auto" {
+			t.Errorf("淘汰候选不应含非 auto: %s", r.ID)
+		}
+	}
+	if len(ev) != 2 || !got["a1"] || !got["a2"] {
+		t.Fatalf("keep=2 应淘汰 a1,a2,实际 %v", got)
+	}
+
+	// ⭐ a2 后:a2 豁免,只剩 a1 可淘汰。
+	if err := s.setArtifactPinned("a2", true); err != nil {
+		t.Fatalf("setArtifactPinned: %v", err)
+	}
+	ev, _ = s.evictableAutoArtifacts("svc", 2)
+	if len(ev) != 1 || ev[0].ID != "a1" {
+		t.Fatalf("⭐ a2 后 keep=2 应只淘汰 a1,实际 %+v", ev)
+	}
+
+	// 手动条目永不在淘汰候选内(keep=0 也不淘汰 manual)。
+	ev, _ = s.evictableAutoArtifacts("svc", 0)
+	for _, r := range ev {
+		if r.ID == "m1" {
+			t.Fatal("手动上传条目不应被自动淘汰")
+		}
+	}
+}

@@ -514,6 +514,9 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 		io.Seeker
 		io.Closer
 	}
+	// fresh=本次新上传的制品(uploadId/multipart),部署成功后自动归档进制品库;
+	// artifactId 是库里已有制品的复部署,不重复归档。srcName 为归档命名用的原始文件名。
+	fresh, srcName := false, ""
 	switch {
 	case artifactID != "":
 		f, ok := a.openArtifactFile(artifactID)
@@ -528,15 +531,21 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "上传未完成或会话不存在"})
 			return
 		}
-		defer a.finishUpload(uploadID) // 部署消费后删会话与临时文件
+		if sess, ok := a.getUpload(uploadID); ok {
+			srcName = sess.Filename
+		}
+		defer a.finishUpload(uploadID) // 部署消费后删会话与临时文件(归档发生在本函数返回前,fd 仍有效)
 		file = f
+		fresh = true
 	default:
-		f, _, err := r.FormFile("artifact")
+		f, hdr, err := r.FormFile("artifact")
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品(或 uploadId / artifactId)"})
 			return
 		}
+		srcName = hdr.Filename
 		file = f
+		fresh = true
 	}
 	defer file.Close()
 	// 服务端权威计算制品 sha256(不信任客户端传值),保证 Console→Agent 完整性;Agent 强校验。
@@ -570,7 +579,24 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 
 	body, ct := buildDeployBody(cfgJSON, file)
 	resp, perr := cl.postStream("/api/apps/"+id+"/deploy/stream", ct, body)
-	a.streamAndAudit(w, r, cl, resp, perr, "部署", id, releaseID, fp)
+	result, ver := a.streamAndAudit(w, r, cl, resp, perr, "部署", id, releaseID, fp)
+
+	// 部署成功即归档:把本次上传的制品自动沉淀进制品库(source=auto,记来源应用),
+	// 免去「先传仓库再引用部署」的拧巴流程。artifactId 复部署不重复归档;失败/回滚不归档。
+	if fresh && result == "success" {
+		av := ver
+		if av == "" {
+			av = version
+		}
+		name := srcName
+		if name == "" {
+			name = id
+			if av != "" {
+				name += "-" + av
+			}
+		}
+		a.archiveDeployedArtifact(id, name, av, sha, a.sessionUser(r), file)
+	}
 }
 
 // agentRestoreStream 服务端还原:读已存应用配置生成 Agent 请求(前端只提交 backup + version + releaseId)。

@@ -6,7 +6,7 @@ import React from 'react';
 import { useMC, fmtTime, timeAgo, fmtBytes } from '../lib/data.js';
 import { Btn, Icon, Badge, Progress, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
-import { listArtifacts, uploadArtifact, deleteArtifact } from '../lib/api.js';
+import { listArtifacts, uploadArtifact, deleteArtifact, pinArtifact } from '../lib/api.js';
 
 function ArtifactsPage() {
   const store = useMC();
@@ -54,6 +54,20 @@ function ArtifactsPage() {
     }
   };
 
+  // ⭐ 标记/取消重要:被标记的自动归档制品豁免滚动淘汰,永久保留。
+  const onPin = async (row) => {
+    try {
+      await pinArtifact(row.id, !row.pinned);
+      toast(row.pinned ? "已取消重要标记" : "已标记为重要节点(永久保留)", { icon: row.pinned ? "star" : "check" });
+      refresh();
+    } catch (e) {
+      toast(e.message || "操作失败", { tone: "error", icon: "alert" });
+    }
+  };
+
+  // 来源应用 id → 友好名(取不到回退 id)。
+  const appName = (id) => (store.apps || []).find((a) => a.id === id)?.name || id;
+
   const dl = (row) => {
     const a = document.createElement("a");
     a.href = `/api/artifacts/${encodeURIComponent(row.id)}/download`;
@@ -76,7 +90,7 @@ function ArtifactsPage() {
           <Icon name="archive" size={20} style={{ color: "var(--muted-fg)" }} />
           <div style={{ fontWeight: 600, marginTop: 7, fontSize: 13.5 }}>{canWrite ? "拖拽制品到此处,或点击选择文件" : "当前角色为只读,无上传权限"}</div>
           <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 3 }}>
-            上传后留存(sha256 去重)· 可在部署对话框选用,免重复传大文件
+            部署成功的制品会自动归档到这里 · 此处手动上传用于补充 · 点 ⭐ 标记重要节点永久保留
           </div>
           {canWrite ? (
             <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", justifyContent: "center" }}
@@ -92,19 +106,30 @@ function ArtifactsPage() {
 
   return (
     <div>
-      <PageHead title="制品仓库 Artifacts" desc="版本化制品库 · 上传一次留存,可重复部署到任意应用 / Agent"
+      <PageHead title="制品仓库 Artifacts" desc="部署成功自动归档 · 每应用滚动保留最近若干份 · ⭐ 标记重要节点永久保留,可一键重部署/回退"
         actions={<Btn icon="rotate" onClick={refresh}>刷新</Btn>} />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {zone}
         <div className="card" style={{ overflow: "hidden" }}>
           <table className="table">
-            <thead><tr><th>制品</th><th>版本</th><th>大小</th><th>sha256</th><th>上传者</th><th>上传时间</th><th style={{ width: 90 }}></th></tr></thead>
+            <thead><tr><th style={{ width: 34 }}></th><th>制品</th><th>版本</th><th>来源</th><th>大小</th><th>sha256</th><th>上传者</th><th>上传时间</th><th style={{ width: 120 }}></th></tr></thead>
             <tbody>
               {(rows || []).map((row) => (
-                <tr key={row.id}>
+                <tr key={row.id} style={row.pinned ? { background: "var(--warn-bg, rgba(245,158,11,0.06))" } : undefined}>
+                  <td style={{ textAlign: "center" }}>
+                    {canWrite
+                      ? <Btn size="sm" variant="ghost" icon="star" title={row.pinned ? "取消重要标记" : "标记为重要(永久保留)"}
+                          style={row.pinned ? { color: "var(--warn)" } : { color: "var(--muted-fg)" }} onClick={() => onPin(row)}></Btn>
+                      : (row.pinned ? <Icon name="star" size={13} style={{ color: "var(--warn)" }} /> : null)}
+                  </td>
                   <td><span className="mono" style={{ fontSize: 12, fontWeight: 500 }}>{row.name}</span></td>
                   <td>{row.version ? <Badge tone="info">{row.version}</Badge> : <span style={{ fontSize: 12, color: "var(--muted-fg)" }}>—</span>}</td>
+                  <td>
+                    {row.source === "auto"
+                      ? <Badge tone="success" title={`部署成功自动归档 · 来自 ${appName(row.appId)}`}>自动 · {appName(row.appId)}</Badge>
+                      : <Badge tone="default">手动上传</Badge>}
+                  </td>
                   <td><span className="mono" style={{ fontSize: 12 }}>{fmtBytes(row.size)}</span></td>
                   <td><span className="mono" style={{ fontSize: 11, color: "var(--muted-fg)" }}>{row.sha256.slice(0, 12)}…</span></td>
                   <td style={{ fontSize: 12.5 }}>{row.uploader || "—"}</td>
@@ -119,7 +144,7 @@ function ArtifactsPage() {
               ))}
             </tbody>
           </table>
-          {rows && rows.length === 0 ? <EmptyState icon="archive" title="制品库是空的" desc="上传第一个制品,后续部署可免重复上传" /> : null}
+          {rows && rows.length === 0 ? <EmptyState icon="archive" title="制品库是空的" desc="完成一次真机部署后,制品会自动归档到这里;也可在上方手动上传补充" /> : null}
           {rows === null ? <div style={{ padding: 20, textAlign: "center" }}><Spinner size={16} /></div> : null}
         </div>
       </div>

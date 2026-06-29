@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -171,4 +172,99 @@ func (a *api) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", urlEscape(row.Name)))
 	io.Copy(w, f)
+}
+
+// pinArtifactHandler 处理 POST /api/artifacts/{id}/pin(write):⭐ 标记/取消重要。
+// 被标记的制品豁免每应用滚动淘汰、永久保留;body: {pinned: bool}。
+func (a *api) pinArtifactHandler(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	id := r.PathValue("id")
+	row, ok := a.store.getArtifact(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "制品不存在"})
+		return
+	}
+	var body struct {
+		Pinned bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	if err := a.store.setArtifactPinned(id, body.Pinned); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新失败"})
+		return
+	}
+	act := "取消标记重要"
+	if body.Pinned {
+		act = "标记重要"
+	}
+	a.store.appendAudit(a.sessionUser(r), "制品"+act, fmt.Sprintf("制品库 · %s(%s)", row.Name, row.Version), "成功")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pinned": body.Pinned})
+}
+
+// archiveDeployedArtifact 在真机部署成功后,把本次部署的制品自动沉淀进制品库(source=auto,记来源应用)。
+// src 须可 seek(部署链路的制品文件);sha 由调用方权威算好(与发给 Agent 的一致)。同 sha 已在库则跳过(去重)。
+// 入库后按每应用保留上限滚动淘汰旧的自动条目(⭐/手动豁免)。artifactKeep<=0 表示关闭自动归档,直接返回。
+// 失败仅记日志、不影响部署结果(归档是部署成功后的旁路增强,不能反过来拖垮部署)。
+func (a *api) archiveDeployedArtifact(appID, name, version, sha, uploader string, src io.ReadSeeker) {
+	if a.artifactKeep <= 0 || strings.TrimSpace(sha) == "" {
+		return
+	}
+	if _, ok := a.store.artifactBySha(sha); ok {
+		return // 同内容已在库(多机/重复部署同一制品),不重复落盘
+	}
+	if err := os.MkdirAll(a.artifactDir, 0755); err != nil {
+		log.Printf("[artifact] 自动归档建目录失败: %v", err)
+		return
+	}
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		log.Printf("[artifact] 自动归档 seek 失败: %v", err)
+		return
+	}
+	id := fmt.Sprintf("art%d", time.Now().UnixNano())
+	tmp := a.artifactPath(id) + ".part"
+	dst, err := os.Create(tmp)
+	if err != nil {
+		log.Printf("[artifact] 自动归档落盘失败: %v", err)
+		return
+	}
+	n, cerr := io.Copy(dst, src)
+	dst.Close()
+	if cerr != nil {
+		os.Remove(tmp)
+		log.Printf("[artifact] 自动归档拷贝失败: %v", cerr)
+		return
+	}
+	if err := os.Rename(tmp, a.artifactPath(id)); err != nil {
+		os.Remove(tmp)
+		log.Printf("[artifact] 自动归档 rename 失败: %v", err)
+		return
+	}
+	row := ArtifactRow{
+		ID: id, Name: name, Version: version, Sha256: sha, Size: n,
+		Uploader: uploader, CreatedAt: time.Now().UnixMilli(), AppID: appID, Source: "auto",
+	}
+	if err := a.store.addArtifact(row); err != nil {
+		os.Remove(a.artifactPath(id)) // 入库失败(如并发同 sha 越过去重):删落盘字节,不留孤儿
+		return
+	}
+	a.evictAutoArtifacts(appID)
+}
+
+// evictAutoArtifacts 滚动淘汰某应用超出保留上限的自动归档制品(⭐/手动豁免)。删元数据 + 落盘字节。
+func (a *api) evictAutoArtifacts(appID string) {
+	ev, err := a.store.evictableAutoArtifacts(appID, a.artifactKeep)
+	if err != nil {
+		log.Printf("[artifact] 查淘汰候选失败: app=%s err=%v", appID, err)
+		return
+	}
+	for _, r := range ev {
+		if err := a.store.deleteArtifact(r.ID); err != nil {
+			continue // 元数据删失败:跳过,下次再淘汰(不删落盘以免悬空)
+		}
+		if err := os.Remove(a.artifactPath(r.ID)); err != nil && !os.IsNotExist(err) {
+			log.Printf("[artifact] 自动淘汰删落盘失败(元数据已删,留孤儿): id=%s err=%v", r.ID, err)
+		}
+	}
 }
