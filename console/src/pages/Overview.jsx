@@ -315,40 +315,40 @@ function CabinetPage() {
 }
 
 // ---------- 审计日志 ----------
-// 服务端倒序分页:挂载拉第一页 +「加载更多」翻更早记录(hydrate 只带最近一窗,审计无限增长不全量加载)。
-// 后端不可达(离线 / 纯前端)回退到 store.audit。筛选/搜索在「已加载记录」内进行(页底有提示)。
+// 服务端倒序分页:按页码翻(offset=page*size),hydrate 只带最近一窗、审计无限增长不全量加载。
+// 后端不可达(离线 / 纯前端)回退到 store.audit 本地分页。筛选/搜索作用于当前页(页底有提示)。
 const AUDIT_PAGE = 100;
 function AuditPage() {
   const store = useMC();
   const [actF, setActF] = React.useState("all");
   const [q, setQ] = React.useState("");
-  const [rows, setRows] = React.useState(null); // null=加载中;数组=已加载
+  const [page, setPage] = React.useState(0);    // 0 起页码;翻页即向后端请求该页(offset=page*size)
+  const [rows, setRows] = React.useState(null); // 当前页记录;null=加载中
   const [total, setTotal] = React.useState(0);
-  const [more, setMore] = React.useState(false);
 
   React.useEffect(() => {
     let alive = true;
-    listAuditPage(0, AUDIT_PAGE).then((d) => {
+    setRows(null); // 翻页先回加载态,避免短暂展示上一页
+    listAuditPage(page * AUDIT_PAGE, AUDIT_PAGE).then((d) => {
       if (!alive) return;
-      if (!d || !Array.isArray(d.items)) { setRows(store.audit); setTotal(store.audit.length); return; } // 回退
+      if (!d || !Array.isArray(d.items)) {
+        // 后端不可达:用 hydrate 的 store.audit 本地分页,保证离线/纯前端仍可翻页
+        const all = store.audit || [];
+        setTotal(all.length);
+        setRows(all.slice(page * AUDIT_PAGE, page * AUDIT_PAGE + AUDIT_PAGE));
+        return;
+      }
       setRows(d.items); setTotal(d.total || d.items.length);
     });
     return () => { alive = false; };
-  }, []); // 仅挂载一次
-
-  const loadMore = async () => {
-    setMore(true);
-    const d = await listAuditPage((rows || []).length, AUDIT_PAGE);
-    setMore(false);
-    if (d && Array.isArray(d.items)) { setRows((s) => [...(s || []), ...d.items]); setTotal(d.total || total); }
-  };
+  }, [page]); // 页码变化即重新拉取该页
 
   const base = rows || [];
   const acts = [...new Set(base.map((a) => a.action))];
   const list = base.filter((a) =>
     (actF === "all" || a.action === actF) &&
     (!q.trim() || (a.target || "").includes(q) || (a.user || "").includes(q)));
-  const hasMore = base.length < total;
+  const pageCount = Math.max(1, Math.ceil(total / AUDIT_PAGE));
   const filtering = actF !== "all" || !!q.trim();
 
   return (
@@ -362,7 +362,7 @@ function AuditPage() {
         <div style={{ width: 160 }}>
           <Select value={actF} onChange={setActF} options={[{ value: "all", label: "全部操作" }, ...acts]} />
         </div>
-        {rows !== null ? <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted-fg)" }}>已加载 {base.length} / {total} 条</span> : null}
+        {rows !== null ? <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted-fg)" }}>第 {page + 1} / {pageCount} 页 · 共 {total} 条</span> : null}
       </div>
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
@@ -383,10 +383,12 @@ function AuditPage() {
         {rows === null ? <div style={{ padding: 24, textAlign: "center" }}><Spinner size={16} /></div> :
           list.length === 0 ? <EmptyState icon="shield" title="没有匹配的审计记录" /> : null}
       </div>
-      {hasMore ? (
+      {pageCount > 1 ? (
         <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, marginTop: 14 }}>
-          <Btn variant="outline" disabled={more} onClick={loadMore}>{more ? <Spinner size={13} /> : `加载更早记录(剩余 ${total - base.length} 条)`}</Btn>
-          {filtering ? <span style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>筛选/搜索仅作用于已加载记录</span> : null}
+          <Btn variant="outline" icon="chevronL" disabled={rows === null || page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>上一页</Btn>
+          <span style={{ fontSize: 12.5, color: "var(--muted-fg)", minWidth: 88, textAlign: "center" }}>第 {page + 1} / {pageCount} 页</span>
+          <Btn variant="outline" icon="chevronR" disabled={rows === null || page >= pageCount - 1} onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}>下一页</Btn>
+          {filtering ? <span style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>筛选/搜索仅作用于当前页</span> : null}
         </div>
       ) : null}
     </div>

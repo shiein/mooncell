@@ -4,7 +4,7 @@
 // (无过期、需登录、面向重部署)。部署对话框可选用已留存制品免重复上传。
 import React from 'react';
 import { useMC, fmtTime, timeAgo, fmtBytes } from '../lib/data.js';
-import { Btn, Icon, Badge, Progress, EmptyState, toast } from '../components/primitives.jsx';
+import { Btn, Icon, Badge, Progress, EmptyState, Spinner, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { listArtifacts, uploadArtifact, deleteArtifact } from '../lib/api.js';
 
