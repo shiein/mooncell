@@ -1,6 +1,6 @@
 // Mooncell — 总览(系统监控)/ 文件柜 / 审计日志
 import React from 'react';
-import { useMC, AGENT, genSeries, timeAgo, fmtTime, fmtBytes, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
+import { useMC, AGENT, genSeries, timeAgo, fmtTime, fmtBytes, fmtMB, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
 import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, EmptyState, Select, Spinner, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAgents } from '../lib/agent.js';
@@ -288,7 +288,7 @@ function CabinetPage() {
               {store.cabinet.map((f) => (
                 <tr key={f.id}>
                   <td><span className="mono" style={{ fontSize: 12, fontWeight: 500 }}>{f.name}</span></td>
-                  <td><span className="mono" style={{ fontSize: 12 }}>{f.size}</span></td>
+                  <td><span className="mono" style={{ fontSize: 12 }}>{fmtMB(f.size)}</span></td>
                   <td style={{ fontSize: 12.5 }}>{f.uploader}</td>
                   <td><span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{timeAgo(f.time)}</span></td>
                   <td><span style={{ fontSize: 12, color: f.expires - MC_NOW < 3 * MC_DAY ? "var(--warn)" : "var(--muted-fg)" }}>{timeAgo(f.expires)}</span></td>

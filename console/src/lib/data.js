@@ -38,6 +38,15 @@ function fmtBytes(n) {
   return (n / 1073741824).toFixed(2) + " GB";
 }
 
+// fmtMB 固定用 MB 展示大小(文件柜统一单位,不随大小切 KB/GB);非数字原样返回。
+// 不足 0.1MB 的小文件显示「<0.1 MB」,避免四舍五入成「0.0 MB」丢信息。
+function fmtMB(n) {
+  if (typeof n !== "number") return n || "—";
+  const mb = n / 1048576;
+  if (mb > 0 && mb < 0.1) return "<0.1 MB";
+  return mb.toFixed(1) + " MB";
+}
+
 const APP_STATUS = {
   running:   { label: "运行中", tone: "success" },
   stopped:   { label: "已停止", tone: "default" },
@@ -191,13 +200,14 @@ const INITIAL_BACKUPS = [
   mkBak("job-scheduler", "v1.0.9", ago(15 * DAY), "21.4 MB", true, "admin"),
 ];
 
+// size 为字节数(与后端一致);展示层统一用 fmtMB 格式化为 MB。
 const INITIAL_CABINET = [
-  { id: "cf1", name: "patch-dq-20260612.sql", size: "18 KB", uploader: "192.168.10.34(匿名)", time: ago(2 * HOUR), expires: ago(-5 * DAY), code: "K7X2", public: false, downloads: 1 },
-  { id: "cf2", name: "report-svc-v1.9.4-rc1.war", size: "52.8 MB", uploader: "li.na", time: ago(6 * HOUR), expires: ago(-7 * DAY), code: "M3QP", public: true, downloads: 3 },
-  { id: "cf3", name: "nginx-conf-备份.tar.gz", size: "4.2 KB", uploader: "admin", time: ago(1 * DAY), expires: ago(-6 * DAY), code: "A9F1", public: false, downloads: 0 },
-  { id: "cf4", name: "现场排查截图.zip", size: "8.7 MB", uploader: "192.168.10.61(匿名)", time: ago(1 * DAY - 3 * HOUR), expires: ago(-6 * DAY), code: "T5WD", public: false, downloads: 2 },
-  { id: "cf5", name: "jdk-11.0.21-linux-aarch64.tar.gz", size: "182 MB", uploader: "admin", time: ago(3 * DAY), expires: ago(-30 * DAY), code: "B2NH", public: true, downloads: 6 },
-  { id: "cf6", name: "数据库初始化脚本-v3.sql", size: "236 KB", uploader: "wang.lei", time: ago(5 * DAY), expires: ago(-2 * DAY), code: "R8KC", public: false, downloads: 4 },
+  { id: "cf1", name: "patch-dq-20260612.sql", size: 18432, uploader: "192.168.10.34(匿名)", time: ago(2 * HOUR), expires: ago(-5 * DAY), code: "K7X2", public: false, downloads: 1 },
+  { id: "cf2", name: "report-svc-v1.9.4-rc1.war", size: 55360716, uploader: "li.na", time: ago(6 * HOUR), expires: ago(-7 * DAY), code: "M3QP", public: true, downloads: 3 },
+  { id: "cf3", name: "nginx-conf-备份.tar.gz", size: 4301, uploader: "admin", time: ago(1 * DAY), expires: ago(-6 * DAY), code: "A9F1", public: false, downloads: 0 },
+  { id: "cf4", name: "现场排查截图.zip", size: 9122611, uploader: "192.168.10.61(匿名)", time: ago(1 * DAY - 3 * HOUR), expires: ago(-6 * DAY), code: "T5WD", public: false, downloads: 2 },
+  { id: "cf5", name: "jdk-11.0.21-linux-aarch64.tar.gz", size: 190840832, uploader: "admin", time: ago(3 * DAY), expires: ago(-30 * DAY), code: "B2NH", public: true, downloads: 6 },
+  { id: "cf6", name: "数据库初始化脚本-v3.sql", size: 241664, uploader: "wang.lei", time: ago(5 * DAY), expires: ago(-2 * DAY), code: "R8KC", public: false, downloads: 4 },
 ];
 
 const INITIAL_AUDIT = [
@@ -328,7 +338,7 @@ function nextVersion(v) {
 }
 
 export {
-  MCStore, useMC, DEPLOY_TYPES, isProcessType, isRealType, fmtBytes, APP_STATUS, REL_STATUS, STAGES, stageOf,
+  MCStore, useMC, DEPLOY_TYPES, isProcessType, isRealType, fmtBytes, fmtMB, APP_STATUS, REL_STATUS, STAGES, stageOf,
   INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
   AGENT, genSeries, genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
   NOW as MC_NOW, MIN as MC_MIN, HOUR as MC_HOUR, DAY as MC_DAY,
