@@ -367,7 +367,7 @@ function DeployDialog({ app, open, onClose }) {
       const releaseId = (crypto.randomUUID && crypto.randomUUID()) || ("rel-" + Date.now() + "-" + Math.random().toString(36).slice(2));
       const res = await deployViaAgentStream(app.id, version, releaseId, realFile, (type, data) => {
         if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
-      }, pickedArt ? pickedArt.id : null);
+      }, undefined, pickedArt ? pickedArt.id : null);
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
       store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result || "failed", real: true });

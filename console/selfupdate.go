@@ -45,6 +45,13 @@ func (a *api) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer a.selfUpdateMu.Unlock()
 
+	// 空闲门禁:self-exec 重启会丢内存状态——在飞部署/还原/启停/下线(busy)与活跃分块上传会话
+	// (uploads)都会因重启留下半完成操作/孤儿临时文件/续传 404。非空闲直接 409,不重启。
+	if a.anyBusy() || a.hasActiveUploads() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "有部署/还原/上传在进行中,请稍后再自更新"})
+		return
+	}
+
 	// 自更新是 Linux 部署特性(nohup 无监管场景):darwin 上跑的 Console(开发机)拒绝任何上传,
 	// 避免把 linux 包错传到 mac 后看似校验通过却无法 self-exec。给清晰错误文案。
 	if runtime.GOOS != "linux" {

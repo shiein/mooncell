@@ -20,20 +20,28 @@ function OverviewTab({ app, releases }) {
   // 真实进程类应用:向 Agent 拉取实时托管状态(systemd/pm2),每 10s 刷新一次。
   // 非真实/静态类沿用 mock 字段。live=null 表示尚未拉到或 Agent 离线。
   const real = isRealType(app.type) && isProcessType(app.type);
+  // live 三态:null=首次加载中 / 对象=成功 / "error"=拉取失败(不回退 stored running 伪装实时)
   const [live, setLive] = React.useState(null);
+  const [liveErr, setLiveErr] = React.useState(false);
   React.useEffect(() => {
-    if (!real) { setLive(null); return; }
+    if (!real) { setLive(null); setLiveErr(false); return; }
     let alive = true;
-    const tick = () => getAppStatus(app.id).then((s) => { if (alive) setLive(s); });
+    const tick = () => getAppStatus(app.id).then((s) => {
+      if (!alive) return;
+      if (s) { setLive(s); setLiveErr(false); }
+      else { setLiveErr(true); } // 失败:保留上次成功 live(若有)作 stale,不回退 stored running
+    });
     tick();
     const iv = setInterval(tick, 10000);
     return () => { alive = false; clearInterval(iv); };
   }, [app.id, real]);
   // 容器/软链托管(tomcat/static):真实类型但平台不托管进程,不能显示「未运行」误导。
   const nonProcessReal = isRealType(app.type) && !isProcessType(app.type);
-  // 真实进程类的进程行优先用 live;未拉到时显式标注,不回退 mock pid/uptime。
+  // 真实进程类的进程行优先用 live;失败时显式标"状态未知",不伪装。
   const procRow = real
-    ? (live ? (live.active ? `pid ${live.pid || "?"} · ${live.state}` : `未运行 · ${live.state || "inactive"}`) : "查询中…")
+    ? (liveErr && !live ? "状态未知 · 连接失败"
+      : live ? (live.active ? `pid ${live.pid || "?"} · ${live.state}` : `未运行 · ${live.state || "inactive"}`)
+      : "查询中…")
     : nonProcessReal
       ? (app.type === "tomcat-war" ? "Tomcat 容器托管 · 无平台进程" : "nginx 软链托管 · 无平台进程")
       : (app.pid ? `pid ${app.pid} · 运行 ${app.uptime}` : "未运行");
@@ -42,7 +50,11 @@ function OverviewTab({ app, releases }) {
       <div className="card card-pad">
         <h4 style={{ fontSize: 13.5, marginBottom: 14, display: "flex", alignItems: "center", gap: 7 }}><Icon name="zap" size={14} style={{ color: "var(--primary)" }} />运行状态{real ? <Badge tone="info" style={{ marginLeft: 4 }}>实时</Badge> : null}</h4>
         <div style={grid}>
-          <InfoRow label="状态">{real && live ? <StatusBadge status={live.active ? "running" : "stopped"} /> : <StatusBadge status={app.status} />}</InfoRow>
+          <InfoRow label="状态">{real
+            ? (liveErr && !live
+              ? <Badge tone="warn" dot>状态未知</Badge>
+              : live ? <StatusBadge status={live.active ? "running" : "stopped"} /> : <Badge tone="warn" dot>查询中</Badge>)
+            : <StatusBadge status={app.status} />}</InfoRow>
           <InfoRow label="进程" mono>{procRow}</InfoRow>
           <InfoRow label="资源" mono>{real
             ? (live && live.active ? `CPU ${live.cpu || "—"} · 内存 ${live.mem || "—"}` : "—")
@@ -441,7 +453,11 @@ function ConfigTab({ app }) {
       }
     }
     // 落库成功才退出编辑;失败由 updateApp 据实报错并保留旧值(不乐观骗"已保存")。
-    const r = await store.updateApp(app.id, draft);
+    // nohup runner 不支持启动用户:清空 user 字段,避免旧值残留导致部署时被后端拒绝。
+    const toSave = draft.runner === "nohup" ? { ...draft, user: "" } : draft;
+    const r = await store.updateApp(app.id, toSave);
+    if (r && r.error) return;
+    if (draft.runner === "nohup") setDraft(toSave);
     if (r && r.error) return;
     setEdit(false);
   };
@@ -468,7 +484,11 @@ function ConfigTab({ app }) {
             <Select value={draft.runner} onChange={(v) => set("runner", v)} disabled={!edit}
               options={runners.map((r) => ({ value: r, label: capOk(r) ? r : r + "(Agent 未检测到)", disabled: !capOk(r) }))} />
           </Field>
-          <Field label="启动用户">{ipt("user", false)}</Field>
+          <Field label="启动用户" hint={draft.runner === "nohup" ? "nohup 不支持启动用户(进程继承 Agent 用户,不降权)" : undefined}>
+            <input className="input" disabled={!edit || draft.runner === "nohup"} value={draft.runner === "nohup" ? "" : (draft.user || "")}
+              onChange={(e) => set("user", e.target.value)}
+              placeholder={draft.runner === "nohup" ? "nohup 不支持" : "appuser"} />
+          </Field>
           <Field label="端口"><input className="input mono" disabled={!edit} value={draft.port || ""} onChange={(e) => set("port", e.target.value)} /></Field>
           <Field label="环境分组" hint="仅用于分组/筛选与批量操作,不影响部署行为">
             <Select value={stageOf(draft)} onChange={(v) => set("stage", v)} disabled={!edit}

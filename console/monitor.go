@@ -43,6 +43,27 @@ func (a *api) isBusy(id string) bool {
 	return a.busy[id] > 0
 }
 
+// anyBusy 判定是否有任意应用处于在飞操作(部署/还原/启停/下线)。供自更新门禁使用:
+// self-exec 重启会丢内存状态,在飞操作期间重启会留下半完成部署/孤儿临时文件。
+func (a *api) anyBusy() bool {
+	a.busyMu.Lock()
+	defer a.busyMu.Unlock()
+	for _, n := range a.busy {
+		if n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// hasActiveUploads 判定是否有活跃分块上传会话。供自更新门禁使用:
+// self-exec 重启会丢内存里的 uploads map,活跃上传的临时文件成孤儿、续传 404。
+func (a *api) hasActiveUploads() bool {
+	a.uploadsMu.Lock()
+	defer a.uploadsMu.Unlock()
+	return len(a.uploads) > 0
+}
+
 // runMonitor 启动巡检循环(阻塞,应在独立 goroutine 调用)。intervalSec<=0 关闭巡检。
 func (a *api) runMonitor(intervalSec, keepHours int) {
 	if intervalSec <= 0 {

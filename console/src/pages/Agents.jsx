@@ -17,6 +17,7 @@ const archOf = (os) => {
 function AgentsPage() {
   const store = useMC();
   const [agents, setAgents] = React.useState(null);
+  const [listErr, setListErr] = React.useState(false); // 列表拉取失败(旧实现把 null 折成空数组,伪装成"无 Agent")
   const [open, setOpen] = React.useState(false);
   const [info, setInfo] = React.useState({});   // id -> {ok, version, os}
   const [bins, setBins] = React.useState([]);    // [{arch, version, ...}]
@@ -27,9 +28,12 @@ function AgentsPage() {
   const reloadBins = React.useCallback(() => { listAgentBinaries().then(setBins); }, []);
 
   // 拉 agent 列表后,对每台并发探测一次,拿到在线/版本/架构。
+  // 失败时 listErr=true,不折成空数组——空数组表示"确实没有 Agent",失败表示"拉不到"。
   const reload = React.useCallback(() => {
     listAgentNodes().then((list) => {
-      const arr = list || [];
+      if (list == null) { setListErr(true); return; }
+      setListErr(false);
+      const arr = list;
       setAgents(arr);
       arr.forEach((a) => pingAgentNode(a.id).then((res) => {
         setInfo((m) => ({ ...m, [a.id]: res && res.ok ? { ok: true, version: res.version, os: res.os } : { ok: false } }));
@@ -133,7 +137,12 @@ function AgentsPage() {
             })}
           </tbody>
         </table>
-        {agents === null ? <div style={{ padding: 24, textAlign: "center" }}><Spinner size={16} /></div> : null}
+        {agents === null && !listErr ? <div style={{ padding: 24, textAlign: "center" }}><Spinner size={16} /></div> : null}
+        {listErr ? (
+          <EmptyState icon="alert" title="加载 Agent 列表失败" desc="请稍后重试"
+            action={<Btn variant="primary" icon="rotate" onClick={reload}>重试</Btn>} />
+        ) : null}
+        {!listErr && agents && agents.length === 0 ? <EmptyState icon="server" title="暂无 Agent" desc="点击右上角「注册 Agent」添加远端 Agent" /> : null}
       </div>
 
       <AgentBinariesCard bins={bins} onChanged={reloadBins} />

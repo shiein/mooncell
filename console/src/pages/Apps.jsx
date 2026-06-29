@@ -135,7 +135,7 @@ function CreateAppDialog({ open, onClose }) {
       path, interp, workdir: form.workdir || `/srv/apps/${id}`,
       health: form.health || "", healthType: form.healthType || (form.health ? "HTTP 200" : "端口探活"),
       logPaths: [form.logs || `/srv/apps/${id}/logs/app.log`],
-      jvm: form.jvm || form.args || "", user: form.user || "appuser",
+      jvm: form.jvm || form.args || "", user: selectedRunner() === "nohup" ? "" : (form.user || "appuser"),
       agentId: form.agentId || "default",
       stage: form.stage || "prod",
       reload: !!form.reload,
@@ -232,9 +232,12 @@ function CreateAppDialog({ open, onClose }) {
               <span style={{ fontSize: 13 }}>{f.label}</span>
             </div>
           ) : (
-            <Field key={f.key} label={f.label + (f.required ? " *" : "")} hint={f.hint}>
+            <Field key={f.key} label={f.label + (f.required ? " *" : "")} hint={f.key === "user" && selectedRunner() === "nohup" ? "nohup 不支持启动用户(进程继承 Agent 用户,不降权)" : f.hint}>
               <input className={"input" + (f.mono ? " mono" : "")} style={f.mono ? { fontSize: 12.5 } : undefined}
-                placeholder={f.ph} value={form[f.key] || ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} />
+                disabled={f.key === "user" && selectedRunner() === "nohup"}
+                placeholder={f.key === "user" && selectedRunner() === "nohup" ? "nohup 不支持" : f.ph}
+                value={f.key === "user" && selectedRunner() === "nohup" ? "" : (form[f.key] || "")}
+                onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} />
             </Field>
           ))}
           {/* 进程类通用字段:工作目录 + 健康检查(与编辑表单 ConfigTab 对齐)。 */}

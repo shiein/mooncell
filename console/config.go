@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"net"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -126,13 +127,19 @@ func loadConfig(path string) *Config {
 	return cfg
 }
 
+// externalBind 判定监听地址是否对外:只有 loopback 才视为本机安全。
+// 反转旧逻辑(原仅认 ""/0.0.0.0/:: 为对外)——绑到 192.168.x.x/10.x.x.x 等内网具体 IP
+// 同样是对外暴露,必须强制改凭据。主机名等无法证明是本机 → 保守判对外。
 func externalBind(addr string) bool {
-	switch strings.TrimSpace(addr) {
-	case "", "0.0.0.0", "::", "[::]":
-		return true
-	default:
-		return false
+	s := strings.TrimSpace(addr)
+	if s == "" {
+		return true // 空 = 监听所有网卡
 	}
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return true // 主机名等无法证明是本机 → 保守判对外
+	}
+	return !ip.IsLoopback()
 }
 
 func unsafeConsoleConfigReason(cfg *Config) string {

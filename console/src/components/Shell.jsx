@@ -2,6 +2,7 @@
 import React from 'react';
 import { Icon, Btn, Badge, Progress } from './primitives.jsx';
 import { AGENT } from '../lib/data.js';
+import { useAgent } from '../lib/agent.js';
 
 const NAV_ITEMS = [
   { id: "overview", label: "总览", en: "Overview", icon: "gauge" },
@@ -89,6 +90,14 @@ function Sidebar({ page, onNav, user, role, onLogout }) {
 }
 
 function Topbar({ crumbs, theme, onTheme, right }) {
+  // Agent 在线状态三态:null=探测中(灰) / true=在线(绿) / false=不可达(红)。
+  // 旧实现硬编码绿色"Agent 在线",Agent 实际离线时仍显示在线,误导运维判断。
+  const { online } = useAgent();
+  const agentBadge = online === null
+    ? { tone: "warn", label: "Agent 探测中" }
+    : online
+      ? { tone: "success", label: "Agent 在线" }
+      : { tone: "error", label: "Agent 不可达" };
   return (
     <header className="topbar">
       <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13.5, minWidth: 0 }}>
@@ -103,7 +112,7 @@ function Topbar({ crumbs, theme, onTheme, right }) {
       </div>
       <div style={{ flex: 1 }}></div>
       {right}
-      <Badge tone="success" dot><span className="mono" style={{ fontSize: 11 }}>Agent 在线</span></Badge>
+      <Badge tone={agentBadge.tone} dot><span className="mono" style={{ fontSize: 11 }}>{agentBadge.label}</span></Badge>
       <Btn variant="ghost" icon={theme === "dark" ? "sun" : "moon"} onClick={onTheme} title="切换亮/暗主题"></Btn>
     </header>
   );

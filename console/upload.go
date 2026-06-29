@@ -115,9 +115,13 @@ func (a *api) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "打开上传文件失败"})
 		return
 	}
+	// 记录已知 good 偏移:O_APPEND 下 io.Copy 在 MaxBytes 报错前可能已写入部分字节,
+	// 任一失败路径须 Truncate 回 off,否则客户端重试同块会尾部多脏字节、后续写入错位、制品损坏。
+	off := sess.Received
 	n, cerr := io.Copy(f, body)
-	f.Close()
 	if cerr != nil {
+		f.Truncate(off) // 回到块写入前的长度,保证幂等重试干净(O_APPEND 下 Truncate 仅改长度)
+		f.Close()
 		if isMaxBytes(cerr) {
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "上传超过声明大小/上限"})
 			return
@@ -125,6 +129,7 @@ func (a *api) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入分块失败"})
 		return
 	}
+	f.Close()
 	sess.Received += n
 	sess.NextIndex++
 	writeJSON(w, http.StatusOK, map[string]any{"received": sess.Received, "nextIndex": sess.NextIndex})

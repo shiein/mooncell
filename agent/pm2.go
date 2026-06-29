@@ -221,8 +221,21 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 			res.Result = "failed"
 			return res
 		}
-		cfg.BinPath = target
-		add("接管目标", true, "pm2 进程 "+pm2ProcName(cfg)+" 部署目标 "+target+";将备份并替换此文件后 restart")
+		// 复校 deploy_roots:prepareDeploy 校验的是 Console 下发的 BinPath,接管模式在此覆盖,
+		// 覆盖后必须重新 withinRoots——否则 placeArtifact 会写白名单外的真实路径(纵深防御对称)。
+		abs, aerr := filepath.Abs(target)
+		if aerr != nil {
+			add("校验目标", false, "接管目标路径绝对化失败: "+aerr.Error())
+			res.Result = "failed"
+			return res
+		}
+		if !withinRoots(abs, a.cfg.Paths.DeployRoots) {
+			add("校验目标", false, "接管目标不在 deploy_roots 白名单内: "+abs)
+			res.Result = "failed"
+			return res
+		}
+		cfg.BinPath = abs
+		add("接管目标", true, "pm2 进程 "+pm2ProcName(cfg)+" 部署目标 "+abs+";将备份并替换此文件后 restart")
 	}
 
 	add("校验制品", true, "sha256 "+short(sha256File(artifact)), "目标 "+cfg.BinPath, "Runner pm2")

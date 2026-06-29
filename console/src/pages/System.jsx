@@ -8,11 +8,14 @@ import { getConsoleInfo, consoleSelfUpdate } from '../lib/api.js';
 function SystemPage() {
   const store = useMC();
   const [info, setInfo] = React.useState(null); // { version, os }
+  const [infoErr, setInfoErr] = React.useState(false); // 版本信息拉取失败(旧实现 info 永远 null,只显示 spinner 无错误提示)
   const [busy, setBusy] = React.useState(false); // 上传/升级中
   const [version, setVersion] = React.useState("");
   const fileRef = React.useRef(null);
 
-  const reload = React.useCallback(() => { getConsoleInfo().then(setInfo); }, []);
+  const reload = React.useCallback(() => {
+    getConsoleInfo().then((c) => { setInfo(c); setInfoErr(c == null); });
+  }, []);
   React.useEffect(() => { reload(); }, [reload]);
 
   if (!store.can("admin")) {
@@ -89,7 +92,9 @@ function SystemPage() {
           <div>
             <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginBottom: 3 }}>当前版本</div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{info ? info.version : <Spinner size={14} />}</span>
+              {infoErr ? <span style={{ fontSize: 13, color: "var(--error)" }}>加载失败 · <button className="link-btn" style={{ color: "var(--error)" }} onClick={reload}>重试</button></span>
+                : info ? <span className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{info.version}</span>
+                : <Spinner size={14} />}
             </div>
           </div>
           <div>

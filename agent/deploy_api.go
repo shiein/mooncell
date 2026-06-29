@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -52,6 +53,14 @@ func (a *agent) prepareDeploy(w http.ResponseWriter, r *http.Request) (DeployCon
 	// 安全边界:制品落盘路径必须在白名单根目录内(防穿越)。
 	if !withinRoots(cfg.BinPath, a.cfg.Paths.DeployRoots) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "制品路径不在白名单内: " + cfg.BinPath})
+		return zero, "", nil, false
+	}
+
+	// nohup runner 不支持启动用户:nohupSpec 无 user 字段,进程继承 Agent 用户(常为 root)。
+	// systemd 透传 User= 降权,nohup 不降权——若放行 cfg.User 会让用户以为降权了其实没有(行为不对称)。
+	// 本期明确拒绝并给清晰错误;后续增强再用受控方式降权启动(su/setuid + pidfile/日志权限处理)。
+	if cfg.Runner == "nohup" && strings.TrimSpace(cfg.User) != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nohup runner 暂不支持启动用户(进程继承 Agent 用户,不会降权);请改用 systemd 或清空启动用户字段"})
 		return zero, "", nil, false
 	}
 
@@ -135,12 +144,35 @@ func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
 // pm2NameReq 解析请求要操作的 pm2 进程名:Console 接管模式会透传 pm2Name(用户已有进程名),
 // 否则用 Mooncell 托管名 deploy-<id>。供 status/lifecycle/logs 等无状态端点统一定位进程。
 // 透传值须为合法名(与部署/容器名同一校验);非法则回退托管名,不把越界值喂给 pm2 argv。
+// 额外 denylist:拒 all(会打到全部 pm2 进程)/纯数字(pm2 进程索引)/- 开头(参数形态)——
+// 这些值虽能过 containerNameRe,但喂给 `pm2 stop/delete` 会越界,命中即回退托管名。
 func pm2NameReq(r *http.Request, id string) string {
-	if n := strings.TrimSpace(r.URL.Query().Get("pm2Name")); n != "" && containerNameRe.MatchString(n) {
-		return n
+	n := strings.TrimSpace(r.URL.Query().Get("pm2Name"))
+	if n == "" || !containerNameRe.MatchString(n) {
+		return unitName(id)
 	}
-	return unitName(id)
+	if isUnsafePm2Name(n) {
+		return unitName(id)
+	}
+	return n
 }
+
+// isUnsafePm2Name 判定 pm2Name 是否虽合法但危险:all/纯数字/- 开头。
+func isUnsafePm2Name(n string) bool {
+	if strings.EqualFold(n, "all") {
+		return true
+	}
+	if pm2NumericRe.MatchString(n) {
+		return true
+	}
+	if strings.HasPrefix(n, "-") {
+		return true
+	}
+	return false
+}
+
+// pm2NumericRe 匹配纯数字(pm2 进程索引,可定位任意进程)。
+var pm2NumericRe = regexp.MustCompile(`^[0-9]+$`)
 
 // nohupBinPathReq 取并校验 nohup 启停/状态请求的 binPath:必须在 deploy_roots 白名单内
 // (binPath 决定 pidfile/spec 位置,不校验则越界 query 可让 Agent kill 任意 pid / 读任意 spec)。
@@ -212,6 +244,7 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	if !requireValidID(w, id) {
 		return
 	}
+	defer a.lockApp(id)() // 与部署/还原同锁:同应用启停与部署串行,防并发改同一 unit/pm2/nohup spec
 	action := r.URL.Query().Get("action")
 	if action != "start" && action != "stop" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
@@ -271,6 +304,7 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	if !requireValidID(w, id) {
 		return
 	}
+	defer a.lockApp(id)() // 与部署/还原同锁:下线删 unit/pm2/nohup spec 与部署串行,防并发竞争
 	sysctl("stop", unitName(id))
 	sysctl("disable", unitName(id))
 	os.Remove(unitPath(id))
@@ -278,7 +312,10 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	sysctl("reset-failed", unitName(id))
 	pm2("delete", unitName(id)) // 托管模式:清理 deploy-<id>(无 pm2/无此进程则忽略)
 	// pm2 接管模式:Console 传真实进程名,否则只删 deploy-<id>、用户接管的进程会残留。
-	if pn := strings.TrimSpace(r.URL.Query().Get("pm2Name")); pn != "" {
+	// 与 pm2NameReq 同一把尺:须过 containerNameRe 且非危险名(all/纯数字/- 开头)——
+	// 否则 DELETE ?pm2Name=all 会让 undeploy 执行 `pm2 delete all` 删光所有 pm2 进程。
+	if pn := strings.TrimSpace(r.URL.Query().Get("pm2Name")); pn != "" &&
+		containerNameRe.MatchString(pn) && !isUnsafePm2Name(pn) {
 		pm2("delete", pn)
 	}
 	// nohup 托管:Console 传 binPath 时停掉进程并清理 pidfile/spec(无监管,不停会留孤儿进程)。

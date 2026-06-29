@@ -3,6 +3,7 @@ import React from 'react';
 import { useMC, fmtTime } from '../lib/data.js';
 import { Btn, Field, Select, Icon, Badge, Spinner, EmptyState, Dialog, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
+import { useAsync } from '../lib/async.js';
 import { listUsers, createUser, deleteUser } from '../lib/api.js';
 
 const ROLE_OPTS = ["admin", "operator", "viewer"];
@@ -11,13 +12,10 @@ const ROLE_TONE = { admin: "error", operator: "info", viewer: "default" };
 
 function UsersPage() {
   const store = useMC();
-  const [users, setUsers] = React.useState(null); // null=加载中
   const [open, setOpen] = React.useState(false);
-
-  const reload = React.useCallback(() => {
-    listUsers().then((u) => setUsers(u || []));
-  }, []);
-  React.useEffect(() => { reload(); }, [reload]);
+  // 四态:loading / ready / error / stale。旧实现 `setUsers(u || [])` 把失败折成空数组,
+  // 页面显示"暂无用户"而错误不可见、无法重试——这是 T9 修复的核心。
+  const { data: users, error, loading, retry } = useAsync(listUsers, []);
 
   // 后端已强制 admin;前端再挡一层,非 admin 直接提示。
   if (!store.can("admin")) {
@@ -29,7 +27,7 @@ function UsersPage() {
     try {
       await deleteUser(u.username);
       toast(`已删除用户 ${u.username}`);
-      reload();
+      retry();
     } catch (e) {
       toast(e.message || "删除失败", { tone: "error" });
     }
@@ -59,11 +57,15 @@ function UsersPage() {
             ))}
           </tbody>
         </table>
-        {users === null ? <div style={{ padding: 24, textAlign: "center" }}><Spinner size={16} /></div> : null}
-        {users && users.length === 0 ? <EmptyState icon="user" title="暂无用户" /> : null}
+        {loading ? <div style={{ padding: 24, textAlign: "center" }}><Spinner size={16} /></div> : null}
+        {!loading && error ? (
+          <EmptyState icon="alert" title="加载用户列表失败" desc={error.message || "请稍后重试"}
+            action={<Btn variant="primary" icon="rotate" onClick={retry}>重试</Btn>} />
+        ) : null}
+        {!loading && !error && users && users.length === 0 ? <EmptyState icon="user" title="暂无用户" /> : null}
       </div>
 
-      <CreateUserDialog open={open} onClose={() => setOpen(false)} onCreated={() => { setOpen(false); reload(); }} />
+      <CreateUserDialog open={open} onClose={() => setOpen(false)} onCreated={() => { setOpen(false); retry(); }} />
     </div>
   );
 }
