@@ -6,6 +6,7 @@ import {
   tsDir, MC_DAY, fmtBytes,
 } from './lib/data.js';
 import { ToastHost, ConfirmHost, toast } from './components/primitives.jsx';
+import { DeployDialog } from './components/pipeline.jsx';
 import { Shell } from './components/Shell.jsx';
 import { LoginPage } from './pages/Login.jsx';
 import { OverviewPage, CabinetPage, AuditPage } from './pages/Overview.jsx';
@@ -72,6 +73,9 @@ function App() {
   const [backups, setBackups] = React.useState(INITIAL_BACKUPS);
   const [cabinet, setCabinet] = React.useState(INITIAL_CABINET);
   const [audit, setAudit] = React.useState(INITIAL_AUDIT);
+  // 全局重部署请求:{ app, artifact }。制品仓库页「重部署」触发,由 App 级 DeployDialog 承接并预选制品,
+  // 不用先跳到应用详情页再手动进部署对话框——把被动归档变成可直接操作的重部署入口。
+  const [deployReq, setDeployReq] = React.useState(null);
 
   const hydratedRef = React.useRef(false);
   React.useEffect(() => {
@@ -294,6 +298,9 @@ function App() {
       setCabinet((s) => s.map((x) => (x.id === f.id ? next : x))); persist("cabinet", next);
       toast(f.public ? `「${f.name}」已设为私有` : `「${f.name}」已公开,匿名可见`);
     },
+
+    // requestDeploy:打开全局部署对话框,目标为 app、预选制品 artifact(制品仓库「重部署」用)。
+    requestDeploy(app, artifact) { setDeployReq({ app, artifact }); },
   };
 
   // ---- auth handlers ----
@@ -350,6 +357,10 @@ function App() {
           </Shell>
         ) : null}
       </div>
+      {/* 全局重部署对话框:制品仓库「重部署」触发,预选制品 + 目标应用,不依附任何页面。 */}
+      {deployReq ? (
+        <DeployDialog app={deployReq.app} preArtifact={deployReq.artifact} open={true} onClose={() => setDeployReq(null)} />
+      ) : null}
       <ToastHost />
       <ConfirmHost />
     </MCStore.Provider>

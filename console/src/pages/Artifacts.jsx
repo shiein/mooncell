@@ -3,8 +3,8 @@
 // 与文件柜的区别:文件柜是临时中转(过期/提取码/可匿名);制品仓库是部署制品的版本化留存
 // (无过期、需登录、面向重部署)。部署对话框可选用已留存制品免重复上传。
 import React from 'react';
-import { useMC, fmtTime, timeAgo, fmtBytes } from '../lib/data.js';
-import { Btn, Icon, Badge, Progress, EmptyState, Spinner, toast } from '../components/primitives.jsx';
+import { useMC, fmtTime, timeAgo, fmtBytes, artifactNameOK, isRealType } from '../lib/data.js';
+import { Btn, Icon, Badge, Progress, EmptyState, Spinner, Dialog, TypeBadge, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { listArtifacts, uploadArtifact, deleteArtifact, pinArtifact } from '../lib/api.js';
 
@@ -14,6 +14,7 @@ function ArtifactsPage() {
   const [uploading, setUploading] = React.useState(false);
   const [prog, setProg] = React.useState(0);
   const [version, setVersion] = React.useState("");
+  const [redeployRow, setRedeployRow] = React.useState(null); // 待选目标应用的制品(无来源应用时)
   const fileRef = React.useRef(null);
   const canWrite = store.can("write");
 
@@ -67,6 +68,22 @@ function ArtifactsPage() {
 
   // 来源应用 id → 友好名(取不到回退 id)。
   const appName = (id) => (store.apps || []).find((a) => a.id === id)?.name || id;
+
+  // 重部署:制品仓库的核心价值——把已验证的制品免重传直接下发到应用。
+  // 有来源应用(自动归档)且仍存在 → 直接打开部署对话框预选该制品;
+  // 否则(手动上传 / 来源应用已删)→ 弹出目标应用选择器,由用户指定下发到哪个应用。
+  const onRedeploy = (row) => {
+    const srcApp = (store.apps || []).find((a) => a.id === row.appId);
+    if (srcApp && isRealType(srcApp.type) && artifactNameOK(srcApp.type, row.name)) {
+      store.requestDeploy(srcApp, row);
+      return;
+    }
+    setRedeployRow(row);
+  };
+  // 目标应用候选:真机部署类型 + 扩展名与该制品匹配(.jar 只配 java-jar 等)。
+  const redeployTargets = redeployRow
+    ? (store.apps || []).filter((a) => isRealType(a.type) && artifactNameOK(a.type, redeployRow.name))
+    : [];
 
   const dl = (row) => {
     const a = document.createElement("a");
@@ -136,6 +153,7 @@ function ArtifactsPage() {
                   <td><span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{fmtTime(row.createdAt)}({timeAgo(row.createdAt)})</span></td>
                   <td>
                     <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      {canWrite ? <Btn size="sm" variant="ghost" icon="zap" title="重部署(免重传下发到应用)" onClick={() => onRedeploy(row)}></Btn> : null}
                       <Btn size="sm" variant="ghost" icon="download" title="下载" onClick={() => dl(row)}></Btn>
                       {canWrite ? <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => onDelete(row)}></Btn> : null}
                     </div>
@@ -148,6 +166,28 @@ function ArtifactsPage() {
           {rows === null ? <div style={{ padding: 20, textAlign: "center" }}><Spinner size={16} /></div> : null}
         </div>
       </div>
+
+      {/* 目标应用选择器:制品无来源应用(手动上传/来源已删)时,选一个类型匹配的应用下发。 */}
+      <Dialog open={!!redeployRow} onClose={() => setRedeployRow(null)} width={480}
+        title="选择重部署目标应用"
+        desc={redeployRow ? `制品「${redeployRow.name}」将下发到所选应用(免重传)` : ""}
+        foot={<Btn variant="ghost" onClick={() => setRedeployRow(null)}>取消</Btn>}>
+        {redeployTargets.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+            {redeployTargets.map((a) => (
+              <button key={a.id} className="nav-item" style={{ justifyContent: "flex-start", padding: "9px 11px", gap: 9 }}
+                onClick={() => { const row = redeployRow; setRedeployRow(null); store.requestDeploy(a, row); }}>
+                <TypeBadge type={a.type} />
+                <span style={{ flex: 1, fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
+                <span className="mono" style={{ fontSize: 11, color: "var(--muted-fg)" }}>{(a.agentId && a.agentId !== "default") ? a.agentId : "本机"}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <EmptyState icon="box" title="没有类型匹配的应用"
+            desc={redeployRow ? `没有扩展名能接收「${redeployRow.name}」的真机应用;请先创建对应类型的应用后再重部署` : ""} />
+        )}
+      </Dialog>
     </div>
   );
 }

@@ -311,7 +311,7 @@ function useUploadSim() {
 }
 
 // ---------- 部署对话框 ----------
-function DeployDialog({ app, open, onClose }) {
+function DeployDialog({ app, open, onClose, preArtifact }) {
   const store = useMC();
   const [stage, setStage] = React.useState("upload");
   const [simulateFail, setSimulateFail] = React.useState(false);
@@ -329,12 +329,20 @@ function DeployDialog({ app, open, onClose }) {
   React.useEffect(() => {
     if (open) {
       setStage("upload"); setSimulateFail(false); up.reset(); pipe.reset();
-      setRealFile(null); setReal(null); setPickedArt(null);
-      setVersion(nextVersion(app && app.version));
+      setRealFile(null); setReal(null);
+      setVersion(nextVersion((preArtifact && preArtifact.version) || (app && app.version)));
       // 懒加载制品库列表(打开对话框才拉,避免主页空载请求)。
       listArtifacts().then((rows) => setArtifacts(Array.isArray(rows) ? rows : []));
+      // 制品仓库「重部署」:预选传入制品,直接进入待部署态(免再选文件)。
+      if (preArtifact) {
+        setPickedArt(preArtifact);
+        up.begin({ name: preArtifact.name, sizeMB: Math.max(1, preArtifact.size / 1048576),
+          size: preArtifact.size < 1073741824 ? (preArtifact.size / 1048576).toFixed(1) + " MB" : (preArtifact.size / 1073741824).toFixed(2) + " GB" });
+      } else {
+        setPickedArt(null);
+      }
     }
-  }, [open, app && app.id]);
+  }, [open, app && app.id, preArtifact && preArtifact.id]);
   const sha = React.useMemo(() => randSha(), [open, up.file && up.file.name]);
   if (!app) return null;
 
