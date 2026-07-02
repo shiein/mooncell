@@ -46,9 +46,13 @@ func (a *agent) precheck(w http.ResponseWriter, r *http.Request) {
 
 	// 2. 端口空闲。pm2 接管模式下端口被占用是预期的(被接管进程正在跑),
 	//    只要占用者就是被接管的那个 pm2 进程(或其子进程),就不算冲突——否则用户得先停掉自己的进程才能预检过,本末倒置。
+	//    static-nginx 无自有进程:端口是 nginx 对外的监听口,被占用正是常态(nginx 已在跑),
+	//    检查空闲反而永远过不了——与 healthSpec 不对 static 做端口探活同一口径,直接跳过。
 	if port := q.Get("port"); port != "" && port != "0" {
 		adoptName := strings.TrimSpace(q.Get("pm2Name"))
 		switch {
+		case q.Get("type") == "static-nginx":
+			add("端口检查 :"+port, true, "静态站点无独立进程,端口由 nginx 对外服务,跳过空闲检查")
 		case portFree(port):
 			add("端口空闲 :"+port, true, "")
 		case q.Get("runner") == "pm2" && containerNameRe.MatchString(adoptName):

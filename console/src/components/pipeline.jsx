@@ -1,7 +1,7 @@
 // Mooncell — 部署流水线:计划构建 + 模拟引擎 + 视图 + 部署/还原对话框
 import React from 'react';
-import { useMC, tsDir, DEPLOY_TYPES, isProcessType, isRealType, nextVersion, randSha, fmtClock, fmtTime } from '../lib/data.js';
-import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner } from './primitives.jsx';
+import { useMC, tsDir, DEPLOY_TYPES, artifactNameOK, isProcessType, isRealType, nextVersion, randSha, fmtClock, fmtTime } from '../lib/data.js';
+import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner, toast } from './primitives.jsx';
 import { deployViaAgentStream, restoreViaAgentStream, listArtifacts } from '../lib/api.js';
 
 // hostingDesc:据应用类型/Runner 描述托管方式(部署成功文案用),避免硬编码 systemd 误导
@@ -342,6 +342,8 @@ function DeployDialog({ app, open, onClose }) {
   const realTypeApp = isRealType(app.type);
   const isReal = realTypeApp && (!!realFile || !!pickedArt);
   const ext = DEPLOY_TYPES[app.type].artifactExt;
+  // 制品库候选与上传同一扩展名口径:别的类型的制品(如 .war 之于 java-jar)不展示,免得选错。
+  const artChoices = (artifacts || []).filter((row) => artifactNameOK(app.type, row.name));
 
   const pickExample = () => {
     setRealFile(null); setPickedArt(null);
@@ -349,6 +351,11 @@ function DeployDialog({ app, open, onClose }) {
     up.begin({ name: `${app.artifactName}-${version}${ext || ".tar.gz"}`, sizeMB: mb, size: mb.toFixed(1) + " MB" });
   };
   const pickReal = (f) => {
+    // 扩展名白名单拦截(文件选择器与拖拽共用此入口;accept 属性挡不住拖拽和"所有文件")。
+    if (!artifactNameOK(app.type, f.name)) {
+      toast(`「${f.name}」不是 ${DEPLOY_TYPES[app.type].label} 支持的制品类型(需 ${DEPLOY_TYPES[app.type].accepts.join(" / ")})`, { tone: "error", icon: "alert" });
+      return;
+    }
     setRealFile(f); setPickedArt(null);
     const mb = Math.max(1, f.size / 1048576);
     up.begin({ name: f.name, sizeMB: mb, size: mb < 1024 ? mb.toFixed(1) + " MB" : (mb / 1024).toFixed(2) + " GB" });
@@ -414,9 +421,11 @@ function DeployDialog({ app, open, onClose }) {
               <Icon name="upload" size={22} style={{ color: "var(--muted-fg)" }} />
               <div style={{ fontWeight: 600, marginTop: 8, fontSize: 13.5 }}>拖拽制品到此处,或点击选择文件</div>
               <div style={{ fontSize: 12, color: "var(--muted-fg)", marginTop: 3 }}>
-                {DEPLOY_TYPES[app.type].label} · 单次上传 + sha256 校验 · 默认上限 1GB(max_upload_mb 可配)
+                {DEPLOY_TYPES[app.type].label}{(DEPLOY_TYPES[app.type].accepts || []).length ? ` · 仅支持 ${DEPLOY_TYPES[app.type].accepts.join(" / ")}` : ""} · 单次上传 + sha256 校验 · 默认上限 1GB(max_upload_mb 可配)
               </div>
-              <input type="file" ref={inputRef} style={{ display: "none" }} onChange={(e) => { if (e.target.files[0]) pickReal(e.target.files[0]); }} />
+              <input type="file" ref={inputRef} style={{ display: "none" }}
+                accept={(DEPLOY_TYPES[app.type].accepts || []).join(",") || undefined}
+                onChange={(e) => { if (e.target.files[0]) pickReal(e.target.files[0]); }} />
               {/* 示例制品仅用于非真实类型的演示;真实应用必须上传真实文件走 Agent。 */}
               {!realTypeApp ? (
                 <div style={{ marginTop: 12 }}>
@@ -428,13 +437,13 @@ function DeployDialog({ app, open, onClose }) {
 
           {/* 制品库选择:已留存制品可免重复上传直接部署(多 Agent / 重部署历史制品时尤其有用)。
               真实类型 + 选了制品库条目 → 走真机部署(artifactId);非真实类型选了也仅作演示来源。 */}
-          {up.phase === "idle" && artifacts && artifacts.length > 0 ? (
+          {up.phase === "idle" && artChoices.length > 0 ? (
             <div className="card" style={{ padding: "11px 14px" }}>
               <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
                 <Icon name="archive" size={13} style={{ color: "var(--primary)" }} />从制品库选择(免重复上传)
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 160, overflowY: "auto" }}>
-                {artifacts.map((row) => (
+                {artChoices.map((row) => (
                   <button key={row.id} className="nav-item" data-active={String(pickedArt && pickedArt.id === row.id)}
                     style={{ justifyContent: "flex-start", padding: "7px 10px" }}
                     onClick={() => pickArtifact(row)}>

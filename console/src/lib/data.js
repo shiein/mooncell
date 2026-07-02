@@ -10,13 +10,25 @@ const ago = (ms) => NOW - ms;
 
 // Runner 与 Agent 实际支持对齐:进程类支持 systemd / pm2 / nohup(nohup 托管模式,无监管、崩了不自动拉起);
 // static 软链托管、tomcat 容器托管。
+// accepts:部署上传的扩展名白名单(选择期拦截,空数组=不限制,如原生二进制通常无扩展名)。
+// 与 Agent 真实支持对齐:python/node 单文件或压缩包(Agent 按魔数嗅探 gzip/zip/tar),
+// static 必须压缩包,jar/war 单文件。仅是前置 UX 拦截,最终以 Agent 校验为准(改名绕过会在部署阶段失败)。
 const DEPLOY_TYPES = {
-  "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".jar" },
-  "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war" },
-  "native-binary":    { label: "原生二进制",    tone: "cyan",    runners: ["systemd", "pm2", "nohup"], artifactExt: "" },
-  "python":       { label: "Python",       tone: "info",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".py / .tar.gz" },
-  "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".js / .tar.gz" },
-  "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["软链"], artifactExt: ".tar.gz / .zip" },
+  "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".jar", accepts: [".jar"] },
+  "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war", accepts: [".war"] },
+  "native-binary":    { label: "原生二进制",    tone: "cyan",    runners: ["systemd", "pm2", "nohup"], artifactExt: "", accepts: [] },
+  "python":       { label: "Python",       tone: "info",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".py / .tar.gz", accepts: [".py", ".tar.gz", ".tgz", ".zip", ".tar"] },
+  "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".js / .tar.gz", accepts: [".js", ".mjs", ".cjs", ".tar.gz", ".tgz", ".zip", ".tar"] },
+  "static-nginx": { label: "Static / Nginx", tone: "purple", runners: ["软链"], artifactExt: ".tar.gz / .zip", accepts: [".tar.gz", ".tgz", ".zip", ".tar"] },
+};
+
+// artifactNameOK:文件名是否符合该类型的扩展名白名单(不区分大小写;无白名单=放行)。
+// 部署对话框选文件/拖拽/选制品库条目共用,保证三条入口一个口径。
+const artifactNameOK = (type, name) => {
+  const accepts = (DEPLOY_TYPES[type] || {}).accepts || [];
+  if (!accepts.length) return true;
+  const n = String(name || "").toLowerCase();
+  return accepts.some((e) => n.endsWith(e));
 };
 
 // 进程类应用:走 systemd / pm2 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。
@@ -338,7 +350,7 @@ function nextVersion(v) {
 }
 
 export {
-  MCStore, useMC, DEPLOY_TYPES, isProcessType, isRealType, fmtBytes, fmtMB, APP_STATUS, REL_STATUS, STAGES, stageOf,
+  MCStore, useMC, DEPLOY_TYPES, artifactNameOK, isProcessType, isRealType, fmtBytes, fmtMB, APP_STATUS, REL_STATUS, STAGES, stageOf,
   INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
   AGENT, genSeries, genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
   NOW as MC_NOW, MIN as MC_MIN, HOUR as MC_HOUR, DAY as MC_DAY,

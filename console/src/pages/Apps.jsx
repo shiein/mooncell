@@ -103,8 +103,10 @@ function CreateAppDialog({ open, onClose }) {
     setChecks([{ label: "正在向 Agent 预检…", st: "pending" }]);
     const id = appId();
     const binPath = binPathOf(id);
+    // static-nginx 不传端口:端口由 nginx 占用属常态,空闲检查永远过不了(Agent 端同样会跳过,
+    // 这里不传是兼容尚未自更新的旧 Agent)。
     const params = new URLSearchParams({
-      binPath, port: form.port || "", type,
+      binPath, port: type === "static-nginx" ? "" : (form.port || ""), type,
       runner: selectedRunner(),
       agent: form.agentId || "default",
     });
@@ -293,7 +295,7 @@ function CreateAppDialog({ open, onClose }) {
             </Field>
           ) : null}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <Field label="端口">
+            <Field label="端口" hint={type === "static-nginx" ? "静态站点填 nginx 对外端口,仅作记录展示,不参与预检与探活" : undefined}>
               <input className="input mono" placeholder="8080" value={form.port || ""} onChange={(e) => setForm({ ...form, port: e.target.value })} />
             </Field>
             <Field label="备份保留份数">

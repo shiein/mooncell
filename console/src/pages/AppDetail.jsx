@@ -442,7 +442,8 @@ function ConfigTab({ app }) {
       if (!runners.some(capOk)) { toast("所选 Agent 不支持该类型任何 Runner,无法保存", { tone: "error", icon: "alert" }); return; }
       setSaving(true);
       const binPath = (String(draft.path || "").split(/\s+/)[0]) || "";
-      const params = new URLSearchParams({ binPath, port: String(draft.port || ""), type: app.type, runner: draft.runner || runners[0], agent: app.agentId || "default" });
+      // static-nginx 不传端口:端口由 nginx 占用属常态,传了会导致配置永远保存不了(与新建向导同口径)。
+      const params = new URLSearchParams({ binPath, port: app.type === "static-nginx" ? "" : String(draft.port || ""), type: app.type, runner: draft.runner || runners[0], agent: app.agentId || "default" });
       const res = await precheckApp(params.toString());
       setSaving(false);
       if (res && res.checks) {
