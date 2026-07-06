@@ -226,11 +226,16 @@ function App() {
       toast(`批量${verb}:成功 ${ok}` + (fail ? ` · 失败 ${fail}(Agent 未响应或操作出错)` : ""), fail ? { tone: "warn", icon: "alert" } : undefined);
     },
 
-    addApp(app) {
-      setApps((s) => [...s, app]); persist("app", app);
+    // 创建应用:**先 await 落库,成功后才更新本地状态并跳转**——与 updateApp/deleteApp 同口径,
+    // 不再乐观骗「已创建」。落库被拒(persist 内已 toast 具体原因)则不插入本地、不跳转,避免「假建、刷新消失」。
+    async addApp(app) {
+      const res = await persist("app", app);
+      if (res && res.error) return res;
+      setApps((s) => [...s, app]);
       addAudit("创建应用", app.name, "成功");
       toast(`应用「${app.name}」创建成功,预检通过`);
       nav("app-detail", { appId: app.id });
+      return { ok: true };
     },
 
     // 改配置:先归一化数值类型(服务端 Port int / BackupKeep float64,字符串会反序列化失败 400),

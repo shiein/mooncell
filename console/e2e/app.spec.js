@@ -239,3 +239,27 @@ test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ p
   // 备份失败态:显示错误提示,不回退/不显示 mock 备份
   await expect(page.getByText(/无法读取真实备份|Agent 备份列表不可用|Agent 不可达/).first()).toBeVisible({ timeout: 8000 });
 });
+
+// 回归:static-nginx 新建必须真正落库、刷新后仍在。曾因两处叠加变成「假建」——
+// (1) 向导对 static 默认 healthType=端口探活,被后端 validateAppConfig 拒绝(static 无独立进程,端口探活须有效端口);
+// (2) addApp 乐观 fire-and-forget,不 await 落库结果就 toast「创建成功」并跳转,刷新后应用消失。
+test('新建 static-nginx 应用真正落库、刷新后仍在(默认不做端口探活)', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: '应用', exact: true }).click();
+  await page.getByRole('button', { name: /新建应用/ }).click();
+  // 第 1 步:选 Static / Nginx(runner 仅「软链」,无运行时依赖)
+  await page.getByRole('button', { name: /Static \/ Nginx/ }).click();
+  await page.getByRole('button', { name: '下一步', exact: true }).click();
+  // 第 2 步:应用名 + 目标目录(static 必填,否则「执行预检」按钮 disabled)
+  await page.locator('xpath=//label[contains(@class,"field-label") and contains(.,"应用名")]/following-sibling::input[1]').fill('E2E 静态站点');
+  await page.locator('xpath=//label[contains(@class,"field-label") and contains(.,"目标目录")]/following-sibling::input[1]').fill('/data/web/e2e-static');
+  await page.getByRole('button', { name: '执行预检' }).click();
+  // 第 3 步:fake-agent 预检恒通过 → 创建应用
+  await page.getByRole('button', { name: '创建应用' }).click();
+  await expect(page.getByText(/创建成功/)).toBeVisible({ timeout: 8000 });
+  // 关键回归:刷新后应用仍在列表——证明真的落库了,不是「假建」。
+  // 创建成功会跳到详情页,刷新后面包屑与侧栏都有「应用」,用侧栏导航消歧。
+  await page.reload();
+  await page.getByRole('navigation').getByRole('button', { name: '应用', exact: true }).click();
+  await expect(page.getByText('E2E 静态站点')).toBeVisible({ timeout: 8000 });
+});

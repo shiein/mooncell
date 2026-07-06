@@ -125,17 +125,19 @@ function CreateAppDialog({ open, onClose }) {
   // 预检有 fail(白名单外/端口占用/运行时缺失)禁止创建;warn(Agent 不可达)允许降级创建。
   const checksBlocked = checks.some((c) => c.st === "fail");
 
-  const create = () => {
+  const create = async () => {
     const id = appId();
     // path 即落盘路径,与预检完全一致(binPathOf);interp 是运行时(python 支持 venv、node 自定义路径)。
     const path = binPathOf(id);
     const interp = type === "python" ? (form.interp || "") : type === "node" ? (form.nodePath || "") : "";
-    store.addApp({
+    const res = await store.addApp({
       id: id + "-" + Math.random().toString(36).slice(2, 5),
       name: form.name || "未命名应用", type, runner: selectedRunner(),
       status: "stopped", version: "—", pid: null, port: +(form.port || 8080),
       path, interp, workdir: form.workdir || `/srv/apps/${id}`,
-      health: form.health || "", healthType: form.healthType || (form.health ? "HTTP 200" : "端口探活"),
+      // 健康检查默认按类型收敛:进程类/tomcat 无目标时默认「端口探活」;static-nginx 无独立进程,
+      // 端口是 nginx 对外服务口——默认「无」(不探活),否则后端 validateAppConfig 会以「端口探活须填有效端口」拒绝落库。
+      health: form.health || "", healthType: form.healthType || (form.health ? "HTTP 200" : (isProcessType(type) || type === "tomcat-war") ? "端口探活" : "无"),
       logPaths: [form.logs || `/srv/apps/${id}/logs/app.log`],
       jvm: form.jvm || form.args || "", user: selectedRunner() === "nohup" ? "" : (form.user || "appuser"),
       agentId: form.agentId || "default",
@@ -146,6 +148,8 @@ function CreateAppDialog({ open, onClose }) {
       backupKeep: +(form.backupKeep || 5), lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
       artifactName: id, extraFiles: [],
     });
+    // 落库被拒:保留对话框,让用户按 toast 报错修正后重试;成功才关闭。
+    if (res && res.error) return;
     onClose();
   };
 
