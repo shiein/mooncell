@@ -304,6 +304,11 @@ func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID st
 		cfg.ReloadCmd = rc
 		cfg.ReloadArg = ra
 	}
+	// nohup runner 不降权:服务端强制清空 user,避免已存陈旧值(老应用/API 直建/种子数据)漏到 Agent 被拒。
+	// 与编辑表单(nohup 时清 user)对称——表单清、服务端剥、Agent 兜底拒,三层一致。
+	if app.Runner == "nohup" {
+		cfg.User = ""
+	}
 	// pm2 接管模式:仅 pm2 runner 下生效,透传已有进程名(Agent 据此 restart 而非写 ecosystem)。
 	if app.Runner == "pm2" {
 		cfg.Pm2Name = strings.TrimSpace(app.Pm2Name)
