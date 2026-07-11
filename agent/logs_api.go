@@ -12,6 +12,35 @@ import (
 	"time"
 )
 
+// maxLogTail 是 tail 参数上限:防 viewer 传巨值让 journalctl/tail/pm2 拉取海量历史行拖垮 Agent。
+const maxLogTail = 5000
+
+// maxLogStreams 是单 Agent 活跃日志 SSE 流并发上限:每条占一个 tail/journalctl/pm2 子进程 + fd,
+// 无配额时 viewer 可开大量长连接耗尽资源。
+const maxLogStreams = 32
+
+// clampLogTail 把 tail 收敛到 [1, maxLogTail]:非法/空/非正→默认 200,超上限→截到上限。
+func clampLogTail(s string) string {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return "200"
+	}
+	if n > maxLogTail {
+		n = maxLogTail
+	}
+	return strconv.Itoa(n)
+}
+
+// acquireLogStream 占用一个日志流额度,成功返回释放函数与 true;超配额返回 false。
+// 必须在写 SSE 头(200)之前调用——否则无法再回 429。
+func (a *agent) acquireLogStream() (func(), bool) {
+	if a.logStreams.Add(1) > maxLogStreams {
+		a.logStreams.Add(-1)
+		return nil, false
+	}
+	return func() { a.logStreams.Add(-1) }, true
+}
+
 // logStream 处理 GET /api/apps/{id}/logs/stream?tail=N&runner=<systemd|pm2>(SSE):
 // 跟随该应用的运行时日志,先吐最近 tail 行再实时跟随。systemd 走 journald(-o json),
 // pm2 走 `pm2 logs --raw`。每行推 `event: line`;客户端断开时 r.Context() 取消,杀掉子进程。
@@ -20,10 +49,14 @@ func (a *agent) logStream(w http.ResponseWriter, r *http.Request) {
 	if !requireValidID(w, id) {
 		return
 	}
-	tail := r.URL.Query().Get("tail")
-	if _, err := strconv.Atoi(tail); err != nil || tail == "" {
-		tail = "200"
+	tail := clampLogTail(r.URL.Query().Get("tail"))
+
+	release, ok := a.acquireLogStream()
+	if !ok {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "日志流并发连接已达上限,请稍后重试"})
+		return
 	}
+	defer release()
 
 	sse, ok := sseHeader(w)
 	if !ok {
@@ -179,10 +212,15 @@ func (a *agent) logFileStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "日志路径不在 log_roots 白名单内: " + path})
 		return
 	}
-	tail := r.URL.Query().Get("tail")
-	if _, err := strconv.Atoi(tail); err != nil || tail == "" {
-		tail = "200"
+	tail := clampLogTail(r.URL.Query().Get("tail"))
+
+	release, ok := a.acquireLogStream()
+	if !ok {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "日志流并发连接已达上限,请稍后重试"})
+		return
 	}
+	defer release()
+
 	sse, ok := sseHeader(w)
 	if !ok {
 		return
