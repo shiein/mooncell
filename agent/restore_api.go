@@ -44,6 +44,41 @@ func (a *agent) backupArtifact(id, backup string) (string, error) {
 	return "", fmt.Errorf("备份制品不存在: %s", dir)
 }
 
+// backupMeta 读取备份目录 meta.json,返回记录的权威版本与 sha256(缺失/损坏返回空串)。
+// backup 由 prepareRestore 校验为单层目录名,无路径穿越面。
+func (a *agent) backupMeta(id, backup string) (version, sha256hex string) {
+	mb, err := os.ReadFile(filepath.Join(a.cfg.Paths.BackupDir, id, backup, "meta.json"))
+	if err != nil {
+		return "", "" // 老备份可能无 meta:回退客户端 version(保持旧行为),不阻断还原
+	}
+	var m struct {
+		Version string `json:"version"`
+		Sha256  string `json:"sha256"`
+	}
+	json.Unmarshal(mb, &m)
+	return m.Version, m.Sha256
+}
+
+// resolveBackupVersion 据备份 meta 解析还原应写入的权威版本,并对单文件备份校验制品完整性。
+//   - authVer:meta.version 存在即以其为准(被备份时的真实版本),否则回退 clientVersion(老备份无 meta)。
+//   - checked:是否实际比对了 sha256(仅单文件 app 备份;多文件 app.tar.gz 的 meta.sha256 记的是
+//     内部入口文件 sha、与 tar 不同,无可比真值,跳过)。
+//   - err:sha256 不一致(备份损坏/被篡改)——调用方须据此拒绝还原,不拿坏字节重跑流水线。
+func (a *agent) resolveBackupVersion(id, backup, artifact, clientVersion string) (authVer string, checked bool, err error) {
+	metaVer, metaSha := a.backupMeta(id, backup)
+	authVer = clientVersion
+	if metaVer != "" {
+		authVer = metaVer
+	}
+	if metaSha != "" && filepath.Base(artifact) == "app" {
+		if got := sha256File(artifact); got != metaSha {
+			return authVer, false, fmt.Errorf("备份制品 sha256 与元数据不符,拒绝还原(meta=%s got=%s)", metaSha, got)
+		}
+		checked = true
+	}
+	return authVer, checked, nil
+}
+
 // prepareRestore 解析还原请求并做安全校验;失败已写好响应,ok=false。返回 cfg 与备份标识(进程类=备份目录名、static=release 时间戳)。
 func (a *agent) prepareRestore(w http.ResponseWriter, r *http.Request) (DeployConfig, string, bool) {
 	var zero DeployConfig
@@ -86,6 +121,20 @@ func (a *agent) runRestore(cfg DeployConfig, backup string, emit func(Step)) Dep
 		emit(s)
 		return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
 	}
+	// 权威版本/完整性以备份 meta 为准:防止「还原旧字节却把 .ver/UI/发布记录写成客户端提交的任意新版本」。
+	authVer, sha256checked, integErr := a.resolveBackupVersion(cfg.ID, backup, artifact, cfg.Version)
+	if integErr != nil {
+		s := Step{Name: "校验备份完整性", OK: false, Logs: []string{integErr.Error()}}
+		emit(s)
+		return DeployResult{Result: "failed", Version: authVer, Steps: []Step{s}}
+	}
+	if authVer != cfg.Version {
+		emit(Step{Name: "版本校准", OK: true, Logs: []string{"客户端请求版本 " + cfg.Version + ",以备份记录 " + authVer + " 为准"}})
+	}
+	if sha256checked {
+		emit(Step{Name: "校验备份完整性", OK: true, Logs: []string{"sha256 一致"}})
+	}
+	cfg.Version = authVer // 权威:后续 .ver 旁车、DeployResult.Version、Console 发布记录均据此
 	// 拷到临时文件:流水线 backupCurrent 滚动清理可能删掉还原源,拷出来即免疫。
 	tmp, cleanup, err := copyToTemp(artifact)
 	if err != nil {
