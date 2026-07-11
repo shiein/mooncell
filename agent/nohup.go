@@ -222,6 +222,9 @@ func nohupLaunch(spec nohupSpec) (string, error) {
 	defer os.Remove(tmpName)
 	line := fmt.Sprintf("nohup %s >> %s 2>&1 & echo $! > %s", spec.Cmd, shQuote(spec.LogPath), shQuote(tmpName))
 	c := exec.Command("sh", "-c", line)
+	// 把 sh 及其后台 nohup 子树隔离到独立进程组(pgid=sh pid,非 Agent 组):
+	// 应用 fork/daemonize 的子进程与之同组,停止时按 -pgid 群发即可连子进程一起收,不留孤儿。
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	c.Dir = spec.Workdir
 	c.Env = os.Environ()
 	for k, v := range spec.Env {
@@ -316,17 +319,13 @@ func nohupAlive(cfg DeployConfig) bool {
 	return ok && stateAlive(st)
 }
 
-// terminate 优雅终止 pid:SIGTERM → 最多等 5s → 仍在则 SIGKILL。每步都用 alive() 判定,
-// alive 必须带身份校验(stateAlive)——否则等待期间原进程退出、PID 被复用,会误杀新占用者。
+// terminate 优雅终止 pid(及其进程组):SIGTERM → 最多等 5s → 仍在则 SIGKILL。每步都用 alive()
+// 判定,alive 必须带身份校验(stateAlive)——否则等待期间原进程退出、PID 被复用,会误杀新占用者。
 func terminate(pid int, alive func() bool) {
 	if !alive() {
 		return
 	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	p.Signal(syscall.SIGTERM)
+	killTarget(pid, syscall.SIGTERM)
 	for i := 0; i < 25; i++ {
 		if !alive() {
 			return // 原进程已退出(或 PID 已被复用为别的进程):停止等待,绝不强杀新占用者
@@ -334,8 +333,21 @@ func terminate(pid int, alive func() bool) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	if alive() {
-		p.Signal(syscall.SIGKILL)
+		killTarget(pid, syscall.SIGKILL)
 	}
+}
+
+// killTarget 对 pid 发信号,并尽力覆盖其整个进程组——nohup 应用 fork/daemonize 的子进程与父同组,
+// 只杀父 PID 会残留孤儿。启动时 Setpgid 已把子树隔离成独立进程组(pgid≠Agent 组),故按 -pgid 群发安全。
+// 安全边界:仅当 pgid 是独立组(>1 且 ≠ Agent 自身组)才群发;否则(如无 Setpgid 的历史进程)
+// 回退只杀单 pid,绝不误伤 Agent 自身进程组。
+func killTarget(pid int, sig syscall.Signal) {
+	if pgid, err := syscall.Getpgid(pid); err == nil && pgid > 1 && pgid != syscall.Getpgrp() {
+		if syscall.Kill(-pgid, sig) == nil {
+			return
+		}
+	}
+	syscall.Kill(pid, sig)
 }
 
 // nohupStop 停止进程:身份校验通过才发信号;无记录 / 已退出 / PID 复用(stale)一律只清 pidfile,
