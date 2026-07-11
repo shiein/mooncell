@@ -24,7 +24,18 @@ var monitorRunners = map[string]bool{"systemd": true, "pm2": true, "nohup": true
 func (a *api) markBusy(id string) {
 	a.busyMu.Lock()
 	a.busy[id]++
+	if a.appEpoch == nil { // 惰性初始化:裸 &api{}(测试)也安全
+		a.appEpoch = map[string]uint64{}
+	}
+	a.appEpoch[id]++ // 操作开始即推进代际:巡检若在此之前派发,其回写将因代际不符被丢弃
 	a.busyMu.Unlock()
+}
+
+// appEpochOf 读取某 app 当前操作代际。巡检派发时捕获、回写前比对:不等即期间有操作介入,丢弃陈旧回写。
+func (a *api) appEpochOf(id string) uint64 {
+	a.busyMu.Lock()
+	defer a.busyMu.Unlock()
+	return a.appEpoch[id]
 }
 
 func (a *api) unmarkBusy(id string) {
@@ -181,9 +192,10 @@ func (a *api) checkAppsHealth() {
 	// path 在收集阶段(主 goroutine)预算好:appStatusPath 内部会 getEntity 查 SQLite(单连接),
 	// 放进 worker 并发跑会被串行化、抵消并发收益。worker 只跑纯 HTTP。
 	type job struct {
-		app  monApp
-		cl   *agentClient
-		path string
+		app   monApp
+		cl    *agentClient
+		path  string
+		epoch uint64 // 派发时捕获的操作代际:回写前比对,期间有启停/部署介入则丢弃陈旧结果
 	}
 	var jobs []job
 	for _, raw := range raws {
@@ -201,13 +213,15 @@ func (a *api) checkAppsHealth() {
 		if cl == nil {
 			continue
 		}
-		jobs = append(jobs, job{app, cl, a.appStatusPath(app.ID, app.Runner)})
+		// 代际须在 isBusy 通过后、发起请求前捕获:此后若有操作 markBusy 会推进代际,回写将被丢弃。
+		jobs = append(jobs, job{app, cl, a.appStatusPath(app.ID, app.Runner), a.appEpochOf(app.ID)})
 	}
 	type result struct {
 		app          monApp
 		active       bool
 		pid, cpu, mem string
 		ok           bool
+		epoch        uint64
 	}
 	resCh := make(chan result, len(jobs))
 	monitorWorkerPool(len(jobs), monitorConcurrency, func(i int) {
@@ -227,12 +241,12 @@ func (a *api) checkAppsHealth() {
 			resCh <- result{app: j.app}
 			return
 		}
-		resCh <- result{app: j.app, active: st.Active, pid: st.Pid, cpu: st.Cpu, mem: st.Mem, ok: true}
+		resCh <- result{app: j.app, active: st.Active, pid: st.Pid, cpu: st.Cpu, mem: st.Mem, ok: true, epoch: j.epoch}
 	})
 	close(resCh)
 	for r := range resCh {
 		if r.ok {
-			a.applyMonitorState(r.app, r.active, r.pid, r.cpu, r.mem)
+			a.applyMonitorState(r.app, r.active, r.pid, r.cpu, r.mem, r.epoch)
 		}
 	}
 }
@@ -270,8 +284,13 @@ func monitorWorkerPool(n, concurrency int, task func(i int)) {
 
 // applyMonitorState 据巡检到的真机运行态保守更新应用实体的权威 status/pid/cpu/mem + lastCheck,
 // 仅在 running→failed(掉线)、failed|stopped→running(恢复)两类迁移时改 status 并记审计。
-func (a *api) applyMonitorState(app monApp, active bool, pid, cpu, mem string) {
+func (a *api) applyMonitorState(app monApp, active bool, pid, cpu, mem string, epoch uint64) {
 	defer a.lockAppEntity(app.ID)() // 与部署/启停/配置写回串行,防读改写丢更新
+	// 代际校验:派发本次巡检后若有启停/部署/还原/下线介入(markBusy 推进代际),
+	// 本次结果已是陈旧观测,丢弃——否则较晚返回的旧巡检会把刚落库的 stopped 又改回 running。
+	if a.appEpochOf(app.ID) != epoch {
+		return
+	}
 	raw, ok := a.store.getEntity("app", app.ID)
 	if !ok {
 		return

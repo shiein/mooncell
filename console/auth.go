@@ -32,6 +32,7 @@ type api struct {
 	busyMu          sync.Mutex
 	appMu           map[string]*sync.Mutex // 按 app id 的实体写锁:串行化"读实体—改字段—写回",防部署/启停/巡检/配置四链路并发丢更新
 	appMuMu         sync.Mutex
+	appEpoch        map[string]uint64 // 按 app id 的操作代际:每次启停/部署/还原/下线自增(markBusy 内);巡检据此丢弃陈旧回写。busyMu 保护
 	selfUpdateMu    sync.Mutex // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
 }
 

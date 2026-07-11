@@ -39,7 +39,7 @@ func TestApplyMonitorStateTransitions(t *testing.T) {
 
 	// running + 探到不活动 → failed,记一条「掉线」审计。
 	putApp(t, s, "app1", "running")
-	a.applyMonitorState(monApp{ID: "app1", Name: "应用1", Runner: "systemd"}, false, "", "", "")
+	a.applyMonitorState(monApp{ID: "app1", Name: "应用1", Runner: "systemd"}, false, "", "", "", 0)
 	if got := appStatus(t, s, "app1"); got != "failed" {
 		t.Errorf("running→不活动 应判 failed,实际 %s", got)
 	}
@@ -48,7 +48,7 @@ func TestApplyMonitorStateTransitions(t *testing.T) {
 	}
 
 	// failed + 探到活动 → running(恢复),再记一条审计。
-	a.applyMonitorState(monApp{ID: "app1", Name: "应用1", Runner: "systemd"}, true, "123", "1.0%", "50MB")
+	a.applyMonitorState(monApp{ID: "app1", Name: "应用1", Runner: "systemd"}, true, "123", "1.0%", "50MB", 0)
 	if got := appStatus(t, s, "app1"); got != "running" {
 		t.Errorf("failed→活动 应恢复 running,实际 %s", got)
 	}
@@ -57,14 +57,14 @@ func TestApplyMonitorStateTransitions(t *testing.T) {
 	}
 
 	// running + 活动 → 幂等保持 running,不新增审计。
-	a.applyMonitorState(monApp{ID: "app1", Name: "应用1", Runner: "systemd"}, true, "123", "1.0%", "50MB")
+	a.applyMonitorState(monApp{ID: "app1", Name: "应用1", Runner: "systemd"}, true, "123", "1.0%", "50MB", 0)
 	if auditCount(s) != 2 {
 		t.Errorf("running 幂等不应记审计,实际 %d", auditCount(s))
 	}
 
 	// 手动 stopped + 探到不活动 → 保持 stopped,不判掉线、不记审计。
 	putApp(t, s, "app2", "stopped")
-	a.applyMonitorState(monApp{ID: "app2", Name: "应用2", Runner: "systemd"}, false, "", "", "")
+	a.applyMonitorState(monApp{ID: "app2", Name: "应用2", Runner: "systemd"}, false, "", "", "", 0)
 	if got := appStatus(t, s, "app2"); got != "stopped" {
 		t.Errorf("手动 stopped 不应被翻动,实际 %s", got)
 	}
