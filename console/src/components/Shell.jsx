@@ -35,8 +35,13 @@ function MoonLogo({ size = 26 }) {
   );
 }
 
-function Sidebar({ page, onNav, user, role, onLogout }) {
+function Sidebar({ page, onNav, user, role, onLogout, agent }) {
   const navItems = NAV_ITEMS.filter((n) => !n.adminOnly || role === "admin");
+  // 真实 Agent 状态(与顶栏同源):此前左卡硬编码绿点 + 模拟磁盘,Agent 离线时仍显示"绿+磁盘",
+  // 与顶栏"Agent 不可达"自相矛盾。null=探测中(灰,不脉冲) / true=在线(绿,脉冲) / false=不可达(红)。
+  const online = agent ? agent.online : null;
+  const dotColor = online === false ? "var(--error)" : online === null ? "var(--muted-fg)" : "var(--success)";
+  const disk = agent && agent.system ? Math.round(agent.system.diskPercent) : null;
   return (
     <aside className="sidebar">
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 8px 14px" }}>
@@ -62,15 +67,21 @@ function Sidebar({ page, onNav, user, role, onLogout }) {
       {/* Agent 状态卡 */}
       <div className="card" style={{ padding: "10px 12px", marginBottom: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7, whiteSpace: "nowrap" }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--success)", flex: "none" }} className="pulse-dot"></span>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, flex: "none" }} className={online ? "pulse-dot" : ""}></span>
           <span style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{AGENT.name}</span>
           <span style={{ fontSize: 10.5, color: "var(--muted-fg)", marginLeft: "auto" }} className="mono">{AGENT.version}</span>
         </div>
         <div className="mono" style={{ fontSize: 10.5, color: "var(--muted-fg)", marginBottom: 8 }}>{AGENT.host}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
           <span style={{ fontSize: 10.5, color: "var(--muted-fg)", flex: "none" }}>磁盘</span>
-          <div style={{ flex: 1 }}><Progress value={AGENT.disk} height={5} color={AGENT.disk > 85 ? "var(--error)" : AGENT.disk > 70 ? "var(--warn)" : "var(--success)"} /></div>
-          <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-secondary)" }}>{AGENT.disk}%</span>
+          {disk === null ? (
+            <span className="mono" style={{ fontSize: 10.5, color: "var(--muted-fg)", flex: 1 }}>{online === false ? "不可达" : "探测中"}</span>
+          ) : (
+            <React.Fragment>
+              <div style={{ flex: 1 }}><Progress value={disk} height={5} color={disk > 85 ? "var(--error)" : disk > 70 ? "var(--warn)" : "var(--success)"} /></div>
+              <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-secondary)" }}>{disk}%</span>
+            </React.Fragment>
+          )}
         </div>
       </div>
 
@@ -89,10 +100,10 @@ function Sidebar({ page, onNav, user, role, onLogout }) {
   );
 }
 
-function Topbar({ crumbs, theme, onTheme, right }) {
+function Topbar({ crumbs, theme, onTheme, right, agent }) {
   // Agent 在线状态三态:null=探测中(灰) / true=在线(绿) / false=不可达(红)。
   // 旧实现硬编码绿色"Agent 在线",Agent 实际离线时仍显示在线,误导运维判断。
-  const { online } = useAgent();
+  const online = agent ? agent.online : null;
   const agentBadge = online === null
     ? { tone: "warn", label: "Agent 探测中" }
     : online
@@ -119,11 +130,13 @@ function Topbar({ crumbs, theme, onTheme, right }) {
 }
 
 function Shell({ page, onNav, crumbs, theme, onTheme, user, role, onLogout, children, topRight }) {
+  // 单一 Agent 状态源,顶栏与左卡共用一份轮询(避免双份 poller),二者显示天然一致。
+  const agent = useAgent();
   return (
     <div className="shell">
-      <Sidebar page={page} onNav={onNav} user={user} role={role} onLogout={onLogout} />
+      <Sidebar page={page} onNav={onNav} user={user} role={role} onLogout={onLogout} agent={agent} />
       <div className="main">
-        <Topbar crumbs={crumbs} theme={theme} onTheme={onTheme} right={topRight} />
+        <Topbar crumbs={crumbs} theme={theme} onTheme={onTheme} right={topRight} agent={agent} />
         <div className="content"><div className="content-inner" key={page}>{children}</div></div>
       </div>
     </div>

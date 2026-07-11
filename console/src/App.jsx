@@ -96,6 +96,20 @@ function App() {
     });
   }, [session]);
 
+  // 周期性重拉应用列表:后台巡检更新的 status/pid、其他用户的增改删都会反映,不必重新登录。
+  // 只覆盖 apps(不动 releases/audit 等视图,避免打断浏览);AppDetail 编辑用独立 draft,不受影响。
+  // 落库均为"await 服务端确认后才更新本地",故此刷新读到的已是含本次改动的权威态,不会回退。
+  React.useEffect(() => {
+    if (!session) return;
+    const iv = setInterval(() => {
+      hydrateData({
+        apps: INITIAL_APPS, releases: INITIAL_RELEASES, backups: INITIAL_BACKUPS,
+        cabinet: INITIAL_CABINET, audit: INITIAL_AUDIT,
+      }).then((data) => { if (data && data.apps) setApps(data.apps); });
+    }, 5000);
+    return () => clearInterval(iv);
+  }, [session]);
+
   // 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅 console 告警,不打断 UI)。
   // app 走类型化校验入口(saveAppConfig),其余走通用 putEntity。
   const persist = (kind, obj) => {
