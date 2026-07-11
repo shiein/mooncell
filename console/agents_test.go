@@ -13,7 +13,8 @@ func TestValidAgentAddr(t *testing.T) {
 		"10.0.0.5":               false, // 缺端口
 		":9100":                  false, // 缺 host
 		"10.0.0.5:":              false, // 空端口
-		"http://10.0.0.5:9100":   false, // 带 scheme
+		"http://10.0.0.5:9100":   true,  // 允许可选 http scheme
+		"https://10.0.0.5:9100":  true,  // 允许 https(TLS 终端 Agent)
 		"10.0.0.5:9100/path":     false, // 带路径
 		"10.0.0.5:9100?q=1":      false, // 带 query
 		"10.0.0.5:abc":           false, // 端口非数字

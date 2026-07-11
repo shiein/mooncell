@@ -31,6 +31,15 @@ type ServerConfig struct {
 type SecurityConfig struct {
 	// Console 添加 Agent 时录入的共享 token;所有请求需带 Authorization: Bearer <token>
 	Token string `toml:"token"`
+	// TLSCert/TLSKey 同时配置则 Agent 走 HTTPS(ListenAndServeTLS),加密传输中的 token;
+	// 二者留空则明文 HTTP(默认,向后兼容)。Console 侧对应把 Agent 地址登记为 https://host:port。
+	TLSCert string `toml:"tls_cert"`
+	TLSKey  string `toml:"tls_key"`
+}
+
+// tlsEnabled 判定是否启用 HTTPS:cert 与 key 均非空才启用。
+func (s SecurityConfig) tlsEnabled() bool {
+	return strings.TrimSpace(s.TLSCert) != "" && strings.TrimSpace(s.TLSKey) != ""
 }
 
 // PathsConfig 是 Agent 的安全边界:所有落盘 / 读日志的路径规范化后必须落在白名单根目录内(防穿越)。

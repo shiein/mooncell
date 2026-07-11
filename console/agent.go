@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,9 +23,35 @@ type agentClient struct {
 	stream *http.Client // 无超时:应用日志等长连接流,靠请求 context 取消而非超时
 }
 
+// agentBase 据 addr 构造 Agent 基址:addr 已含 http(s):// 前缀则原样(支持 TLS 终端 Agent),
+// 否则默认 http://(向后兼容既有 host:port 配置)。
+func agentBase(addr string) string {
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return addr
+	}
+	return "http://" + addr
+}
+
+// isPlaintextNonLoopback 判定 addr 是否为"非 loopback 的明文 HTTP":生产开启 require_tls_agents 时
+// 拒绝注册这类 Agent——共享 token 会明文过网,监听/劫持即得近 root 控制。loopback(本机,不过网)放行。
+func isPlaintextNonLoopback(addr string) bool {
+	if strings.HasPrefix(addr, "https://") {
+		return false // TLS,不过明文
+	}
+	host := strings.TrimPrefix(addr, "http://")
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return !(ip != nil && ip.IsLoopback())
+}
+
 func newAgentClient(cfg AgentConfig) *agentClient {
 	return &agentClient{
-		base:   "http://" + cfg.Addr,
+		base:   agentBase(cfg.Addr),
 		token:  cfg.Token,
 		http:   &http.Client{Timeout: 5 * time.Second},
 		// 部署/下线含 Agent 端健康检查宽限(retries×interval≈30s,探活超时最坏更久)+ 失败回滚再探测,

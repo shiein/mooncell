@@ -65,7 +65,11 @@ func (a *api) addAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validAgentAddr(body.Addr) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "地址须为 host:port 形态(如 10.0.0.5:9100),不能带 scheme 或路径"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "地址须为 host:port 或 http(s)://host:port(如 10.0.0.5:9100 / https://10.0.0.5:9100)"})
+		return
+	}
+	if a.requireTLSAgents && isPlaintextNonLoopback(body.Addr) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "已开启 require_tls_agents:非本机 Agent 须用 https://(token 不能明文过网)"})
 		return
 	}
 	id := fmt.Sprintf("ag%d", time.Now().UnixNano())
@@ -130,13 +134,20 @@ func (a *api) pingAgent(w http.ResponseWriter, r *http.Request) {
 // newAgentClient 会拼成 "http://"+addr,误填 scheme/路径会拼出畸形 URL。
 // admin-only 故 SSRF 风险低,但早拦避免后续路由/连接报错难定位。
 func validAgentAddr(addr string) bool {
-	if addr == "" || strings.ContainsAny(addr, "/?#") {
+	// 允许可选 http://|https:// 前缀(https 供 TLS 终端 Agent);其余按 host:port 校验。
+	hp := addr
+	if strings.HasPrefix(hp, "http://") {
+		hp = strings.TrimPrefix(hp, "http://")
+	} else if strings.HasPrefix(hp, "https://") {
+		hp = strings.TrimPrefix(hp, "https://")
+	}
+	if hp == "" || strings.ContainsAny(hp, "/?#") {
 		return false
 	}
-	if strings.Contains(addr, "://") {
-		return false // 误带 scheme
+	if strings.Contains(hp, "://") {
+		return false // 多余/错误 scheme
 	}
-	host, port, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(hp)
 	if err != nil {
 		return false
 	}

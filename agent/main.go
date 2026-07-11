@@ -88,6 +88,14 @@ func main() {
 	mux.HandleFunc("POST /api/self-update", a.tokenAuth(a.selfUpdate))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Addr, cfg.Server.Port)
+	if cfg.Security.tlsEnabled() {
+		// HTTPS:加密传输中的 Bearer token。cert/key 由运维签发(自签或内网 CA),Console 侧登记 https://。
+		log.Printf("Mooncell Agent %s 运行于 https://%s (TLS)", agentVersion, addr)
+		if err := http.ListenAndServeTLS(addr, cfg.Security.TLSCert, cfg.Security.TLSKey, mux); err != nil {
+			log.Fatalf("[server] %v", err)
+		}
+		return
+	}
 	log.Printf("Mooncell Agent %s 运行于 http://%s", agentVersion, addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("[server] %v", err)

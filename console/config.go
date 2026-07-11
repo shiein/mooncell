@@ -24,6 +24,14 @@ type Config struct {
 	Deploy   DeployUpload   `toml:"deploy"`
 	Audit    AuditConfig    `toml:"audit"`
 	Monitor  MonitorConfig  `toml:"monitor"`
+	Security SecurityConfig `toml:"security"`
+}
+
+// SecurityConfig:传输安全硬化。RequireTLSAgents 开启后拒绝注册非 loopback 的明文(http)Agent——
+// 共享 token 明文过网即近 root 暴露。默认 false(不破坏现有 http 远端 Agent);置 true 需先把远端 Agent
+// 切到 https(见 agent 侧 security.tls_cert/tls_key)或反代 TLS 终端。
+type SecurityConfig struct {
+	RequireTLSAgents bool `toml:"require_tls_agents"`
 }
 
 // ArtifactConfig 制品仓库:版本化制品库的落盘目录。上传一次 → 留存 → 可部署到 N 台 Agent /

@@ -34,6 +34,7 @@ type api struct {
 	appMuMu         sync.Mutex
 	appEpoch        map[string]uint64 // 按 app id 的操作代际:每次启停/部署/还原/下线自增(markBusy 内);巡检据此丢弃陈旧回写。busyMu 保护
 	draining        bool              // 自更新 draining:置位后 tryBeginOp 拒绝新操作,等在飞清零再 self-exec 重启。busyMu 保护
+	requireTLSAgents bool             // 开启后拒绝注册非 loopback 明文 Agent(security.require_tls_agents)
 	selfUpdateMu    sync.Mutex // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
 }
 
