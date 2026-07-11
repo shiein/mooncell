@@ -64,6 +64,11 @@ func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
 	}
 	for kind, arr := range grouped {
 		if key, ok := keyOfKind[kind]; ok {
+			if kind == "app" {
+				for i := range arr {
+					arr[i] = redactAppSecrets(arr[i]) // secret 明文不经读路径外泄给任何角色
+				}
+			}
 			out[key] = arr
 		}
 	}

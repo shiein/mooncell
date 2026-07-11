@@ -361,8 +361,9 @@ function LogViewer({ app }) {
 }
 
 // ---------- 环境变量编辑器(带敏感值标记)----------
-// secret=true 的值:回显掩码(••••••••),编辑时需点眼睛临时揭示;落库仍明文(内网可接受),
-// 但不进审计明文(后端 putAppConfig 不审计 env,部署审计只记 app 名)。
+// secret=true 的值:服务端读路径(/api/data)已抹除明文、只回传 hasValue 标记,任何角色都拿不到
+// secret 明文。编辑时字段留空即"保留原值"(后端 preserveSecretValues 补回),填写新值则更新。
+// 眼睛只揭示本次输入的新值(无既有明文可揭)。
 const MASK = "••••••••";
 function EnvEditor({ vars, editable, onChange }) {
   const list = Array.isArray(vars) ? vars : [];
@@ -383,8 +384,9 @@ function EnvEditor({ vars, editable, onChange }) {
             <input className="input mono" style={{ fontSize: 12.5, width: 200, flex: "none" }}
               disabled={!editable} placeholder="变量名" value={v.name}
               onChange={(e) => set(i, { name: e.target.value })} />
-            <input className={"input mono" + (v.secret ? "" : "")} style={{ fontSize: 12.5, flex: 1 }}
-              disabled={!showVal} placeholder={v.secret ? "敏感值(已掩码)" : "变量值"}
+            <input className="input mono" style={{ fontSize: 12.5, flex: 1 }}
+              disabled={!showVal}
+              placeholder={v.secret ? (v.hasValue ? "已设置 · 留空保留,填写以更新" : "敏感值") : "变量值"}
               value={showVal ? v.value : (v.value ? MASK : "")}
               onChange={(e) => set(i, { value: e.target.value })} />
             {editable ? (

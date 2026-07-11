@@ -134,7 +134,17 @@ func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	m["id"] = id // 实体 id 以路径为准,防 body 改 id
+	m["id"] = id           // 实体 id 以路径为准,防 body 改 id
+	stripEnvHasValue(m)    // hasValue 是读投影加的标记,不落库
+	// 与部署/启停/巡检写回同锁。对已存在应用:①保留 secret 原值——读路径已抹掉 secret 明文,
+	// 前端保存带回空值,空值语义为"保留原值"(要改则填新值);②保留服务端权威运行态字段——
+	// 前端改配置会把整份 app(含 hydrate 来的 status/pid/version 等旧运行态)发来,整段覆盖会
+	// 冲掉部署/巡检刚更新的运行态。新建应用无既有实体,按原样落库。
+	defer a.lockAppEntity(id)()
+	old, hasOld := a.store.getEntity("app", id)
+	if hasOld {
+		preserveSecretValues(old, m)
+	}
 	raw, err := json.Marshal(m)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "序列化失败"})
@@ -144,11 +154,7 @@ func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "配置校验未通过:" + msg})
 		return
 	}
-	// 与部署/启停/巡检写回同锁,且对已存在应用保留服务端权威的运行态字段——
-	// 前端改配置会把整份 app(含 hydrate 来的 status/pid/version 等旧运行态)发来,
-	// 整段覆盖会冲掉部署/巡检刚更新的运行态。新建应用无既有实体,按原样落库。
-	defer a.lockAppEntity(id)()
-	if old, ok := a.store.getEntity("app", id); ok {
+	if hasOld {
 		merged, err := mergePreserveRuntime(old, m)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "合并配置失败"})
@@ -217,6 +223,86 @@ type EnvVar struct {
 	Name   string `json:"name"`
 	Value  string `json:"value"`
 	Secret bool   `json:"secret"`
+}
+
+// envVarItems 从 app 实体 map 取出 envVars 列表(每项仍是 map[string]any),非法形态返回 nil。
+func envVarItems(m map[string]any) []any {
+	ev, _ := m["envVars"].([]any)
+	return ev
+}
+
+// evStr 从 envVar 项安全取字符串字段。
+func evStr(e map[string]any, k string) string {
+	s, _ := e[k].(string)
+	return s
+}
+
+// redactAppSecrets 把 app 实体里 secret=true 的 envVar 值抹成空并标 hasValue,供读路径投影——
+// secret 明文绝不经 /api/data 等读接口外泄给任何角色。非 app / 无 secret 时原样返回。
+// 展示无需明文;编辑走"空值=保留原值"(见 preserveSecretValues),故所有角色一律抹除。
+func redactAppSecrets(raw json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return raw
+	}
+	changed := false
+	for _, item := range envVarItems(m) {
+		e, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sec, _ := e["secret"].(bool); sec {
+			e["hasValue"] = evStr(e, "value") != ""
+			e["value"] = ""
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	if b, err := json.Marshal(m); err == nil {
+		return b
+	}
+	return raw
+}
+
+// preserveSecretValues 把新配置 m 里 secret=true 且 value 为空的 envVar,用既有实体 old 中同名 secret 的
+// 值补回:读路径已抹明文,前端保存带回空值即"保留原值";填了新值则以新值为准。
+func preserveSecretValues(old json.RawMessage, m map[string]any) {
+	var oldM map[string]any
+	if json.Unmarshal(old, &oldM) != nil {
+		return
+	}
+	oldSecret := map[string]string{}
+	for _, item := range envVarItems(oldM) {
+		if e, ok := item.(map[string]any); ok {
+			if sec, _ := e["secret"].(bool); sec {
+				if n := evStr(e, "name"); n != "" {
+					oldSecret[n] = evStr(e, "value")
+				}
+			}
+		}
+	}
+	for _, item := range envVarItems(m) {
+		e, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sec, _ := e["secret"].(bool); sec && evStr(e, "value") == "" {
+			if v, ok := oldSecret[evStr(e, "name")]; ok {
+				e["value"] = v
+			}
+		}
+	}
+}
+
+// stripEnvHasValue 移除 envVars 各项的 hasValue(读投影字段,不落库)。
+func stripEnvHasValue(m map[string]any) {
+	for _, item := range envVarItems(m) {
+		if e, ok := item.(map[string]any); ok {
+			delete(e, "hasValue")
+		}
+	}
 }
 
 // flattenEnv 把结构化 envVars 拍平为 name→value map(下发 Agent 用)。
