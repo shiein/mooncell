@@ -781,6 +781,14 @@ func (a *agent) runIdempotent(op string, cfg DeployConfig, fpExtra string, emit 
 	if emit == nil {
 		emit = func(Step) {}
 	}
+	// 自更新 drain 门禁:draining 时拒绝新部署/还原。beginOp 在 lockApp 之前——排队等锁的操作
+	// 也已计入在飞,自更新会等它完成再替换二进制,不会半途 self-exec 打断。
+	if !a.beginOp() {
+		s := Step{Name: "Agent 自更新中", OK: false, Logs: []string{"Agent 正在自更新,已暂停部署/还原,请稍后重试"}}
+		emit(s)
+		return DeployResult{Result: "failed", Version: cfg.Version, Steps: []Step{s}}
+	}
+	defer a.endOp()
 	defer a.lockApp(cfg.ID)() // 同应用串行,临界区内做幂等检查 + 执行 + 记录
 	fp := releaseFingerprint(cfg, fpExtra)
 	if cfg.ReleaseID != "" {

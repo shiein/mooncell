@@ -26,6 +26,10 @@ import (
 // selfUpdateMaxBytes 是自更新二进制上传硬上限(Console 二进制约 15–40MB,给足余量,与 Agent 同量级)。
 const selfUpdateMaxBytes = 256 << 20
 
+// selfUpdateDrainTimeout 是进入 draining 后等在飞操作清零的上限:超时(如有长部署)则放弃本次自更新、
+// 恢复接受操作并 409,由管理员择空闲重试。draining 期间新操作已被拒,busy 只减不增,通常很快收敛。
+const selfUpdateDrainTimeout = 30 * time.Second
+
 // consoleInfo 处理 GET /api/console/info(任意登录):返回当前 Console 版本 + os/arch,
 // 供前端展示当前版本 + 升级后轮询确认重启完成(版本变为新版即重启成功)。
 func (a *api) consoleInfo(w http.ResponseWriter, r *http.Request) {
@@ -45,10 +49,21 @@ func (a *api) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer a.selfUpdateMu.Unlock()
 
-	// 空闲门禁:self-exec 重启会丢内存状态——在飞部署/还原/启停/下线(busy)与活跃分块上传会话
-	// (uploads)都会因重启留下半完成操作/孤儿临时文件/续传 404。非空闲直接 409,不重启。
-	if a.anyBusy() || a.hasActiveUploads() {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "有部署/还原/上传在进行中,请稍后再自更新"})
+	// 空闲门禁 + draining:self-exec 重启会丢内存状态——在飞部署/还原/启停/下线(busy)与活跃分块
+	// 上传会话(uploads)都会因重启留下半完成操作/孤儿临时文件/续传 404。
+	// 先进 draining 拒绝新操作(闭合"检查通过后新操作又进来、最终被 self-exec 打断"的竞态),
+	// 再在超时内等在飞操作清零;失败则退出 draining 恢复接受操作并 409。
+	if !a.beginDrain() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "已有自更新进行中,请稍后重试"})
+		return
+	}
+	defer a.endDrain() // 失败/未重启时恢复;成功 self-exec 不返回,draining 随进程消失
+	if !a.waitDrained(selfUpdateDrainTimeout) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "有部署/还原/启停/下线在进行中,请稍后再自更新"})
+		return
+	}
+	if a.hasActiveUploads() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "有分块上传会话进行中,请稍后再自更新"})
 		return
 	}
 

@@ -244,6 +244,11 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	if !requireValidID(w, id) {
 		return
 	}
+	if !a.beginOp() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Agent 正在自更新,已暂停启停,请稍后重试"})
+		return
+	}
+	defer a.endOp()
 	defer a.lockApp(id)() // 与部署/还原同锁:同应用启停与部署串行,防并发改同一 unit/pm2/nohup spec
 	action := r.URL.Query().Get("action")
 	if action != "start" && action != "stop" {
@@ -313,6 +318,11 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	if !requireValidID(w, id) {
 		return
 	}
+	if !a.beginOp() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Agent 正在自更新,已暂停下线,请稍后重试"})
+		return
+	}
+	defer a.endOp()
 	defer a.lockApp(id)() // 与部署/还原同锁:下线删 unit/pm2/nohup spec 与部署串行,防并发竞争
 
 	runner := strings.TrimSpace(r.URL.Query().Get("runner"))

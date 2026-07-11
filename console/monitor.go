@@ -21,14 +21,64 @@ import (
 var monitorRunners = map[string]bool{"systemd": true, "pm2": true, "nohup": true}
 
 // markBusy/unmarkBusy/isBusy:在飞操作引用计数,健康巡检据此跳过,避免把部署/重启中的应用误判掉线。
-func (a *api) markBusy(id string) {
-	a.busyMu.Lock()
+// incBusyLocked 在持有 busyMu 时推进 busy 计数与操作代际。调用方必须已加锁。
+func (a *api) incBusyLocked(id string) {
 	a.busy[id]++
 	if a.appEpoch == nil { // 惰性初始化:裸 &api{}(测试)也安全
 		a.appEpoch = map[string]uint64{}
 	}
 	a.appEpoch[id]++ // 操作开始即推进代际:巡检若在此之前派发,其回写将因代际不符被丢弃
+}
+
+func (a *api) markBusy(id string) {
+	a.busyMu.Lock()
+	a.incBusyLocked(id)
 	a.busyMu.Unlock()
+}
+
+// tryBeginOp 是状态变更操作(部署/还原/启停/下线)的统一入口:自更新 draining 时拒绝新操作、
+// 否则占用 busy 额度并推进代际。与 beginDrain 在同一把 busyMu 下互斥,杜绝"自更新门禁检查通过后
+// 新操作又进来、最终被 self-exec 重启打断"的竞态。返回 false 表示正在自更新,应回 409。
+func (a *api) tryBeginOp(id string) bool {
+	a.busyMu.Lock()
+	defer a.busyMu.Unlock()
+	if a.draining {
+		return false
+	}
+	a.incBusyLocked(id)
+	return true
+}
+
+// beginDrain 进入自更新 draining 态:此后 tryBeginOp 拒绝新操作。已在 draining 返回 false。
+func (a *api) beginDrain() bool {
+	a.busyMu.Lock()
+	defer a.busyMu.Unlock()
+	if a.draining {
+		return false
+	}
+	a.draining = true
+	return true
+}
+
+// endDrain 退出 draining 态(自更新失败/未重启时恢复接受操作)。
+func (a *api) endDrain() {
+	a.busyMu.Lock()
+	a.draining = false
+	a.busyMu.Unlock()
+}
+
+// waitDrained 在超时内等待在飞操作清零。draining 已置时新操作进不来,故 busy 只减不增,必然收敛。
+func (a *api) waitDrained(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !a.anyBusy() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return !a.anyBusy()
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // appEpochOf 读取某 app 当前操作代际。巡检派发时捕获、回写前比对:不等即期间有操作介入,丢弃陈旧回写。

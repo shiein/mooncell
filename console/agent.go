@@ -574,7 +574,10 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
 		return
 	}
-	a.markBusy(id)
+	if !a.tryBeginOp(id) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Console 正在自更新,已暂停新操作,请稍后重试"})
+		return
+	}
 	defer a.unmarkBusy(id)
 	cl, runner, ok := a.requireAppRouting(w, id)
 	if !ok {
@@ -670,7 +673,10 @@ func (a *api) undeployPath(id, runner string) string {
 
 func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	a.markBusy(id)
+	if !a.tryBeginOp(id) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Console 正在自更新,已暂停新操作,请稍后重试"})
+		return
+	}
 	defer a.unmarkBusy(id)
 	// 必须是已落库应用:防止 write 用户对 Console 未跟踪的任意 deploy-<id> 单元执行下线。
 	cl, runner, ok := a.requireAppRouting(w, id)
@@ -688,7 +694,10 @@ func (a *api) agentUndeploy(w http.ResponseWriter, r *http.Request) {
 // 成功后才删 Console 元数据并审计。前端不能走通用 /api/data 删除(那里禁止删 app,只会"前端假删、刷新复现")。
 func (a *api) appDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	a.markBusy(id)
+	if !a.tryBeginOp(id) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Console 正在自更新,已暂停新操作,请稍后重试"})
+		return
+	}
 	defer a.unmarkBusy(id)
 	cl, runner, ok := a.requireAppRouting(w, id)
 	if !ok {

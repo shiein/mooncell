@@ -24,6 +24,63 @@ import (
 // selfUpdateMaxBytes 是自更新二进制上传硬上限(单 Go 二进制通常 10–30MB,给足余量)。
 const selfUpdateMaxBytes = 256 << 20
 
+// selfUpdateDrainTimeout 是自更新进入 draining 后等在飞操作清零的上限:超时则放弃、恢复接受操作并 409。
+const selfUpdateDrainTimeout = 30 * time.Second
+
+// beginOp 是状态变更操作(部署/还原/启停/下线)的统一入口:自更新 draining 时拒绝新操作,否则计数 +1。
+// 返回 false 表示 Agent 正在自更新,调用方应回 409 / 失败步骤。与 beginDrain 在同一把 opMu 下互斥,
+// 闭合"自更新门禁检查通过后新操作又进来、最终被 self-exec 重启打断"的竞态。
+func (a *agent) beginOp() bool {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	if a.draining {
+		return false
+	}
+	a.opsInFlight++
+	return true
+}
+
+func (a *agent) endOp() {
+	a.opMu.Lock()
+	a.opsInFlight--
+	a.opMu.Unlock()
+}
+
+// beginDrain 进入自更新 draining 态(此后 beginOp 拒绝新操作);已在 draining 返回 false。
+func (a *agent) beginDrain() bool {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	if a.draining {
+		return false
+	}
+	a.draining = true
+	return true
+}
+
+// endDrain 退出 draining(自更新失败/未重启时恢复接受操作)。
+func (a *agent) endDrain() {
+	a.opMu.Lock()
+	a.draining = false
+	a.opMu.Unlock()
+}
+
+// waitDrained 在超时内等在飞操作清零。draining 已置时新操作进不来,busy 只减不增,必然收敛或超时。
+func (a *agent) waitDrained(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		a.opMu.Lock()
+		n := a.opsInFlight
+		a.opMu.Unlock()
+		if n == 0 {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // selfUpdate 处理 POST /api/self-update(token)。
 func (a *agent) selfUpdate(w http.ResponseWriter, r *http.Request) {
 	// 全局串行:固定临时路径 <exe>.new 与"备份→替换自身"都是非原子临界区,
@@ -33,6 +90,19 @@ func (a *agent) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.selfUpdateMu.Unlock()
+
+	// drain 门禁:进入 draining 拒绝新的部署/还原/启停/下线,再等在飞操作清零——
+	// self-exec 替换二进制并重启会中断在飞部署,留半完成状态。selfUpdateMu 与 lockApp 各管一摊,
+	// 二者独立不足以防"部署进行中替换整个 Agent",故引入与操作协调的 drain。
+	if !a.beginDrain() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "已有自更新进行中,请稍后重试"})
+		return
+	}
+	defer a.endDrain() // 失败/未重启时恢复;成功 self-exec 不返回,draining 随进程消失
+	if !a.waitDrained(selfUpdateDrainTimeout) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "有部署/还原/启停/下线在进行中,请稍后再自更新"})
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, selfUpdateMaxBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
