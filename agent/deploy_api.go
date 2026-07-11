@@ -298,34 +298,101 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": isActive(id), "state": state, "pid": pid, "cpu": cpu, "mem": mem})
 }
 
-// undeploy 处理 DELETE /api/apps/{id}:停止并移除 systemd unit(保留制品与备份)。
+// undeploy 处理 DELETE /api/apps/{id}:停止并移除 unit/pm2/nohup spec/软链(保留制品与备份)。
+//
+// 曾经无差别跑完所有清理路径后固定返回 200 {"ok":true}——stop 真失败(权限/D 态/SIGKILL 免疫)
+// 或"stop 返 0 但进程仍在"的伪成功都被吞掉,Console 收到成功即删元数据,留下失管进程。
+// 现在:停后按权威 runner 复验目标确不存活,只有复验通过才回 2xx;仍存活则回 500 + 结构化 steps,
+// Console 的 status>=300 判定会据此中止删元数据(见 console/appDelete)。
+//
+// 权威 runner 由 Console 透传的 query 判定(与 addRunnerQuery 对齐):runner=pm2/nohup、
+// 或仅 binPath(static-nginx 软链)、或都无(systemd 托管 deploy-<id>)。跨切面的 systemd/pm2
+// 清理对非该 runner 的应用是无害 no-op,保持 best-effort、不计入关键结果。
 func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !requireValidID(w, id) {
 		return
 	}
 	defer a.lockApp(id)() // 与部署/还原同锁:下线删 unit/pm2/nohup spec 与部署串行,防并发竞争
-	sysctl("stop", unitName(id))
+
+	runner := strings.TrimSpace(r.URL.Query().Get("runner"))
+	pm2Name := strings.TrimSpace(r.URL.Query().Get("pm2Name"))
+	binPath := strings.TrimSpace(r.URL.Query().Get("binPath"))
+
+	var steps []Step
+	add := func(name string, ok bool, logs ...string) { steps = append(steps, Step{Name: name, OK: ok, Logs: logs}) }
+
+	// systemd 托管清理:managed(deploy-<id>)是真实动作;pm2/nohup/软链接管时此 unit 本不存在,
+	// stop/disable 失败是无害 no-op——故仅在纯 systemd 托管(无 runner/pm2Name/binPath)时记为关键 step。
+	sout, serr := sysctl("stop", unitName(id))
 	sysctl("disable", unitName(id))
 	os.Remove(unitPath(id))
 	sysctl("daemon-reload")
 	sysctl("reset-failed", unitName(id))
+	if runner == "" && pm2Name == "" && binPath == "" {
+		add("systemctl stop", serr == nil, strings.TrimSpace(sout))
+	}
 	pm2("delete", unitName(id)) // 托管模式:清理 deploy-<id>(无 pm2/无此进程则忽略)
+
 	// pm2 接管模式:Console 传真实进程名,否则只删 deploy-<id>、用户接管的进程会残留。
 	// 与 pm2NameReq 同一把尺:须过 containerNameRe 且非危险名(all/纯数字/- 开头)——
 	// 否则 DELETE ?pm2Name=all 会让 undeploy 执行 `pm2 delete all` 删光所有 pm2 进程。
-	if pn := strings.TrimSpace(r.URL.Query().Get("pm2Name")); pn != "" &&
-		containerNameRe.MatchString(pn) && !isUnsafePm2Name(pn) {
-		pm2("delete", pn)
+	if pm2Name != "" && containerNameRe.MatchString(pm2Name) && !isUnsafePm2Name(pm2Name) {
+		pout, perr := pm2("delete", pm2Name)
+		if runner == "pm2" {
+			add("pm2 delete "+pm2Name, perr == nil, strings.TrimSpace(pout))
+		}
 	}
 	// nohup 托管:Console 传 binPath 时停掉进程并清理 pidfile/spec(无监管,不停会留孤儿进程)。
 	// static-nginx(软链托管):Console 传 binPath 时删除对外软链下线 web root(release 目录保留,与制品/备份保留一致)。
-	if bp := strings.TrimSpace(r.URL.Query().Get("binPath")); bp != "" && withinRoots(bp, a.cfg.Paths.DeployRoots) {
-		if fi, err := os.Lstat(bp); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			os.Remove(bp) // 软链→删除即下线;Lstat 不跟随,不会误删 release 内容
+	if binPath != "" && withinRoots(binPath, a.cfg.Paths.DeployRoots) {
+		if fi, err := os.Lstat(binPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			os.Remove(binPath) // 软链→删除即下线;Lstat 不跟随,不会误删 release 内容
 		}
-		nohupStop(DeployConfig{BinPath: bp})
-		os.Remove(nohupSpecPath(bp))
+		nohupStop(DeployConfig{BinPath: binPath})
+		os.Remove(nohupSpecPath(binPath))
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+
+	// 停后复验:按权威 runner 查目标是否仍存活。这是唯一权威闸——伪成功(stop 返 0 但进程仍在)
+	// 与 stop 真失败都在此暴露。复验不通过则回 500,Console 据此中止删元数据。
+	if alive, detail := a.undeployStillAlive(id, runner, pm2Name, binPath); alive {
+		add("verify-stopped", false, detail)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "下线未生效: " + detail, "steps": steps})
+		return
+	}
+	add("verify-stopped", true)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "steps": steps})
+}
+
+// undeployStillAlive 按权威 runner 复验下线目标是否仍存活(下线成功时须为 false):
+// pm2→查真实/托管进程名在线;nohup→据 pidfile 查进程(含 PID 复用身份校验);
+// static-nginx 软链(runner 空但有 binPath)→查对外软链是否还在;其余→systemd is-active。
+func (a *agent) undeployStillAlive(id, runner, pm2Name, binPath string) (bool, string) {
+	switch {
+	case runner == "pm2":
+		name := unitName(id)
+		if pm2Name != "" && containerNameRe.MatchString(pm2Name) && !isUnsafePm2Name(pm2Name) {
+			name = pm2Name
+		}
+		if pm2Online(name) {
+			return true, "pm2 进程仍在线: " + name
+		}
+	case runner == "nohup":
+		if nohupAlive(DeployConfig{BinPath: binPath}) {
+			return true, "nohup 进程仍存活: " + binPath
+		}
+	case binPath != "": // static-nginx 软链托管:runner 空但透传了 binPath
+		// 与清理同一把尺:只对 deploy_roots 内(我们确实尝试删过)的软链判活。
+		// 越界 binPath 清理块本就跳过、Agent 不该触碰,不能反过来让应用永远删不掉。
+		if withinRoots(binPath, a.cfg.Paths.DeployRoots) {
+			if fi, err := os.Lstat(binPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return true, "对外软链未移除: " + binPath
+			}
+		}
+	default: // systemd 托管
+		if isActive(id) {
+			return true, "systemd 单元仍 active: " + unitName(id)
+		}
+	}
+	return false, ""
 }
