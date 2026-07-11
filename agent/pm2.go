@@ -50,8 +50,19 @@ type pm2Proc struct {
 	PmID   int    `json:"pm_id"`
 	Pm2Env struct {
 		PmExecPath string          `json:"pm_exec_path"`
+		PmCwd      string          `json:"pm_cwd"`
 		Args       json.RawMessage `json:"args"`
 	} `json:"pm2_env"`
+}
+
+// resolvePm2Target 把接管目标绝对化:相对路径(如用户 `pm2 start <java> -- -jar app.jar` 的
+// 相对 jar)必须相对该 pm2 进程的 pm_cwd,而非 Agent 自身工作目录——否则会定位到错误文件、
+// 后续 withinRoots 复校也失去意义。pm_exec_path 通常已是绝对,firstJar 从 args 取的 jar 常为相对。
+func resolvePm2Target(target, cwd string) string {
+	if target == "" || filepath.IsAbs(target) || cwd == "" {
+		return target // 已绝对 / 无 cwd 可依据:保持原样,交由上层 withinRoots 拦截
+	}
+	return filepath.Join(cwd, target)
 }
 
 // pm2Args 把 pm2_env.args 归一为 []string(兼容数组或单字符串两种形态)。
@@ -103,11 +114,12 @@ func parsePm2DeployTarget(jlist, nameOrID, typ string) (string, error) {
 			return "", fmt.Errorf("pm2 进程 %s 无 pm_exec_path", nameOrID)
 		}
 		if typ != "java-jar" || strings.HasSuffix(exec, ".jar") {
-			return exec, nil
+			return resolvePm2Target(exec, p.Pm2Env.PmCwd), nil
 		}
 		// java-jar 且 pm_exec_path 不是 jar(是 java 解释器):从启动参数里找真正的 jar。
+		// 相对 jar 按该进程 pm_cwd 绝对化(而非 Agent CWD),否则会覆盖错误路径。
 		if jar := firstJar(pm2Args(p.Pm2Env.Args)); jar != "" {
-			return jar, nil
+			return resolvePm2Target(jar, p.Pm2Env.PmCwd), nil
 		}
 		return "", fmt.Errorf("接管的 pm2 进程 %s 的 pm_exec_path 是 java 解释器(%s)、启动参数中也未找到 .jar,"+
 			"无法安全定位部署目标(拒绝覆盖 java 二进制)。请用绝对路径 jar 启动(pm2 start <绝对路径>.jar --interpreter java),"+
@@ -215,6 +227,14 @@ func (a *agent) runDeployPm2(cfg DeployConfig, artifact string, emit func(Step))
 	// 对 java-jar 必须是 .jar 而非 java 解释器(见 pm2DeployTarget),否则会覆盖 java 二进制毁掉 JDK。
 	// 用户只填进程名即可,不必手动对齐路径;取不到目标=进程不存在或无法安全定位,直接失败不替换。
 	if pm2Adopt(cfg) {
+		// 身份一致:接管名须过与 status/lifecycle/undeploy(pm2NameReq)同一把尺——拒纯数字/all/- 开头。
+		// 否则部署可按数字 pm_id 命中并覆盖某进程,而后续查看/停止/删除因拒数字回退 deploy-<id>、
+		// 指向另一个进程,造成"部署的和管理的不是同一个"。fail-closed,不静默回退托管名。
+		if pn := strings.TrimSpace(cfg.Pm2Name); !containerNameRe.MatchString(pn) || isUnsafePm2Name(pn) {
+			add("校验接管名", false, "pm2 接管名不合法或不安全(不能含非法字符/纯数字/all/- 开头,须为稳定唯一进程名): "+cfg.Pm2Name)
+			res.Result = "failed"
+			return res
+		}
 		target, perr := pm2DeployTarget(pm2ProcName(cfg), cfg.Type)
 		if perr != nil {
 			add("校验目标", false, "接管模式无法定位部署目标:"+perr.Error()+"(请确认该 pm2 进程已存在)")
