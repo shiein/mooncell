@@ -71,6 +71,18 @@ func (s *Store) deleteArtifact(id string) error {
 	return err
 }
 
+// evictArtifact 仅在制品仍是「自动归档且未⭐」时删元数据,返回是否实际删除。
+// 与淘汰候选查询(evictableAutoArtifacts)同一把尺(source='auto' AND pinned=0):堵住
+// SELECT 候选与 DELETE 之间被标星、却仍被无条件删掉的 TOCTOU。false = 期间已被 pin,应保留。
+func (s *Store) evictArtifact(id string) (bool, error) {
+	res, err := s.db.Exec("DELETE FROM artifacts WHERE id = ? AND pinned = 0 AND source = 'auto'", id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // setArtifactPinned 标记/取消⭐重要(豁免滚动淘汰)。
 func (s *Store) setArtifactPinned(id string, pinned bool) error {
 	_, err := s.db.Exec("UPDATE artifacts SET pinned = ? WHERE id = ?", pinned, id)

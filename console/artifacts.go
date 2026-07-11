@@ -260,8 +260,12 @@ func (a *api) evictAutoArtifacts(appID string) {
 		return
 	}
 	for _, r := range ev {
-		if err := a.store.deleteArtifact(r.ID); err != nil {
+		removed, err := a.store.evictArtifact(r.ID)
+		if err != nil {
 			continue // 元数据删失败:跳过,下次再淘汰(不删落盘以免悬空)
+		}
+		if !removed {
+			continue // 候选查询后被⭐标星(pinned)→守卫拦下,保留元数据与落盘字节
 		}
 		if err := os.Remove(a.artifactPath(r.ID)); err != nil && !os.IsNotExist(err) {
 			log.Printf("[artifact] 自动淘汰删落盘失败(元数据已删,留孤儿): id=%s err=%v", r.ID, err)
