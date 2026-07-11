@@ -37,6 +37,24 @@ func (a *api) unmarkBusy(id string) {
 	a.busyMu.Unlock()
 }
 
+// lockAppEntity 取某 app 实体的写锁,串行化其"读实体—改字段—写回"。部署结果/启停/巡检/配置四条链路
+// 并发读改写同一 JSON 文档时,最后写入者会用旧快照覆盖先前更新(丢 version/status/pid 或刚存的配置)。
+// Console 单实例,进程内锁即足够(与 busy 计数同约束)。返回解锁函数,调用方 defer 执行。
+func (a *api) lockAppEntity(id string) func() {
+	a.appMuMu.Lock()
+	if a.appMu == nil { // 惰性初始化:裸 &api{}(测试/未走构造器)也安全,不 panic
+		a.appMu = map[string]*sync.Mutex{}
+	}
+	mu, ok := a.appMu[id]
+	if !ok {
+		mu = &sync.Mutex{}
+		a.appMu[id] = mu
+	}
+	a.appMuMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (a *api) isBusy(id string) bool {
 	a.busyMu.Lock()
 	defer a.busyMu.Unlock()
@@ -253,6 +271,7 @@ func monitorWorkerPool(n, concurrency int, task func(i int)) {
 // applyMonitorState 据巡检到的真机运行态保守更新应用实体的权威 status/pid/cpu/mem + lastCheck,
 // 仅在 running→failed(掉线)、failed|stopped→running(恢复)两类迁移时改 status 并记审计。
 func (a *api) applyMonitorState(app monApp, active bool, pid, cpu, mem string) {
+	defer a.lockAppEntity(app.ID)() // 与部署/启停/配置写回串行,防读改写丢更新
 	raw, ok := a.store.getEntity("app", app.ID)
 	if !ok {
 		return

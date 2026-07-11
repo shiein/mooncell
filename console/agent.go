@@ -261,6 +261,7 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 //	rolledback → 保留旧 version(已回滚),running/static
 //	failed     → status=failed,version 不变
 func (a *api) applyAppRuntimeState(appID, version, result string) {
+	defer a.lockAppEntity(appID)() // 与启停/巡检/配置写回串行,防读改写丢更新
 	raw, ok := a.store.getEntity("app", appID)
 	if !ok {
 		return
@@ -606,6 +607,7 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 // applyLifecycleState 据 Agent 启停后返回的真实状态({active,pid})服务端权威更新应用实体的
 // status/pid——前端启停只做即时显示,不再 patch 落库。
 func (a *api) applyLifecycleState(appID string, body []byte) {
+	defer a.lockAppEntity(appID)() // 与部署/巡检/配置写回串行,防读改写丢更新
 	var st struct {
 		Active bool   `json:"active"`
 		Pid    string `json:"pid"`

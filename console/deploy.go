@@ -144,11 +144,47 @@ func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "配置校验未通过:" + msg})
 		return
 	}
+	// 与部署/启停/巡检写回同锁,且对已存在应用保留服务端权威的运行态字段——
+	// 前端改配置会把整份 app(含 hydrate 来的 status/pid/version 等旧运行态)发来,
+	// 整段覆盖会冲掉部署/巡检刚更新的运行态。新建应用无既有实体,按原样落库。
+	defer a.lockAppEntity(id)()
+	if old, ok := a.store.getEntity("app", id); ok {
+		merged, err := mergePreserveRuntime(old, m)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "合并配置失败"})
+			return
+		}
+		raw = merged
+	}
 	if err := a.store.putEntity("app", id, raw); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入失败"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// runtimeOwnedAppFields 是 app 实体中由服务端权威链路(部署/启停/巡检)维护的运行态字段。
+// 配置写入必须保留这些字段的既有值,不能被前端表单快照(整份 app)覆盖。
+var runtimeOwnedAppFields = []string{
+	"status", "pid", "cpu", "mem", "uptime", "version",
+	"lastDeploy", "lastCheck", "lastCheckActive",
+}
+
+// mergePreserveRuntime 以新配置 m 为基底,把既有实体 old 里的运行态字段覆盖回去:配置字段取新值,
+// 运行态字段以服务端既有为准。old 中不存在的运行态字段从结果删除,避免前端夹带的旧运行态值残留。
+func mergePreserveRuntime(old json.RawMessage, m map[string]any) (json.RawMessage, error) {
+	var oldM map[string]any
+	if err := json.Unmarshal(old, &oldM); err != nil {
+		return nil, err
+	}
+	for _, f := range runtimeOwnedAppFields {
+		if v, ok := oldM[f]; ok {
+			m[f] = v
+		} else {
+			delete(m, f)
+		}
+	}
+	return json.Marshal(m)
 }
 
 // appConfig 是应用实体里部署相关的字段(前端 addApp 落库的形态)。
