@@ -77,6 +77,34 @@ func (s *Store) appsRaw() ([]json.RawMessage, error) {
 	return out, rows.Err()
 }
 
+// appsReferencingAgent 返回 agentId 指向该 Agent 的应用名(名缺失回退 id),供删除 Agent 前的引用检查。
+// 删掉仍被引用的 Agent 会让这些应用集体失去部署/日志/启停能力,故删除前须拦。
+func (s *Store) appsReferencingAgent(agentID string) ([]string, error) {
+	raws, err := s.appsRaw()
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, raw := range raws {
+		var app struct {
+			Name    string `json:"name"`
+			ID      string `json:"id"`
+			AgentID string `json:"agentId"`
+		}
+		if json.Unmarshal(raw, &app) != nil {
+			continue
+		}
+		if app.AgentID == agentID {
+			if app.Name != "" {
+				names = append(names, app.Name)
+			} else {
+				names = append(names, app.ID)
+			}
+		}
+	}
+	return names, nil
+}
+
 // MetricPoint 是某 Agent 某时刻的资源水位(供总览画真实历史曲线)。
 type MetricPoint struct {
 	Ts   int64   `json:"ts"`

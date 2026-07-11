@@ -57,8 +57,15 @@ func (a *api) deleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不能删除最后一个管理员"})
 		return
 	}
-	if err := a.store.deleteUser(target); err != nil {
+	// 原子删除:即便上面的预检因并发互删而失效(两 admin 各自看到 count=2 都放行),
+	// deleteUser 内的末位 admin 守卫也会拦下,deleted=false 即此刻已是最后一个 admin。
+	deleted, err := a.store.deleteUser(target)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "删除失败"})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "并发删除:已是最后一个管理员或用户不存在,拒绝删除"})
 		return
 	}
 	a.store.appendAudit(me, "删除用户", target, "成功")

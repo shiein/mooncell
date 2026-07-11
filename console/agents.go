@@ -84,7 +84,23 @@ func (a *api) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "内置默认 Agent 不可删除"})
 		return
 	}
-	a.store.deleteAgent(id)
+	// 引用检查:删掉仍被应用引用的 Agent 会让这些应用集体失去部署/日志/启停入口,先拦。
+	refs, err := a.store.appsReferencingAgent(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "检查应用引用失败"})
+		return
+	}
+	if len(refs) > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": fmt.Sprintf("该 Agent 仍被 %d 个应用引用,请先迁移或删除这些应用", len(refs)),
+			"apps":  refs,
+		})
+		return
+	}
+	if err := a.store.deleteAgent(id); err != nil { // 此前吞掉 SQL 错误、无条件报成功
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "删除失败"})
+		return
+	}
 	a.clientsMu.Lock()
 	delete(a.clients, id)
 	a.clientsMu.Unlock()

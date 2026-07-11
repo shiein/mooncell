@@ -299,11 +299,23 @@ func (s *Store) createUser(username, password, role string) error {
 	return err // UNIQUE 冲突 → 用户名已存在
 }
 
-// deleteUser 删除用户并清其会话。
-func (s *Store) deleteUser(username string) error {
-	_, err := s.db.Exec("DELETE FROM users WHERE username = ?", username)
-	s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
-	return err
+// deleteUser 原子删除用户并清其会话。admin 仅在「删除后仍至少剩 1 个 admin」时才删——
+// 末位 admin 守卫下推进单条 SQL,杜绝两个 admin 并发互删各自通过「先 count 再 delete」的
+// 非原子预检、最终把管理员清零。返回是否实际删除(false 且 err==nil = 被守卫拦下或用户不存在)。
+func (s *Store) deleteUser(username string) (bool, error) {
+	res, err := s.db.Exec(
+		`DELETE FROM users
+		 WHERE username = ?
+		   AND (role != 'admin' OR (SELECT COUNT(*) FROM users WHERE role = 'admin') > 1)`,
+		username)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
+	}
+	return n > 0, nil
 }
 
 // countAdmins 用于防止删掉最后一个管理员。
