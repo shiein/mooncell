@@ -59,20 +59,69 @@ func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取数据失败"})
 		return
 	}
+	user, role, _ := a.currentUser(r)
+	// 普通用户:仅下发授权应用;审计/文件柜/备份 mock 不下发(真实备份走 Agent API)。
+	allowed := map[string]bool{}
+	if !isAdmin(role) {
+		ids, err := a.store.userAppIDs(user)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取授权失败"})
+			return
+		}
+		for _, id := range ids {
+			allowed[id] = true
+		}
+	}
 	out := map[string][]json.RawMessage{
 		"apps": {}, "releases": {}, "backups": {}, "cabinet": {}, "audit": {},
 	}
 	for kind, arr := range grouped {
-		if key, ok := keyOfKind[kind]; ok {
-			if kind == "app" {
-				for i := range arr {
-					arr[i] = redactAppSecrets(arr[i]) // secret 明文不经读路径外泄给任何角色
-				}
-			}
-			out[key] = arr
+		key, ok := keyOfKind[kind]
+		if !ok {
+			continue
 		}
+		if !isAdmin(role) {
+			// 非 admin 只看应用(+关联发布记录);不看文件柜/审计/本地备份元数据。
+			if kind == "cabinet" || kind == "audit" || kind == "backup" {
+				continue
+			}
+			if kind == "app" || kind == "release" {
+				arr = filterByAppAccess(arr, allowed, kind)
+			}
+		}
+		if kind == "app" {
+			for i := range arr {
+				arr[i] = redactAppSecrets(arr[i]) // secret 明文不经读路径外泄给任何角色
+			}
+		}
+		out[key] = arr
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// filterByAppAccess 按授权 app id 过滤实体;app 看 id,release 看 appId。
+func filterByAppAccess(arr []json.RawMessage, allowed map[string]bool, kind string) []json.RawMessage {
+	if len(allowed) == 0 {
+		return []json.RawMessage{}
+	}
+	out := make([]json.RawMessage, 0, len(arr))
+	for _, raw := range arr {
+		var probe struct {
+			ID    string `json:"id"`
+			AppID string `json:"appId"`
+		}
+		if json.Unmarshal(raw, &probe) != nil {
+			continue
+		}
+		key := probe.ID
+		if kind == "release" {
+			key = probe.AppID
+		}
+		if allowed[key] {
+			out = append(out, raw)
+		}
+	}
+	return out
 }
 
 // listAudit 处理 GET /api/audit?offset=&limit=:倒序(最近在前)分页审计,返回 {items,total}。

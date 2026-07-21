@@ -181,15 +181,13 @@ func TestFetchReleaseRecordReconcile(t *testing.T) {
 	}
 }
 
-// RBAC:operator 不能访问 admin-only;可访问 write 路由;viewer 被 write 路由拦截。
+// RBAC:普通用户不能访问 admin-only;requireRole("admin","user") 放行非 admin。
 func TestRequireRole(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()
-	s.createUser("op", "pw", "operator")
-	s.createUser("vw", "pw", "viewer")
+	s.createUser("op", "pw", "user")
 	a := &api{store: s}
 	opTok, _ := s.createSession("op")
-	vwTok, _ := s.createSession("vw")
 
 	ok := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }
 	hit := func(h http.HandlerFunc, tok string) int {
@@ -201,13 +199,54 @@ func TestRequireRole(t *testing.T) {
 	}
 
 	if c := hit(a.requireRole("admin")(ok), opTok); c != http.StatusForbidden {
-		t.Errorf("operator 访问 admin 路由应 403,得 %d", c)
+		t.Errorf("user 访问 admin 路由应 403,得 %d", c)
 	}
-	if c := hit(a.requireRole("admin", "operator")(ok), opTok); c != http.StatusOK {
-		t.Errorf("operator 访问 write 路由应 200,得 %d", c)
+	if c := hit(a.requireRole("admin", "user")(ok), opTok); c != http.StatusOK {
+		t.Errorf("user 访问 user 路由应 200,得 %d", c)
 	}
-	if c := hit(a.requireRole("admin", "operator")(ok), vwTok); c != http.StatusForbidden {
-		t.Errorf("viewer 访问 write 路由应 403,得 %d", c)
+}
+
+// user_apps 授权:set/list/has;requireAppOp 对未授权应用 403。
+func TestUserAppACL(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	if err := s.createUser("u1", "pw", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.setUserApps("u1", []string{"app-a", "app-b"}); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := s.userAppIDs("u1")
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("userAppIDs: %v %v", ids, err)
+	}
+	if !s.userHasApp("u1", "app-a") || s.userHasApp("u1", "app-x") {
+		t.Fatal("userHasApp 判断错误")
+	}
+	// 全量替换
+	if err := s.setUserApps("u1", []string{"app-c"}); err != nil {
+		t.Fatal(err)
+	}
+	if s.userHasApp("u1", "app-a") || !s.userHasApp("u1", "app-c") {
+		t.Fatal("setUserApps 应全量替换")
+	}
+
+	a := &api{store: s}
+	tok, _ := s.createSession("u1")
+	ok := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }
+	hit := func(appID string) int {
+		req := httptest.NewRequest("GET", "/api/agent/apps/"+appID+"/status", nil)
+		req.SetPathValue("id", appID)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+		w := httptest.NewRecorder()
+		a.requireAppOp(ok)(w, req)
+		return w.Code
+	}
+	if c := hit("app-c"); c != http.StatusOK {
+		t.Errorf("授权应用应 200,得 %d", c)
+	}
+	if c := hit("app-a"); c != http.StatusForbidden {
+		t.Errorf("未授权应用应 403,得 %d", c)
 	}
 }
 

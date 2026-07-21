@@ -481,7 +481,7 @@ function ConfigTab({ app }) {
             <Btn size="sm" variant="ghost" disabled={saving} onClick={() => { setDraft(app); setEdit(false); }}>取消</Btn>
             <Btn size="sm" variant="primary" icon={saving ? undefined : "check"} disabled={saving} onClick={save}>{saving ? "预检中…" : "保存配置"}</Btn>
           </div>
-        ) : (store.can("write") ? <Btn size="sm" icon="settings" onClick={() => setEdit(true)}>编辑</Btn> : null)}
+        ) : (store.can("manage") ? <Btn size="sm" icon="settings" onClick={() => setEdit(true)}>编辑</Btn> : null)}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
         <div style={sec}>基本</div>

@@ -5,16 +5,16 @@ import { AGENT } from '../lib/data.js';
 import { useAgent } from '../lib/agent.js';
 
 const NAV_ITEMS = [
-  { id: "overview", label: "总览", en: "Overview", icon: "gauge" },
+  { id: "overview", label: "总览", en: "Overview", icon: "gauge", adminOnly: true },
   { id: "apps", label: "应用", en: "Applications", icon: "box" },
-  { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder" },
-  { id: "audit", label: "审计日志", en: "Audit", icon: "shield" },
+  { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder", adminOnly: true },
+  { id: "audit", label: "审计日志", en: "Audit", icon: "shield", adminOnly: true },
   { id: "agents", label: "Agent 管理", en: "Agents", icon: "server", adminOnly: true },
   { id: "users", label: "用户管理", en: "Users", icon: "user", adminOnly: true },
   { id: "system", label: "系统", en: "System", icon: "settings", adminOnly: true },
 ];
 
-const ROLE_LABEL = { admin: "管理员", operator: "运维", viewer: "只读" };
+const ROLE_LABEL = { admin: "管理员", user: "用户", operator: "用户", viewer: "用户" };
 
 function MoonLogo({ size = 26 }) {
   return (

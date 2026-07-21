@@ -83,64 +83,68 @@ func main() {
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("GET /api/session", a.session)
 
-	// RBAC:读类接口任意已登录角色可访;改类(部署/还原/下线/改数据)限 admin/operator;
-	// 用户管理限 admin。viewer 只读。
-	writeRoles := a.requireRole("admin", "operator")
+	// RBAC:
+	// - admin:全量
+	// - 普通用户:仅授权应用的部署/还原/启停/查看;不可新建/删除/改配置;不可访文件柜/审计/Agent/系统
+	adminOnly := a.requireRole("admin")
+	appOp := a.requireAppOp // 部署/还原/启停:admin 或已授权用户
+	// 分块上传服务于部署,任意已登录可上传(部署时再校验应用授权)。
+	anyLogin := a.requireAuth
 
 	// Agent 代理(需登录):Console 持共享 token 调用本机/远端 Agent,前端只与 Console 通信。
-	mux.HandleFunc("GET /api/agent/ping", a.requireAuth(a.agentProxy("/api/ping")))
-	mux.HandleFunc("GET /api/agent/capabilities", a.requireAuth(a.agentProxy("/api/capabilities")))
-	mux.HandleFunc("GET /api/agent/system", a.requireAuth(a.agentProxy("/api/system")))
-	mux.HandleFunc("GET /api/agent/precheck", a.requireAuth(a.agentPrecheck))
-	// 分块上传(断点续传):大制品先分块传到 Console,完成后用 uploadId 触发部署。限 write。
-	mux.HandleFunc("POST /api/upload/start", writeRoles(a.uploadStart))
-	mux.HandleFunc("PUT /api/upload/{uploadId}", writeRoles(a.uploadChunk))
-	mux.HandleFunc("GET /api/upload/{uploadId}", writeRoles(a.uploadStatus))
-	mux.HandleFunc("DELETE /api/upload/{uploadId}", writeRoles(a.uploadAbort))
-	mux.HandleFunc("POST /api/agent/apps/{id}/deploy/stream", writeRoles(a.agentDeployStream))
-	mux.HandleFunc("GET /api/agent/apps/{id}/status", a.requireAuth(a.agentAppStatus))
-	mux.HandleFunc("POST /api/agent/apps/{id}/lifecycle", writeRoles(a.agentLifecycle))
-	mux.HandleFunc("DELETE /api/agent/apps/{id}", writeRoles(a.agentUndeploy))
-	mux.HandleFunc("DELETE /api/apps/{id}", writeRoles(a.appDelete)) // 权威删除:Agent 下线 + 删元数据 + 审计
-	mux.HandleFunc("GET /api/agent/apps/{id}/backups", a.requireAuth(a.agentListBackups))
-	mux.HandleFunc("POST /api/agent/apps/{id}/restore/stream", writeRoles(a.agentRestoreStream))
-	mux.HandleFunc("GET /api/agent/apps/{id}/logs/stream", a.requireAuth(a.agentLogStream))
-	mux.HandleFunc("GET /api/agent/apps/{id}/logs/download", a.requireAuth(a.agentLogDownload))
-	mux.HandleFunc("GET /api/agent/apps/{id}/logs/file/stream", a.requireAuth(a.agentLogFileStream))
+	mux.HandleFunc("GET /api/agent/ping", anyLogin(a.agentProxy("/api/ping")))
+	mux.HandleFunc("GET /api/agent/capabilities", anyLogin(a.agentProxy("/api/capabilities")))
+	mux.HandleFunc("GET /api/agent/system", anyLogin(a.agentProxy("/api/system")))
+	mux.HandleFunc("GET /api/agent/precheck", anyLogin(a.agentPrecheck))
+	// 分块上传(断点续传):大制品先分块传到 Console,完成后用 uploadId 触发部署。
+	mux.HandleFunc("POST /api/upload/start", anyLogin(a.uploadStart))
+	mux.HandleFunc("PUT /api/upload/{uploadId}", anyLogin(a.uploadChunk))
+	mux.HandleFunc("GET /api/upload/{uploadId}", anyLogin(a.uploadStatus))
+	mux.HandleFunc("DELETE /api/upload/{uploadId}", anyLogin(a.uploadAbort))
+	mux.HandleFunc("POST /api/agent/apps/{id}/deploy/stream", appOp(a.agentDeployStream))
+	mux.HandleFunc("GET /api/agent/apps/{id}/status", appOp(a.agentAppStatus))
+	mux.HandleFunc("POST /api/agent/apps/{id}/lifecycle", appOp(a.agentLifecycle))
+	mux.HandleFunc("DELETE /api/agent/apps/{id}", adminOnly(a.agentUndeploy))
+	mux.HandleFunc("DELETE /api/apps/{id}", adminOnly(a.appDelete)) // 权威删除:Agent 下线 + 删元数据 + 审计
+	mux.HandleFunc("GET /api/agent/apps/{id}/backups", appOp(a.agentListBackups))
+	mux.HandleFunc("POST /api/agent/apps/{id}/restore/stream", appOp(a.agentRestoreStream))
+	mux.HandleFunc("GET /api/agent/apps/{id}/logs/stream", appOp(a.agentLogStream))
+	mux.HandleFunc("GET /api/agent/apps/{id}/logs/download", appOp(a.agentLogDownload))
+	mux.HandleFunc("GET /api/agent/apps/{id}/logs/file/stream", appOp(a.agentLogFileStream))
 
-	// 业务数据持久化:读(hydrate)任意角色;写限 admin/operator。
-	mux.HandleFunc("POST /api/data", a.requireAuth(a.hydrate))
-	mux.HandleFunc("GET /api/audit", a.requireAuth(a.listAudit)) // 审计倒序分页(hydrate 只带最近一窗)
-	mux.HandleFunc("PUT /api/apps/{id}/config", writeRoles(a.putAppConfig)) // 类型化应用配置写入(服务端校验)
-	mux.HandleFunc("PUT /api/data/{kind}/{id}", writeRoles(a.putEntity))
-	mux.HandleFunc("DELETE /api/data/{kind}/{id}", writeRoles(a.deleteEntity))
+	// 业务数据:hydrate 按角色过滤应用;写配置/实体限 admin。
+	mux.HandleFunc("POST /api/data", anyLogin(a.hydrate))
+	mux.HandleFunc("GET /api/audit", adminOnly(a.listAudit))
+	mux.HandleFunc("PUT /api/apps/{id}/config", adminOnly(a.putAppConfig))
+	mux.HandleFunc("PUT /api/data/{kind}/{id}", adminOnly(a.putEntity))
+	mux.HandleFunc("DELETE /api/data/{kind}/{id}", adminOnly(a.deleteEntity))
 
 	// 用户管理(仅 admin)
-	mux.HandleFunc("GET /api/users", a.requireRole("admin")(a.listUsers))
-	mux.HandleFunc("POST /api/users", a.requireRole("admin")(a.createUser))
-	mux.HandleFunc("DELETE /api/users/{username}", a.requireRole("admin")(a.deleteUser))
+	mux.HandleFunc("GET /api/users", adminOnly(a.listUsers))
+	mux.HandleFunc("POST /api/users", adminOnly(a.createUser))
+	mux.HandleFunc("PUT /api/users/{username}", adminOnly(a.updateUser))
+	mux.HandleFunc("DELETE /api/users/{username}", adminOnly(a.deleteUser))
 
-	// 多 Agent 管理:列表任意登录可见;增删限 admin;ping 任意登录可测。
-	mux.HandleFunc("GET /api/agents", a.requireAuth(a.listAgents))
-	mux.HandleFunc("POST /api/agents", a.requireRole("admin")(a.addAgent))
-	mux.HandleFunc("DELETE /api/agents/{id}", a.requireRole("admin")(a.deleteAgent))
-	mux.HandleFunc("GET /api/agents/{id}/ping", a.requireAuth(a.pingAgent))
-	mux.HandleFunc("GET /api/agents/{id}/metrics", a.requireAuth(a.listAgentMetrics)) // 资源水位历史(巡检留存)
+	// 多 Agent 管理:仅 admin
+	mux.HandleFunc("GET /api/agents", adminOnly(a.listAgents))
+	mux.HandleFunc("POST /api/agents", adminOnly(a.addAgent))
+	mux.HandleFunc("DELETE /api/agents/{id}", adminOnly(a.deleteAgent))
+	mux.HandleFunc("GET /api/agents/{id}/ping", adminOnly(a.pingAgent))
+	mux.HandleFunc("GET /api/agents/{id}/metrics", adminOnly(a.listAgentMetrics))
 
-	// Agent 自更新:升级包按架构上传/列出(列表任意登录可见,上传与推送限 admin)。
-	mux.HandleFunc("GET /api/agent-binaries", a.requireAuth(a.listAgentBinaries))
-	mux.HandleFunc("POST /api/agent-binary", a.requireRole("admin")(a.uploadAgentBinary))
-	mux.HandleFunc("POST /api/agents/{id}/update", a.requireRole("admin")(a.updateAgent))
+	// Agent 自更新:仅 admin
+	mux.HandleFunc("GET /api/agent-binaries", adminOnly(a.listAgentBinaries))
+	mux.HandleFunc("POST /api/agent-binary", adminOnly(a.uploadAgentBinary))
+	mux.HandleFunc("POST /api/agents/{id}/update", adminOnly(a.updateAgent))
 
-	// Console 自更新:管理员从浏览器直传新 Console 二进制(含内嵌前端),本地校验后替换自身并 self-exec
-	// 就地重启(同 PID,适配 nohup 无监管场景)。info 供前端展示当前版本 + 升级后轮询确认重启完成。
-	mux.HandleFunc("GET /api/console/info", a.requireAuth(a.consoleInfo))
-	mux.HandleFunc("POST /api/console/self-update", a.requireRole("admin")(a.selfUpdate))
+	// Console 自更新:仅 admin
+	mux.HandleFunc("GET /api/console/info", adminOnly(a.consoleInfo))
+	mux.HandleFunc("POST /api/console/self-update", adminOnly(a.selfUpdate))
 
-	// 文件柜:上传/删除限 write;按 id 下载需登录;公开文件凭码免登录下载。
-	mux.HandleFunc("POST /api/cabinet", writeRoles(a.uploadCabinet))
-	mux.HandleFunc("GET /api/cabinet/{id}/download", a.requireAuth(a.downloadCabinet))
-	mux.HandleFunc("DELETE /api/cabinet/{id}", writeRoles(a.deleteCabinet))
+	// 文件柜:仅 admin;公开文件凭码免登录下载。
+	mux.HandleFunc("POST /api/cabinet", adminOnly(a.uploadCabinet))
+	mux.HandleFunc("GET /api/cabinet/{id}/download", adminOnly(a.downloadCabinet))
+	mux.HandleFunc("DELETE /api/cabinet/{id}", adminOnly(a.deleteCabinet))
 	mux.HandleFunc("GET /api/pubfile/{code}", a.downloadByCode)   // 独立前缀,避免与 /api/cabinet/{id}/... 冲突
 	mux.HandleFunc("GET /api/pubfile/{code}/meta", a.pubfileMeta) // 凭码校验 + 文件信息(不计下载数),供 /drop 页用
 	mux.HandleFunc("POST /api/pub/cabinet", a.uploadCabinetAnon)  // 匿名上传(需 cabinet.anon_upload=true)

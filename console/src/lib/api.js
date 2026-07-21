@@ -62,6 +62,16 @@ async function createUser(payload) {
   return d;
 }
 
+async function updateUser(username, payload) {
+  const r = await fetch(`/api/users/${encodeURIComponent(username)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload), credentials: 'same-origin',
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '更新失败');
+  return d;
+}
+
 async function deleteUser(username) {
   const r = await fetch(`/api/users/${encodeURIComponent(username)}`, {
     method: 'DELETE', credentials: 'same-origin',
@@ -482,7 +492,7 @@ async function consoleSelfUpdate(file, version, sha256) {
 
 export {
   login, logout, getSession,
-  listUsers, createUser, deleteUser,
+  listUsers, createUser, updateUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,

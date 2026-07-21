@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"log"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -70,6 +71,11 @@ func openDB(cfg *Config) *Store {
 			disk     REAL
 		);
 		CREATE INDEX IF NOT EXISTS idx_metrics_agent_ts ON metrics(agent_id, ts);
+		CREATE TABLE IF NOT EXISTS user_apps (
+			username TEXT NOT NULL,
+			app_id   TEXT NOT NULL,
+			PRIMARY KEY (username, app_id)
+		);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
 	}
@@ -213,9 +219,10 @@ func (s *Store) seedAdmin(username, password string) {
 
 // UserInfo 是用户列表对外形态(不含口令哈希)。
 type UserInfo struct {
-	Username  string `json:"username"`
-	Role      string `json:"role"`
-	CreatedAt int64  `json:"createdAt"`
+	Username  string   `json:"username"`
+	Role      string   `json:"role"`
+	CreatedAt int64    `json:"createdAt"`
+	AppIDs    []string `json:"appIds"` // 授权访问的应用;admin 忽略(全量)
 }
 
 func (s *Store) userRole(username string) string {
@@ -238,6 +245,11 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 		if err := rows.Scan(&u.Username, &u.Role, &u.CreatedAt); err != nil {
 			return nil, err
 		}
+		apps, err := s.userAppIDs(u.Username)
+		if err != nil {
+			return nil, err
+		}
+		u.AppIDs = apps
 		out = append(out, u)
 	}
 	return out, rows.Err()
@@ -255,7 +267,70 @@ func (s *Store) createUser(username, password, role string) error {
 	return err // UNIQUE 冲突 → 用户名已存在
 }
 
-// deleteUser 原子删除用户并清其会话。admin 仅在「删除后仍至少剩 1 个 admin」时才删——
+// setUserApps 全量替换用户的应用授权列表(先删后插)。
+func (s *Store) setUserApps(username string, appIDs []string) error {
+	if _, err := s.db.Exec("DELETE FROM user_apps WHERE username = ?", username); err != nil {
+		return err
+	}
+	for _, id := range appIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, err := s.db.Exec("INSERT INTO user_apps (username, app_id) VALUES (?, ?)", username, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) userAppIDs(username string) ([]string, error) {
+	rows, err := s.db.Query("SELECT app_id FROM user_apps WHERE username = ? ORDER BY app_id", username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// userHasApp 判断非 admin 用户是否被授权访问某应用。
+func (s *Store) userHasApp(username, appID string) bool {
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM user_apps WHERE username = ? AND app_id = ?", username, appID).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// updateUserPassword 更新口令;password 空则跳过。
+func (s *Store) updateUserPassword(username, password string) error {
+	if strings.TrimSpace(password) == "" {
+		return nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec("UPDATE users SET password_hash = ? WHERE username = ?", string(hash), username)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// deleteUser 原子删除用户并清其会话与应用授权。admin 仅在「删除后仍至少剩 1 个 admin」时才删——
 // 末位 admin 守卫下推进单条 SQL,杜绝两个 admin 并发互删各自通过「先 count 再 delete」的
 // 非原子预检、最终把管理员清零。返回是否实际删除(false 且 err==nil = 被守卫拦下或用户不存在)。
 func (s *Store) deleteUser(username string) (bool, error) {
@@ -270,6 +345,7 @@ func (s *Store) deleteUser(username string) (bool, error) {
 	n, _ := res.RowsAffected()
 	if n > 0 {
 		s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
+		s.db.Exec("DELETE FROM user_apps WHERE username = ?", username)
 	}
 	return n > 0, nil
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// listUsers 处理 GET /api/users(admin):列出全部用户(不含口令)。
+// listUsers 处理 GET /api/users(admin):列出全部用户(不含口令,含授权应用)。
 func (a *api) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := a.store.listUsers()
 	if err != nil {
@@ -16,12 +16,13 @@ func (a *api) listUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"users": users})
 }
 
-// createUser 处理 POST /api/users(admin):新建用户。
+// createUser 处理 POST /api/users(admin):新建普通用户(用户名、密码、授权应用)。
+// 角色固定为 user;管理员仅由 config 种入或库内既有 admin,不经此接口再造。
 func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username string   `json:"username"`
+		Password string   `json:"password"`
+		AppIDs   []string `json:"appIds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -32,15 +33,53 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "用户名或密码不能为空"})
 		return
 	}
-	if !validRoles[body.Role] {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法角色(admin/operator/viewer)"})
-		return
-	}
-	if err := a.store.createUser(body.Username, body.Password, body.Role); err != nil {
+	if err := a.store.createUser(body.Username, body.Password, "user"); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "创建失败:用户名可能已存在"})
 		return
 	}
-	a.store.appendAudit(a.sessionUser(r), "创建用户", body.Username+"("+body.Role+")", "成功")
+	if err := a.store.setUserApps(body.Username, normalizeAppIDs(body.AppIDs)); err != nil {
+		// 用户已建但授权失败:回滚用户,避免半成品账号。
+		a.store.deleteUser(body.Username)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入应用授权失败"})
+		return
+	}
+	a.store.appendAudit(a.sessionUser(r), "创建用户", body.Username, "成功")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// updateUser 处理 PUT /api/users/{username}(admin):更新口令(可选)与应用授权。
+// 不可改角色。admin 账号的 appIds 写入无意义但允许(前端通常不展示)。
+func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
+	target := strings.TrimSpace(r.PathValue("username"))
+	if target == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少用户名"})
+		return
+	}
+	if a.store.userRole(target) == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "用户不存在"})
+		return
+	}
+	var body struct {
+		Password string    `json:"password"` // 非空则改密
+		AppIDs   *[]string `json:"appIds"`   // 非 nil 则全量替换授权
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	if strings.TrimSpace(body.Password) != "" {
+		if err := a.store.updateUserPassword(target, body.Password); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新密码失败"})
+			return
+		}
+	}
+	if body.AppIDs != nil {
+		if err := a.store.setUserApps(target, normalizeAppIDs(*body.AppIDs)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新应用授权失败"})
+			return
+		}
+	}
+	a.store.appendAudit(a.sessionUser(r), "更新用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -57,8 +96,7 @@ func (a *api) deleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不能删除最后一个管理员"})
 		return
 	}
-	// 原子删除:即便上面的预检因并发互删而失效(两 admin 各自看到 count=2 都放行),
-	// deleteUser 内的末位 admin 守卫也会拦下,deleted=false 即此刻已是最后一个 admin。
+	// 原子删除:即便上面的预检因并发互删而失效,deleteUser 内末位 admin 守卫也会拦下。
 	deleted, err := a.store.deleteUser(target)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "删除失败"})
@@ -70,4 +108,18 @@ func (a *api) deleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	a.store.appendAudit(me, "删除用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func normalizeAppIDs(ids []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }

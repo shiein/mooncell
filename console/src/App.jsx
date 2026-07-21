@@ -63,6 +63,12 @@ function App() {
     setRoute(r);
     try { localStorage.setItem("mc_route", JSON.stringify(r)); } catch (e) {}
   };
+  // 非 admin 仅允许应用相关页;旧路由/深链落到 overview 等时回落到 apps。
+  React.useEffect(() => {
+    if (!session || role === "admin") return;
+    const allowed = new Set(["apps", "app-detail"]);
+    if (!allowed.has(route.page)) nav("apps");
+  }, [session, role, route.page]);
 
   // ---- domain state ----
   // 初始为 mock,登录后从后端水合(首启用 mock 作种子,后续取持久化数据);后端不可达则保留 mock。
@@ -136,8 +142,14 @@ function App() {
   const store = {
     user, role, nav, route,
     apps, releases, backups, cabinet, audit,
-    // 角色权限:write = operator/admin 可改;admin = 仅管理员(用户管理)。viewer 只读。
-    can: (perm) => (perm === "admin" ? role === "admin" : role !== "viewer"),
+    // 权限:
+    // - admin/manage: 仅管理员(用户/Agent/系统/新建删除/改配置)
+    // - write: 任意已登录(部署/还原/启停);细粒度应用 ACL 由服务端强制
+    can: (perm) => {
+      if (perm === "admin" || perm === "manage") return role === "admin";
+      if (perm === "write") return !!role;
+      return true;
+    },
 
     // real:经 Agent 的真机部署。其审计由 Console 服务端权威落库;前端 addAudit 只乐观显示不落库。
     // 三态:success / rolledback(失败已回滚到旧版本)/ failed(失败且未能回滚)——不坍缩。

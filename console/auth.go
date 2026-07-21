@@ -109,7 +109,8 @@ func (a *api) session(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"user": username, "role": a.store.userRole(username)})
 }
 
-var validRoles = map[string]bool{"admin": true, "operator": true, "viewer": true}
+// isAdmin 判定管理员。历史 operator/viewer 均视为普通用户(按 user_apps 授权)。
+func isAdmin(role string) bool { return role == "admin" }
 
 // isPassiveRequest 判断是否为后台轮询类请求(系统指标 2.5s / 应用状态 10s)。
 // 这类不是"用户动作",不触发会话滑动续期——否则开着页面挂机也永不闲置超时,违背"闲置 1h 退出"。
@@ -135,10 +136,16 @@ func (a *api) currentUser(r *http.Request) (string, string, bool) {
 }
 
 // requireRole 包裹需要特定角色的接口:未登录 401,角色不符 403。
+// "admin" 精确匹配;"user" 匹配所有非 admin(含历史 operator/viewer)。
 func (a *api) requireRole(allowed ...string) func(http.HandlerFunc) http.HandlerFunc {
-	allow := map[string]bool{}
+	allowAdmin, allowUser := false, false
 	for _, role := range allowed {
-		allow[role] = true
+		switch role {
+		case "admin":
+			allowAdmin = true
+		case "user", "operator", "viewer":
+			allowUser = true
+		}
 	}
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -147,11 +154,42 @@ func (a *api) requireRole(allowed ...string) func(http.HandlerFunc) http.Handler
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 				return
 			}
-			if !allow[role] {
+			okRole := (allowAdmin && isAdmin(role)) || (allowUser && !isAdmin(role))
+			if !okRole {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "权限不足:需要 " + strings.Join(allowed, "/") + " 角色"})
 				return
 			}
 			next(w, r)
 		}
 	}
+}
+
+// requireAppOp 要求对路径中 {id} 应用可操作:admin 全放行;普通用户须在 user_apps 授权内。
+// 用于部署/还原/启停等应用级写操作。
+func (a *api) requireAppOp(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, role, ok := a.currentUser(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
+			return
+		}
+		if isAdmin(role) {
+			next(w, r)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" || !a.store.userHasApp(user, id) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权操作该应用"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// canAccessApp 读路径:admin 全放行;普通用户须授权。
+func (a *api) canAccessApp(user, role, appID string) bool {
+	if isAdmin(role) {
+		return true
+	}
+	return appID != "" && a.store.userHasApp(user, appID)
 }

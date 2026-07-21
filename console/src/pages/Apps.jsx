@@ -406,7 +406,7 @@ function AppsPage() {
   return (
     <div>
       <PageHead title="应用 Applications" desc={`${apps.length} 个应用 · ${counts.running} 运行 / ${counts.failed} 异常 / ${counts.stopped} 停止`}
-        actions={store.can("write") ? <Btn variant="primary" icon="plus" onClick={() => setCreating(true)}>新建应用</Btn> : null} />
+        actions={store.can("manage") ? <Btn variant="primary" icon="plus" onClick={() => setCreating(true)}>新建应用</Btn> : null} />
 
       <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
         <div style={{ position: "relative", width: 280 }}>
@@ -463,7 +463,7 @@ function AppsPage() {
                 <td onClick={(e) => e.stopPropagation()}>
                   <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                     {store.can("write") ? <Btn size="sm" icon="upload" onClick={() => setDeployApp(a)}>部署</Btn> : null}
-                    {store.can("write") ? <Btn variant="ghost" size="sm" icon="trash" title="删除应用" onClick={() => onDelete(a)}></Btn> : null}
+                    {store.can("manage") ? <Btn variant="ghost" size="sm" icon="trash" title="删除应用" onClick={() => onDelete(a)}></Btn> : null}
                     <Btn variant="ghost" size="sm" icon="chevronR" onClick={() => store.nav("app-detail", { appId: a.id })}></Btn>
                   </div>
                 </td>
