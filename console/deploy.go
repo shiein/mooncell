@@ -63,9 +63,7 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 	if app.Port < 0 || app.Port > 65535 {
 		return "端口越界(0–65535)", false
 	}
-	if app.BackupKeep < 0 || app.BackupKeep > 100 {
-		return "备份保留份数应为 0–100", false
-	}
+	// backupKeep 已固定为 10(服务端部署时强制),不再校验用户传入值;兼容旧数据中的任意数。
 	if a.resolveAgentByID(app.AgentID) == nil {
 		return "目标 Agent 不存在: " + app.AgentID, false
 	}
@@ -134,8 +132,9 @@ func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	m["id"] = id           // 实体 id 以路径为准,防 body 改 id
-	stripEnvHasValue(m)    // hasValue 是读投影加的标记,不落库
+	m["id"] = id                // 实体 id 以路径为准,防 body 改 id
+	m["backupKeep"] = backupKeepFixed // 滚动保留固定 10 份,忽略客户端传入
+	stripEnvHasValue(m)         // hasValue 是读投影加的标记,不落库
 	// 与部署/启停/巡检写回同锁。对已存在应用:①保留 secret 原值——读路径已抹掉 secret 明文,
 	// 前端保存带回空值,空值语义为"保留原值"(要改则填新值);②保留服务端权威运行态字段——
 	// 前端改配置会把整份 app(含 hydrate 来的 status/pid/version 等旧运行态)发来,整段覆盖会
@@ -410,16 +409,16 @@ func deployFingerprint(app appConfig, sha, version, fpExtra string) string {
 	return "v2:" + string(b)
 }
 
+// backupKeepFixed 滚动备份固定保留份数(与 Agent backupKeepDefault 对齐)。
+// 不再按应用可配:避免「展示份数 / Agent 实际保留 / Tab 计数」三处漂移。
+const backupKeepFixed = 10
+
 func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID string) agentDeployConfig {
-	keep := int(app.BackupKeep)
-	if keep <= 0 {
-		keep = 5
-	}
 	cfg := agentDeployConfig{
 		Name: app.Name, Type: app.Type, Runner: app.Runner, Interpreter: app.Interp,
 		BinPath: appBinPath(app), Workdir: app.Workdir, User: app.User,
 		Health: healthSpec(app), Version: version, ReleaseID: releaseID,
-		ExpectedSha256: expectedSha256, BackupKeep: keep,
+		ExpectedSha256: expectedSha256, BackupKeep: backupKeepFixed,
 	}
 	// static/tomcat 的部署后 reload 钩子:服务端按类型映射白名单动作名(+ 可选容器名,空则不下发)。
 	if rc, ra := reloadActionFor(app); rc != "" {

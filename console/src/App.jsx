@@ -251,7 +251,7 @@ function App() {
     async updateApp(id, patch) {
       const norm = { ...patch };
       if (norm.port !== undefined) norm.port = Number(norm.port) || 0;
-      if (norm.backupKeep !== undefined) norm.backupKeep = Number(norm.backupKeep) || 5;
+      if (norm.backupKeep !== undefined) norm.backupKeep = 10;
       const a0 = apps.find((x) => x.id === id) || {};
       const next = { ...a0, ...norm };
       const res = await saveAppConfig(next);

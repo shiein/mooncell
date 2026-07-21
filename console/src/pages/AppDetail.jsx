@@ -76,7 +76,7 @@ function OverviewTab({ app, releases }) {
           <InfoRow label="当前版本" mono>{app.version}</InfoRow>
           <InfoRow label="最近部署">{app.lastDeploy ? `${fmtTime(app.lastDeploy)}(${timeAgo(app.lastDeploy)})` : "从未部署"}</InfoRow>
           <InfoRow label="制品路径" mono>{app.path}</InfoRow>
-          <InfoRow label="备份策略">滚动保留 {app.backupKeep} 份 · 部署前自动备份</InfoRow>
+          <InfoRow label="备份策略">滚动保留 10 份 · 部署前自动备份</InfoRow>
         </div>
       </div>
 
@@ -157,7 +157,7 @@ function normAgentBackup(b, appId) {
   };
 }
 
-function BackupsTab({ app, onRestore }) {
+function BackupsTab({ app, onRestore, onCount }) {
   const store = useMC();
   const realBackups = isRealType(app.type);
   // 真实应用的备份来源只能是 Agent;接口失败也不能回退到 mock,否则会暴露假还原入口。
@@ -185,6 +185,10 @@ function BackupsTab({ app, onRestore }) {
     return () => { alive = false; };
   }, [app.id, app.type, app.agentId, realBackups]);
   const list = realBackups ? (realBaks || []) : store.backups.filter((b) => b.appId === app.id);
+  // 把列表真实条数回传给 Tab 角标:此前角标读 store.backups(mock/库),列表读 Agent,二者不一致。
+  React.useEffect(() => {
+    if (onCount) onCount(list.length);
+  }, [list.length, onCount]);
   const currentBackupState = realBackups && backupState === "mock" ? "loading" : backupState;
   const backupHint = realBackups
     ? (currentBackupState === "error" ? " · Agent 备份列表不可用" : currentBackupState === "loading" ? " · 正在读取 Agent 真实备份" : " · 来自 Agent 真实备份")
@@ -200,7 +204,7 @@ function BackupsTab({ app, onRestore }) {
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
         <div style={{ fontSize: 12.5, color: "var(--muted-fg)", flex: 1 }}>
-          每次部署/还原前自动备份至 <span className="code-chip">backups/{app.id}/</span> · 滚动保留 {app.backupKeep} 份{backupHint}
+          每次部署/还原前自动备份至 <span className="code-chip">backups/{app.id}/</span> · 滚动保留 10 份{backupHint}
         </div>
         {store.can("write") ? (
           <Btn size="sm" icon={backing ? undefined : "archive"} disabled={backing || realBackups} title={realBackups ? "真实备份在部署/还原时自动生成" : undefined} onClick={manualBackup}>
@@ -524,7 +528,7 @@ function ConfigTab({ app }) {
         </div>
         <div style={sec}>备份与钩子</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Field label="备份保留份数"><input className="input mono" disabled={!edit} value={draft.backupKeep} onChange={(e) => set("backupKeep", e.target.value)} /></Field>
+          <Field label="备份保留份数"><input className="input mono" disabled value="10" title="固定滚动保留 10 份" /></Field>
           <Field label="额外备份文件" hint="随制品一起备份的配置文件">
             <input className="input mono" style={{ fontSize: 12.5 }} disabled={!edit}
               value={(draft.extraFiles || []).join(", ")} onChange={(e) => set("extraFiles", e.target.value.split(/,\s*/).filter(Boolean))} />
@@ -570,10 +574,12 @@ function AppDetailPage({ appId, tab, onTab }) {
   const app = store.apps.find((a) => a.id === appId);
   const [deploying, setDeploying] = React.useState(false);
   const [restoreBackup, setRestoreBackup] = React.useState(null);
+  // bakCount 与 BackupsTab 列表同源:真实应用由 Agent 列表回传,演示应用用 store.backups。
+  const [bakCount, setBakCount] = React.useState(0);
+  const onBakCount = React.useCallback((n) => setBakCount(n), []);
   if (!app) return <EmptyState icon="box" title="应用不存在" action={<Btn onClick={() => store.nav("apps")}>返回列表</Btn>} />;
 
   const relCount = store.releases.filter((r) => r.appId === app.id).length;
-  const bakCount = store.backups.filter((b) => b.appId === app.id).length;
   // 启停只对进程类(go/java/python/node,有 systemd/pm2 单元);static 无进程、tomcat 容器托管(无单元),不显示。
   const canRun = isProcessType(app.type) && store.can("write");
   const canWrite = store.can("write");
@@ -603,7 +609,10 @@ function AppDetailPage({ appId, tab, onTab }) {
 
       {tab === "overview" ? <OverviewTab app={app} releases={store.releases} /> : null}
       {tab === "releases" ? <ReleasesTab app={app} /> : null}
-      {tab === "backups" ? <BackupsTab app={app} onRestore={setRestoreBackup} /> : null}
+      {/* BackupsTab 始终挂载(隐藏非当前 tab),以便角标与列表共用 Agent 真实计数,不因切 tab 丢数。 */}
+      <div style={{ display: tab === "backups" ? undefined : "none" }}>
+        <BackupsTab app={app} onRestore={setRestoreBackup} onCount={onBakCount} />
+      </div>
       {tab === "logs" ? <LogViewer app={app} key={app.id + app.status} /> : null}
       {tab === "config" ? <ConfigTab app={app} /> : null}
 

@@ -541,10 +541,13 @@ func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 	return dir, nil
 }
 
+// backupKeepDefault 滚动保留默认份数:Console 与 Agent 约定固定 10 份,缺省/非法值时兜底。
+const backupKeepDefault = 10
+
 // rotateBackups 按份数滚动保留(时间戳命名,字典序即时间序)。
 func (a *agent) rotateBackups(id string, keep int) {
 	if keep <= 0 {
-		keep = 5
+		keep = backupKeepDefault
 	}
 	dir := filepath.Join(a.cfg.Paths.BackupDir, id)
 	entries, err := os.ReadDir(dir)
@@ -1397,7 +1400,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 // rotateReleases 按份数滚动保留 release 目录;当前软链指向的目录永不删除。
 func (a *agent) rotateReleases(releasesDir string, keep int) {
 	if keep <= 0 {
-		keep = 5
+		keep = backupKeepDefault
 	}
 	entries, err := os.ReadDir(releasesDir)
 	if err != nil {

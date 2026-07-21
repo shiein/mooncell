@@ -81,7 +81,7 @@ function makeDeployPlan(app, opt) {
       `创建备份目录 backups/${app.id}/${ts}/`,
       `复制当前制品 ${basename(app.path.split(" ")[0])}`,
       ...app.extraFiles.map((f) => `附加文件 ${f}`),
-      `写入 meta.json · 关联 ${app.version} · 滚动保留 ${app.backupKeep} 份`,
+      `写入 meta.json · 关联 ${app.version} · 滚动保留 10 份`,
     ],
   });
   if (!isStatic) steps.push({ id: "stop", label: "停止服务", dur: 1600, logs: stopLogs(app) });

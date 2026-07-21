@@ -145,7 +145,7 @@ function CreateAppDialog({ open, onClose }) {
       reload: !!form.reload,
       nginxContainer: (form.nginxContainer || "").trim(),
       pm2Name: selectedRunner() === "pm2" ? (form.pm2Name || "").trim() : "",
-      backupKeep: +(form.backupKeep || 5), lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
+      backupKeep: 10, lastDeploy: null, uptime: "—", mem: "—", cpu: "—",
       artifactName: id, extraFiles: [],
     });
     // 落库被拒:保留对话框,让用户按 toast 报错修正后重试;成功才关闭。
@@ -302,8 +302,8 @@ function CreateAppDialog({ open, onClose }) {
             <Field label="端口" hint={type === "static-nginx" ? "静态站点填 nginx 对外端口,仅作记录展示,不参与预检与探活" : undefined}>
               <input className="input mono" placeholder="8080" value={form.port || ""} onChange={(e) => setForm({ ...form, port: e.target.value })} />
             </Field>
-            <Field label="备份保留份数">
-              <input className="input mono" placeholder="5" value={form.backupKeep || ""} onChange={(e) => setForm({ ...form, backupKeep: e.target.value })} />
+            <Field label="备份保留份数" hint="固定滚动保留 10 份">
+              <input className="input mono" value="10" disabled />
             </Field>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
