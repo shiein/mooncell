@@ -18,12 +18,20 @@ type Config struct {
 	Admin    AdminConfig    `toml:"admin"`
 	Agent    AgentConfig    `toml:"agent"`
 	Cabinet  CabinetConfig  `toml:"cabinet"`
-	AgentBin AgentBinConfig `toml:"agent_bin"`
-	Demo     DemoConfig     `toml:"demo"`
-	Deploy   DeployUpload   `toml:"deploy"`
-	Audit    AuditConfig    `toml:"audit"`
-	Monitor  MonitorConfig  `toml:"monitor"`
-	Security SecurityConfig `toml:"security"`
+	// LegacyArtifact 仅用于升级时定位并清理已下线的制品仓库存量；不再提供任何制品仓库功能。
+	LegacyArtifact LegacyArtifactConfig `toml:"artifact"`
+	AgentBin       AgentBinConfig       `toml:"agent_bin"`
+	Demo           DemoConfig           `toml:"demo"`
+	Deploy         DeployUpload         `toml:"deploy"`
+	Audit          AuditConfig          `toml:"audit"`
+	Monitor        MonitorConfig        `toml:"monitor"`
+	Security       SecurityConfig       `toml:"security"`
+}
+
+// LegacyArtifactConfig 兼容读取旧版 [artifact].dir，供一次性移除旧表与落盘字节。
+// 保留这个窄配置映射可清理自定义目录，避免功能删除后永久遗留不可管理的大文件。
+type LegacyArtifactConfig struct {
+	Dir string `toml:"dir"`
 }
 
 // SecurityConfig:传输安全硬化。RequireTLSAgents 开启后拒绝注册非 loopback 的明文(http)Agent——
@@ -102,15 +110,16 @@ const (
 
 func loadConfig(path string) *Config {
 	cfg := &Config{
-		Server:   ServerConfig{Addr: "127.0.0.1", Port: 8787},
-		Database: DatabaseConfig{Path: "mooncell.db"},
-		Session:  SessionConfig{TTLHours: 1}, // 闲置 1 小时无动作自动退出(滑动续期)
-		Admin:    AdminConfig{Username: "admin", Password: defaultAdminPassword},
-		Agent:    AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
-		Cabinet:  CabinetConfig{Dir: "cabinet", MaxUploadMB: 300},
-		Deploy:   DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
-		Audit:    AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
-		Monitor:  MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
+		Server:         ServerConfig{Addr: "127.0.0.1", Port: 8787},
+		Database:       DatabaseConfig{Path: "mooncell.db"},
+		Session:        SessionConfig{TTLHours: 1}, // 闲置 1 小时无动作自动退出(滑动续期)
+		Admin:          AdminConfig{Username: "admin", Password: defaultAdminPassword},
+		Agent:          AgentConfig{Addr: "127.0.0.1:9100", Token: defaultAgentToken},
+		Cabinet:        CabinetConfig{Dir: "cabinet", MaxUploadMB: 300},
+		LegacyArtifact: LegacyArtifactConfig{Dir: "artifacts"},
+		Deploy:         DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
+		Audit:          AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
+		Monitor:        MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
 	}
 	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败(语法错误/权限等)→ 直接退出。
 	// 显式对外监听时若仍使用周知默认密码/token,同样拒绝启动。

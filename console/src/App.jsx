@@ -72,10 +72,17 @@ function App() {
   }, [clampRoute]);
 
   // 会话失效统一回登录页:任何请求 401(闲置 1h 超时 / 关浏览器后 cookie 失效)→ 清状态并提示重新登录。
+  // 角色数据必须同步清空,否则同一浏览器切换账号时会短暂看到上一账号的应用/审计等缓存。
   React.useEffect(() => {
     setUnauthorizedHandler(() => {
       setSession((cur) => {
-        if (cur) { setView("login"); toast("会话已过期,请重新登录", { tone: "warn", icon: "alert" }); }
+        if (cur) {
+          setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
+          setBackupRevision({});
+          setRole("viewer");
+          setView("login");
+          toast("会话已过期,请重新登录", { tone: "warn", icon: "alert" });
+        }
         return null;
       });
     });
@@ -93,21 +100,24 @@ function App() {
   }, [session, role, clampRoute]);
 
   // ---- domain state ----
-  // 初始为 mock,登录后从后端水合(首启用 mock 作种子,后续取持久化数据);后端不可达则保留 mock。
-  const [apps, setApps] = React.useState(INITIAL_APPS);
-  const [releases, setReleases] = React.useState(INITIAL_RELEASES);
-  const [backups, setBackups] = React.useState(INITIAL_BACKUPS);
-  const [cabinet, setCabinet] = React.useState(INITIAL_CABINET);
-  const [audit, setAudit] = React.useState(INITIAL_AUDIT);
-  const hydratedRef = React.useRef(false);
+  // 角色作用域数据默认空,登录后从后端权威水合。INITIAL_* 只作为 demo seed 发给后端,
+  // 绝不在认证/ACL 数据尚未返回时直接渲染,避免账号切换时暴露上一账号或演示数据。
+  const [apps, setApps] = React.useState([]);
+  const [releases, setReleases] = React.useState([]);
+  const [backups, setBackups] = React.useState([]);
+  const [cabinet, setCabinet] = React.useState([]);
+  const [audit, setAudit] = React.useState([]);
+  const [backupRevision, setBackupRevision] = React.useState({});
   React.useEffect(() => {
-    if (!session || hydratedRef.current) return;
-    hydratedRef.current = true;
+    if (!session) return;
+    let alive = true;
+    // 每次会话身份/角色变化先 fail-closed 清空,再加载该身份可见的数据。
+    setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
     hydrateData({
       apps: INITIAL_APPS, releases: INITIAL_RELEASES, backups: INITIAL_BACKUPS,
       cabinet: INITIAL_CABINET, audit: INITIAL_AUDIT,
     }).then((data) => {
-      if (!data) return; // 后端不可达:保留 mock,页面照常 1:1
+      if (!alive || !data) return;
       const byTimeDesc = (arr) => [...(arr || [])].sort((a, b) => (b.time || 0) - (a.time || 0));
       // 后端可达即以库为准(即便为空):空库必须清空 mock,否则生产环境会一直显示演示应用。
       setApps(data.apps || []); // apps 保持插入顺序
@@ -116,7 +126,8 @@ function App() {
       setCabinet(byTimeDesc(data.cabinet));
       setAudit(byTimeDesc(data.audit));
     });
-  }, [session]);
+    return () => { alive = false; };
+  }, [session, role]);
 
   // 周期性重拉应用列表:后台巡检更新的 status/pid、其他用户的增改删都会反映,不必重新登录。
   // 只覆盖 apps(不动 releases/audit 等视图,避免打断浏览);AppDetail 编辑用独立 draft,不受影响。
@@ -130,7 +141,7 @@ function App() {
       }).then((data) => { if (data && data.apps) setApps(data.apps); });
     }, 5000);
     return () => clearInterval(iv);
-  }, [session]);
+  }, [session, role]);
 
   // 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅 console 告警,不打断 UI)。
   // app 走类型化校验入口(saveAppConfig),其余走通用 putEntity。
@@ -163,7 +174,7 @@ function App() {
 
   const store = {
     user, role, nav, route,
-    apps, releases, backups, cabinet, audit,
+    apps, releases, backups, cabinet, audit, backupRevision,
     // 权限:
     // - admin/manage: 仅管理员(用户/Agent/系统/新建删除/改配置)
     // - write: 任意已登录(部署/还原/启停);细粒度应用 ACL 由服务端强制
@@ -180,7 +191,7 @@ function App() {
       const backup = { id: "b" + now, appId: app.id, version: app.version, time: now, size: size || "—", auto: true, operator: user, dir: tsDir(now), note: "" };
       const release = { id: "r" + now, appId: app.id, version, status: result, time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" };
       // 真实部署:release 由 Console 服务端权威落库、backup 在 Agent 真实生成;前端只乐观显示不落库。
-      setBackups((s) => [backup, ...s]); if (!real) persist("backup", backup);
+      if (!real) { setBackups((s) => [backup, ...s]); persist("backup", backup); }
       setReleases((s) => [release, ...s]); // release 服务端权威,前端不落库(刷新读服务端记录)
       // 真机操作:status/version 由 Console 服务端权威落库,前端仅本地即时显示(patchAppLocal,不 persist)。
       const setState = real ? patchAppLocal : patchApp;
@@ -216,7 +227,7 @@ function App() {
       const now = Date.now();
       const bak = { id: "b" + now, appId: app.id, version: app.version, time: now, size: backup.size, auto: true, operator: user, dir: tsDir(now), note: "还原前自动备份" };
       // 真实还原:还原前备份在 Agent 真实生成、release 由服务端落库;前端只乐观显示。
-      setBackups((s) => [bak, ...s]); if (!real) persist("backup", bak);
+      if (!real) { setBackups((s) => [bak, ...s]); persist("backup", bak); }
       // 真机还原:status/version 由 Console 服务端权威落库,前端仅本地即时显示。
       (real ? patchAppLocal : patchApp)(app.id, {
         version: backup.version, lastDeploy: now,
@@ -324,6 +335,11 @@ function App() {
       toast("备份已删除", { icon: "trash" });
     },
 
+    // 真机部署/还原结束后递增应用备份版本号,驱动 BackupsTab 重新读取 Agent 权威列表。
+    refreshBackups(appId) {
+      setBackupRevision((s) => ({ ...s, [appId]: (s[appId] || 0) + 1 }));
+    },
+
     // 真实上传:后端已落盘 + 写元数据,这里把返回条目插入前端状态(size 转人类可读)。
     pushCabinetFile(meta, anon) {
       const f = { ...meta, size: fmtBytes(meta.size), downloads: meta.downloads || 0 };
@@ -354,6 +370,9 @@ function App() {
   const login = (res) => {
     if (!res || !res.user) return; // 防御:无后端返回不进入主壳
     const r = res.role || "viewer";
+    // 先清空上一会话的角色数据,再切换身份；同一批 React 更新不会渲染旧账号数据。
+    setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
+    setBackupRevision({});
     setSession(res.user);
     setRole(r);
     setRoute((cur) => clampRoute(cur, r)); // 同步钳制,避免先闪 admin-only 页
@@ -362,7 +381,9 @@ function App() {
   };
   const logout = async () => {
     await apiLogout();
-    setSession(null); setView("login");
+    setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
+    setBackupRevision({});
+    setSession(null); setRole("viewer"); setView("login");
   };
 
   // ---- crumbs ----

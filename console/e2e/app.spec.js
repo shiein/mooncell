@@ -55,6 +55,34 @@ test('登出回到登录页', async ({ page }) => {
   await expect(usernameInput(page)).toBeVisible({ timeout: 8000 });
 });
 
+test('admin 切换普通用户后只展示授权应用且不显示 Agent 功能', async ({ page }) => {
+  await login(page);
+  for (const app of [
+    { id: 'acl-allowed', name: 'ACL 已授权应用' },
+    { id: 'acl-denied', name: 'ACL 未授权应用' },
+  ]) {
+    await page.request.put(`/api/apps/${app.id}/config`, {
+      data: { ...app, type: 'native-binary', runner: 'systemd', status: 'stopped', version: 'v1', path: `/srv/apps/${app.id}/app`, backupKeep: 10, logPaths: [] },
+    });
+  }
+  const created = await page.request.post('/api/users', {
+    data: { username: 'acl-user', password: 'acl-pass', appIds: ['acl-allowed'] },
+  });
+  expect(created.ok()).toBeTruthy();
+
+  await page.getByTitle('退出登录').click();
+  await usernameInput(page).fill('acl-user');
+  await page.locator('input[type="password"]').fill('acl-pass');
+  await page.getByRole('button', { name: '登录' }).click();
+  await expect(usernameInput(page)).toHaveCount(0);
+
+  await expect(page.getByText('ACL 已授权应用')).toBeVisible();
+  await expect(page.getByText('ACL 未授权应用')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /新建应用/ })).toHaveCount(0);
+  await expect(page.getByText('本机 Agent')).toHaveCount(0);
+  await expect(page.getByText(/Agent 在线|Agent 不可达|Agent 探测中/)).toHaveCount(0);
+});
+
 test('新建应用 Runner 按真实能力置灰(pm2 不可用)', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: '应用', exact: true }).click();
@@ -211,6 +239,28 @@ test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ p
   await bakTab.click();
   // 备份失败态:显示错误提示,不回退/不显示 mock 备份
   await expect(page.getByText(/无法读取真实备份|Agent 备份列表不可用|Agent 不可达/).first()).toBeVisible({ timeout: 8000 });
+});
+
+test('真实部署结束后主动刷新备份列表与角标', async ({ page }) => {
+  await login(page);
+  await page.request.put('/api/apps/e2e-refresh/config', {
+    data: { id: 'e2e-refresh', name: 'E2E 备份刷新', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v0', path: '/srv/apps/e2e-refresh/app', backupKeep: 10, logPaths: [] },
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '应用', exact: true }).click();
+  await page.getByText('E2E 备份刷新').click();
+  const bakTab = page.locator('button.tab').filter({ hasText: '备份' });
+  await bakTab.click();
+  await expect(page.getByText('v-old')).toBeVisible();
+
+  await page.getByRole('button', { name: /部署新版本/ }).click();
+  await page.locator('input[type="file"]').setInputFiles({ name: 'app.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('e2e-artifact') });
+  await page.getByRole('button', { name: /开始部署/ }).click();
+  await expect(page.getByText('部署成功 · v1 已上线', { exact: true })).toBeVisible({ timeout: 8000 });
+  await page.getByText('关闭', { exact: true }).click();
+
+  await expect(page.getByText('v-new')).toBeVisible({ timeout: 8000 });
+  await expect(bakTab).toContainText('2');
 });
 
 // 回归:static-nginx 新建必须真正落库、刷新后仍在。曾因两处叠加变成「假建」——

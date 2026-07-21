@@ -63,8 +63,8 @@ function Sidebar({ page, onNav, user, role, onLogout, agent }) {
 
       <div style={{ flex: 1 }}></div>
 
-      {/* Agent 状态卡 */}
-      <div className="card" style={{ padding: "10px 12px", marginBottom: 10 }}>
+      {/* Agent 状态仅管理员可见；普通用户的产品边界只有授权应用。 */}
+      {role === "admin" ? <div className="card" style={{ padding: "10px 12px", marginBottom: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7, whiteSpace: "nowrap" }}>
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, flex: "none" }} className={online ? "pulse-dot" : ""}></span>
           <span style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{AGENT.name}</span>
@@ -82,7 +82,7 @@ function Sidebar({ page, onNav, user, role, onLogout, agent }) {
             </React.Fragment>
           )}
         </div>
-      </div>
+      </div> : null}
 
       <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 8px" }}>
         <div style={{
@@ -99,7 +99,7 @@ function Sidebar({ page, onNav, user, role, onLogout, agent }) {
   );
 }
 
-function Topbar({ crumbs, theme, onTheme, right, agent }) {
+function Topbar({ crumbs, theme, onTheme, right, agent, role }) {
   // Agent 在线状态三态:null=探测中(灰) / true=在线(绿) / false=不可达(红)。
   // 旧实现硬编码绿色"Agent 在线",Agent 实际离线时仍显示在线,误导运维判断。
   const online = agent ? agent.online : null;
@@ -122,7 +122,7 @@ function Topbar({ crumbs, theme, onTheme, right, agent }) {
       </div>
       <div style={{ flex: 1 }}></div>
       {right}
-      <Badge tone={agentBadge.tone} dot><span className="mono" style={{ fontSize: 11 }}>{agentBadge.label}</span></Badge>
+      {role === "admin" ? <Badge tone={agentBadge.tone} dot><span className="mono" style={{ fontSize: 11 }}>{agentBadge.label}</span></Badge> : null}
       <Btn variant="ghost" icon={theme === "dark" ? "sun" : "moon"} onClick={onTheme} title="切换亮/暗主题"></Btn>
     </header>
   );
@@ -130,12 +130,13 @@ function Topbar({ crumbs, theme, onTheme, right, agent }) {
 
 function Shell({ page, onNav, crumbs, theme, onTheme, user, role, onLogout, children, topRight }) {
   // 单一 Agent 状态源,顶栏与左卡共用一份轮询(避免双份 poller),二者显示天然一致。
-  const agent = useAgent();
+  // enabled=false 时 hook 不发任何 admin-only Agent 请求,普通用户不会产生无意义的 403 轮询。
+  const agent = useAgent(role === "admin");
   return (
     <div className="shell">
       <Sidebar page={page} onNav={onNav} user={user} role={role} onLogout={onLogout} agent={agent} />
       <div className="main">
-        <Topbar crumbs={crumbs} theme={theme} onTheme={onTheme} right={topRight} agent={agent} />
+        <Topbar crumbs={crumbs} theme={theme} onTheme={onTheme} right={topRight} agent={agent} role={role} />
         <div className="content"><div className="content-inner" key={page}>{children}</div></div>
       </div>
     </div>

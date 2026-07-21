@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -873,6 +874,34 @@ func TestRotateReleasesKeepsCurrent(t *testing.T) {
 	left, _ := os.ReadDir(releasesDir)
 	if len(left) > 3 {
 		t.Errorf("滚动后剩余 %d 个,应 ≤ 3(2 份 + 受保护当前)", len(left))
+	}
+}
+
+// 产品统一策略：静态站点 release 就是可还原备份，默认滚动后必须只剩最近 10 份。
+func TestRotateReleasesDefaultKeepsTen(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "site")
+	releasesDir := binPath + "-releases"
+	for i := 1; i <= 12; i++ {
+		name := fmt.Sprintf("202601%02d_000000.000000001", i)
+		if err := os.MkdirAll(filepath.Join(releasesDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := switchSymlink(filepath.Join(releasesDir, "20260112_000000.000000001"), binPath); err != nil {
+		t.Fatal(err)
+	}
+
+	(&agent{}).rotateReleases(releasesDir, releaseKeepDefault)
+	left, err := os.ReadDir(releasesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 10 {
+		t.Fatalf("静态 release 默认应保留 10 份，got %d", len(left))
+	}
+	if fileExists(filepath.Join(releasesDir, "20260101_000000.000000001")) || fileExists(filepath.Join(releasesDir, "20260102_000000.000000001")) {
+		t.Fatal("应淘汰最旧的两份 release")
 	}
 }
 

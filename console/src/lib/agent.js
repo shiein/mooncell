@@ -5,12 +5,17 @@ import React from 'react';
 import { AGENT } from './data.js';
 import { getAgentCapabilities, getAgentSystem, getAgentPing, listAgentNodes } from './api.js';
 
-function useAgent() {
+function useAgent(enabled = true) {
   const [caps, setCaps] = React.useState(AGENT.caps); // 默认 mock,取到真实后覆盖
   const [system, setSystem] = React.useState(null);   // {cpuPercent, memPercent, disk...}
   const [online, setOnline] = React.useState(null);   // null=探测中, true/false
 
   React.useEffect(() => {
+    if (!enabled) {
+      setSystem(null);
+      setOnline(null);
+      return;
+    }
     let alive = true;
     Promise.all([getAgentPing(), getAgentCapabilities()]).then(([ping, c]) => {
       if (!alive) return;
@@ -24,7 +29,7 @@ function useAgent() {
     poll();
     const iv = setInterval(poll, 2500);
     return () => { alive = false; clearInterval(iv); };
-  }, []);
+  }, [enabled]);
 
   return { caps, system, online };
 }

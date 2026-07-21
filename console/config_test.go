@@ -1,9 +1,22 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadConfigReadsLegacyArtifactDirForRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[artifact]\ndir = \"/srv/mooncell/old-artifacts\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(path)
+	if cfg.LegacyArtifact.Dir != "/srv/mooncell/old-artifacts" {
+		t.Fatalf("应读取旧 artifact.dir 供迁移清理，got %q", cfg.LegacyArtifact.Dir)
+	}
+}
 
 func TestUnsafeConsoleConfigReason(t *testing.T) {
 	cfg := &Config{

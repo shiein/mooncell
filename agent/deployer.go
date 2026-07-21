@@ -544,8 +544,8 @@ func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 // backupKeepDefault 备份滚动保留默认份数(与 Console backupKeepFixed 对齐)。
 const backupKeepDefault = 10
 
-// releaseKeepDefault 静态站点 release 目录滚动保留份数(与备份独立;历史默认 5,避免与备份 10 绑死占盘)。
-const releaseKeepDefault = 5
+// releaseKeepDefault 静态站点 release 即其可还原备份，按产品统一策略滚动保留 10 份。
+const releaseKeepDefault = 10
 
 // rotateBackups 按份数滚动保留(时间戳命名,字典序即时间序)。
 func (a *agent) rotateBackups(id string, keep int) {
@@ -1359,7 +1359,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	var hlog []string
 	if reloadOK && healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
-		// 软链 release 按独立份数滚动(不与备份 BackupKeep 共用,避免备份 10 份连带 release 占盘翻倍)
+		// 静态站点以 release 目录作为可还原备份，同样固定滚动保留 10 份。
 		a.rotateReleases(releasesDir, releaseKeepDefault)
 		res.Result = "success"
 		return res

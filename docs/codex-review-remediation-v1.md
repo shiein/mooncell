@@ -10,51 +10,10 @@
 
 按"真实可利用性 + 修复成本"排序,不按 Codex 原 P1/P2 标签:
 
-1. **T1** 制品库部署参数传错(功能直接坏,一行修)
-2. **T2** pm2Name denylist + **T3** externalBind 只认 loopback(两个真安全面,改动小)
-3. **T4** pm2 接管复校 deploy_roots + **T5** 部署锁扩容到启停/下线 + **T6** 自更新 busy 门禁(纵深 + 竞态,可与 **T7** upload truncate 一批)
-4. **T8/T9** 前端状态三态化(Topbar 假在线 + 失败伪装)
-5. **T10** nohup 启动用户文档化 + PM 的备份/任务中心(后续迭代)
-
----
-
-## T1 · 制品库部署参数错位(功能不可用)【最高优先】
-
-- **严重度**:高(整条"从制品库部署"路径不可用)
-- **证据**:`console/src/lib/api.js:361`、`console/src/components/pipeline.jsx:370`
-
-### 根因
-`deployViaAgentStream` 签名第 7 位才是 `artifactId`:
-
-```js
-async function deployViaAgentStream(appId, version, releaseId, file, onEvent, onUpload, artifactId)
-```
-
-调用处只传到第 6 位,把 `pickedArt.id` 落进了 `onUpload` 槽,`artifactId` 永远 `undefined`:
-
-```js
-const res = await deployViaAgentStream(app.id, version, releaseId, realFile,
-  (type, data) => {...}, pickedArt ? pickedArt.id : null);   // ← 第6个参数
-```
-
-后续 `if (artifactId)` 永远 false → 走 file 分支,而选制品时 `realFile` 为 null → `fd.append('artifact', null)`,提交空制品。
-
-### 修复
-把 `artifactId` 放到第 7 位(`onUpload` 显式给 `undefined`,或后续接真实上传进度回调):
-
-```js
-const res = await deployViaAgentStream(app.id, version, releaseId, realFile,
-  (type, data) => {...}, undefined, pickedArt ? pickedArt.id : null);
-```
-
-> 可选更稳:把 `deployViaAgentStream` 尾部参数改 options 对象 `{ onUpload, artifactId }`,杜绝位置错位再犯。
-
-### 影响面 / 回滚
-- 仅前端调用约定,不动后端。回滚 = 还原这一行。
-
-### 验收
-- 选制品库已留存制品 → 部署成功,Agent 收到非空 `artifactId`(后端 `prepareDeploy` 走制品库分支)。
-- 上传新文件部署仍正常(回归)。
+1. **T2** pm2Name denylist + **T3** externalBind 只认 loopback(两个真安全面,改动小)
+2. **T4** pm2 接管复校 deploy_roots + **T5** 部署锁扩容到启停/下线 + **T6** 自更新 busy 门禁(纵深 + 竞态,可与 **T7** upload truncate 一批)
+3. **T8/T9** 前端状态三态化(Topbar 假在线 + 失败伪装)
+4. **T10** nohup 启动用户文档化 + PM 的备份/任务中心(后续迭代)
 
 ---
 
@@ -326,10 +285,9 @@ systemd 路径用 `cfg.User` 降权;nohup 的 `nohupSpec` 没有 user 字段,启
 | Console 数据一键备份 + 自更新前强提示 | 高 | 与 **T6** 天然成对,`mooncell.db` 单文件下载即备份,优先做 |
 | 全局任务中心 | 中 | `busy` map 已是雏形,升级为带类型/进度的在飞任务视图,顺便当 T5/T6 门禁数据源 |
 | 部署前容量门禁(磁盘水位×制品大小×备份保留) | 中 | 需 Agent 磁盘指标(已有 system 接口)+ 阻断/二次确认 |
-| 制品库增强(类型/版本/架构,按应用类型过滤 + 一键重部署) | 中 | 正常迭代,无架构障碍 |
 | 应用克隆/模板(复制配置改名/端口/路径 + 强制预检) | 中 | 正常迭代 |
 | 巡检事件中心(掉线/恢复从审计提炼为运维事件) | 中 | 需先定存储模型(注意审计已不完整,见健康巡检约束),别急 |
-| 存储治理(artifacts/cabinet/backups 占用 + 未引用/过期提示) | 中 | 需数据沉淀,后置 |
+| 存储治理(cabinet/backups 占用 + 未引用/过期提示) | 中 | 需数据沉淀,后置 |
 
 ---
 
@@ -337,7 +295,6 @@ systemd 路径用 `cfg.User` 降权;nohup 的 `nohupSpec` 没有 user 字段,启
 
 | 任务 | 改前端 | 改后端 | 行为/兼容变更 | 需更新文档 |
 |---|---|---|---|---|
-| T1 | ✅ | — | 否 | — |
 | T2 | — | ✅ | 收紧(罕见命名被拒) | — |
 | T3 | — | ✅(console+agent) | **是**(绑非 loopback 须改凭据) | README/升级说明 |
 | T4 | — | ✅ | 收紧(白名单外目标被拒) | — |

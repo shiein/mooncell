@@ -363,6 +363,8 @@ function DeployDialog({ app, open, onClose }) {
       const res = await deployViaAgentStream(app.id, version, releaseId, realFile, (type, data) => {
         if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
       });
+      // Agent 可能已在部署前生成备份；无论最终成功、回滚还是流失败，都重新读取权威列表。
+      store.refreshBackups(app.id);
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
       store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result || "failed", real: true });
@@ -547,6 +549,8 @@ function RestoreDialog({ app, backup, open, onClose }) {
       const res = await restoreViaAgentStream(app.id, backup.version, backup.dir, releaseId, (type, data) => {
         if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
       });
+      // 还原流水线同样会先备份当前版本，结束后刷新真实列表与角标。
+      store.refreshBackups(app.id);
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
       if (res.result === "success") store.finishRestore(app, backup, { real: true });

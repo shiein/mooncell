@@ -160,6 +160,7 @@ function normAgentBackup(b, appId) {
 function BackupsTab({ app, onRestore, onCount }) {
   const store = useMC();
   const realBackups = isRealType(app.type);
+  const backupRevision = (store.backupRevision && store.backupRevision[app.id]) || 0;
   // 真实应用的备份来源只能是 Agent;接口失败也不能回退到 mock,否则会暴露假还原入口。
   const [realBaks, setRealBaks] = React.useState(realBackups ? [] : null);
   const [backupState, setBackupState] = React.useState(realBackups ? "loading" : "mock");
@@ -183,7 +184,7 @@ function BackupsTab({ app, onRestore, onCount }) {
       setBackupState("mock");
     }
     return () => { alive = false; };
-  }, [app.id, app.type, app.agentId, realBackups]);
+  }, [app.id, app.type, app.agentId, realBackups, backupRevision]);
   const list = realBackups ? (realBaks || []) : store.backups.filter((b) => b.appId === app.id);
   // 把列表真实条数回传给 Tab 角标:此前角标读 store.backups(mock/库),列表读 Agent,二者不一致。
   React.useEffect(() => {

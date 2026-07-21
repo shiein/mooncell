@@ -55,6 +55,11 @@ func main() {
 
 	store := openDB(cfg)
 	defer store.Close()
+	if removed, err := store.removeLegacyArtifacts(cfg.LegacyArtifact.Dir); err != nil {
+		log.Fatalf("[db] 清理已下线制品仓库失败: %v", err)
+	} else if removed > 0 {
+		log.Printf("[db] 已移除旧制品仓库存量 %d 个及 artifacts 表", removed)
+	}
 	store.seedAdmin(cfg.Admin.Username, cfg.Admin.Password)
 
 	maxUpload := int64(cfg.Deploy.MaxUploadMB) << 20
