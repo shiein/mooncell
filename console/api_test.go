@@ -206,6 +206,50 @@ func TestRequireRole(t *testing.T) {
 	}
 }
 
+// listUsers 在 MaxOpenConns(1) 下不得嵌套查询:原先 rows 未关就查 user_apps 会死锁整库。
+func TestListUsersNoNestedQueryDeadlock(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	if err := s.createUser("admin1", "pw", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.createUser("u1", "pw", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.setUserApps("u1", []string{"app-a", "app-b"}); err != nil {
+		t.Fatal(err)
+	}
+	// 若实现仍嵌套 Query,此处会永久阻塞(测试表现为超时)。
+	done := make(chan struct{})
+	var users []UserInfo
+	var err error
+	go func() {
+		users, err = s.listUsers()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("listUsers 超时:疑似 MaxOpenConns(1) 下嵌套查询死锁")
+	}
+	if err != nil {
+		t.Fatalf("listUsers: %v", err)
+	}
+	if len(users) < 2 {
+		t.Fatalf("应至少 2 用户,got %d", len(users))
+	}
+	var u1 *UserInfo
+	for i := range users {
+		if users[i].Username == "u1" {
+			u1 = &users[i]
+			break
+		}
+	}
+	if u1 == nil || len(u1.AppIDs) != 2 {
+		t.Fatalf("u1 应有 2 个授权应用,got %+v", u1)
+	}
+}
+
 // 删应用时清理 user_apps 中对应 app_id。
 func TestDeleteUserAppsByApp(t *testing.T) {
 	s := testStore(t)

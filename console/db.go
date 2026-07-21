@@ -250,25 +250,51 @@ func (s *Store) userRole(username string) string {
 }
 
 func (s *Store) listUsers() ([]UserInfo, error) {
+	// 注意:db.SetMaxOpenConns(1)。禁止在 rows 未 Close 时再 Query——会占死唯一连接,
+	// 用户管理页无限 loading,随后登录/hydrate 全部挂起。
 	rows, err := s.db.Query("SELECT username, role, created_at FROM users ORDER BY created_at")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []UserInfo{}
 	for rows.Next() {
 		var u UserInfo
 		if err := rows.Scan(&u.Username, &u.Role, &u.CreatedAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		apps, err := s.userAppIDs(u.Username)
-		if err != nil {
-			return nil, err
-		}
-		u.AppIDs = apps
+		u.AppIDs = []string{}
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// 批量拉授权,再按用户填入(一次查询,无嵌套)。
+	appRows, err := s.db.Query("SELECT username, app_id FROM user_apps ORDER BY username, app_id")
+	if err != nil {
+		return nil, err
+	}
+	defer appRows.Close()
+	byUser := map[string][]string{}
+	for appRows.Next() {
+		var user, appID string
+		if err := appRows.Scan(&user, &appID); err != nil {
+			return nil, err
+		}
+		byUser[user] = append(byUser[user], appID)
+	}
+	if err := appRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if apps, ok := byUser[out[i].Username]; ok {
+			out[i].AppIDs = apps
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) createUser(username, password, role string) error {
