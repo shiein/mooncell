@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -40,6 +41,18 @@ func main() {
 	}
 
 	cfg := loadConfig("config.toml")
+
+	// 单实例锁:双开会争 sqlite(MaxOpenConns=1),登录等请求可无限挂起(浏览器一直 pending)。
+	// 自更新后若旧进程未退干净又拉起新进程,最常见症状就是「登录一直转圈」。
+	lockPath := cfg.Database.Path + ".lock"
+	if cfg.Database.Path == "" {
+		lockPath = "mooncell.db.lock"
+	}
+	instanceLock, err := acquireInstanceLock(lockPath)
+	if err != nil {
+		log.Fatalf("[server] %v", err)
+	}
+	defer instanceLock.Close()
 
 	store := openDB(cfg)
 	defer store.Close()
@@ -136,8 +149,8 @@ func main() {
 	mux.HandleFunc("POST /api/agent-binary", adminOnly(a.uploadAgentBinary))
 	mux.HandleFunc("POST /api/agents/{id}/update", adminOnly(a.updateAgent))
 
-	// Console 自更新:仅 admin
-	mux.HandleFunc("GET /api/console/info", adminOnly(a.consoleInfo))
+	// Console 自更新:info 任意登录可读(升级后轮询确认重启);上传自更新限 admin。
+	mux.HandleFunc("GET /api/console/info", anyLogin(a.consoleInfo))
 	mux.HandleFunc("POST /api/console/self-update", adminOnly(a.selfUpdate))
 
 	// 文件柜:仅 admin;公开文件凭码免登录下载。
@@ -164,6 +177,24 @@ func main() {
 	if err := http.ListenAndServe(addr, securityHeaders(mux)); err != nil {
 		log.Fatalf("[server] %v", err)
 	}
+}
+
+// acquireInstanceLock 对 lockPath 加排他文件锁(非阻塞)。已有实例时立即失败,避免双开抢 sqlite。
+// 锁随进程退出/Close 释放;syscall.Exec 自更新时 fd 默认 CLOEXEC,新映像会重新抢锁。
+func acquireInstanceLock(lockPath string) (*os.File, error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("无法创建实例锁 %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("已有 Console 实例在运行(锁 %s)。请先结束旧进程再启动,否则登录会一直卡住: %w", lockPath, err)
+	}
+	// 写入 PID 便于运维排查(锁本身以 flock 为准,不依赖文件内容)。
+	f.Truncate(0)
+	f.Seek(0, 0)
+	fmt.Fprintf(f, "%d\n", os.Getpid())
+	return f, nil
 }
 
 // securityHeaders 给所有响应注入基础安全头(纵深防御,内网/对外皆生效)。

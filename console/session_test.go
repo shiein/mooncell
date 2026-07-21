@@ -19,14 +19,14 @@ func TestSessionExpiry(t *testing.T) {
 	defer s.Close()
 
 	// 1. 闲置过期。
-	tok, _ := s.createSession("u")
+	tok, _, _ := s.createSession("u")
 	s.db.Exec("UPDATE sessions SET expires_at = ? WHERE token = ?", time.Now().Add(-time.Second).UnixMilli(), tok)
 	if _, ok := s.userByToken(tok); ok {
 		t.Fatal("闲置过期的会话应判失效")
 	}
 
 	// 2a. userByToken 不续期:临近过期的会话校验后 expires_at 不变。
-	tok2, _ := s.createSession("v")
+	tok2, _, _ := s.createSession("v")
 	near := time.Now().Add(30 * time.Second).UnixMilli()
 	s.db.Exec("UPDATE sessions SET expires_at = ? WHERE token = ?", near, tok2)
 	if _, ok := s.userByToken(tok2); !ok {
@@ -45,7 +45,7 @@ func TestSessionExpiry(t *testing.T) {
 	}
 
 	// 3. 绝对最长寿命:created_at 推到 max 之前 → 即便 expires_at 未到也失效。
-	tok3, _ := s.createSession("w")
+	tok3, _, _ := s.createSession("w")
 	s.db.Exec("UPDATE sessions SET created_at = ? WHERE token = ?", time.Now().Add(-sessionAbsoluteMax-time.Minute).UnixMilli(), tok3)
 	if _, ok := s.userByToken(tok3); ok {
 		t.Fatal("超过绝对最长寿命的会话应失效")

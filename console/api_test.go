@@ -187,7 +187,7 @@ func TestRequireRole(t *testing.T) {
 	defer s.Close()
 	s.createUser("op", "pw", "user")
 	a := &api{store: s}
-	opTok, _ := s.createSession("op")
+	opTok, _, _ := s.createSession("op")
 
 	ok := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }
 	hit := func(h http.HandlerFunc, tok string) int {
@@ -249,7 +249,7 @@ func TestUserAppACL(t *testing.T) {
 	}
 
 	a := &api{store: s}
-	tok, _ := s.createSession("u1")
+	tok, _, _ := s.createSession("u1")
 	ok := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }
 	hit := func(appID string) int {
 		req := httptest.NewRequest("GET", "/api/agent/apps/"+appID+"/status", nil)

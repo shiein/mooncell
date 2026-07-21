@@ -16,12 +16,28 @@ type Store struct {
 }
 
 func openDB(cfg *Config) *Store {
-	db, err := sql.Open("sqlite", cfg.Database.Path)
+	// busy_timeout:双开/自更新竞态下另一进程持锁时,避免登录等请求无限挂起(浏览器一直 pending)。
+	// 5s 内拿不到锁则返回 error,前端可报错而非转圈到超时。
+	dsn := cfg.Database.Path
+	if dsn == "" {
+		dsn = "mooncell.db"
+	}
+	// modernc.org/sqlite:查询串参数 _pragma=...
+	if !strings.Contains(dsn, "?") {
+		dsn += "?_pragma=busy_timeout(5000)"
+	} else {
+		dsn += "&_pragma=busy_timeout(5000)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatalf("[db] 打开数据库失败: %v", err)
 	}
 	// sqlite 写串行,限制连接数避免 "database is locked"
 	db.SetMaxOpenConns(1)
+	// 验证连接 + 再次声明 busy_timeout(部分驱动对 DSN pragma 支持不一,双保险)。
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		log.Printf("[db] 设置 busy_timeout 失败(可忽略): %v", err)
+	}
 
 	migrateDeploys(db) // 旧库 deploys(单列 release_id 主键)→ 复合主键前的一次性迁移
 
@@ -376,7 +392,7 @@ func (s *Store) verifyUser(username, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
-func (s *Store) createSession(username string) (string, time.Time) {
+func (s *Store) createSession(username string) (string, time.Time, error) {
 	token := randomToken()
 	now := time.Now()
 	exp := now.Add(s.ttl)
@@ -385,8 +401,9 @@ func (s *Store) createSession(username string) (string, time.Time) {
 		token, username, now.UnixMilli(), exp.UnixMilli(),
 	); err != nil {
 		log.Printf("[db] 写入会话失败: %v", err)
+		return "", time.Time{}, err
 	}
-	return token, exp
+	return token, exp, nil
 }
 
 // sessionAbsoluteMax 是会话绝对最长生命周期:即便持续有动作滑动续期,从登录起超过即失效、需重新登录(纵深防御)。

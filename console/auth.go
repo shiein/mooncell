@@ -67,7 +67,14 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, _ := a.store.createSession(username)
+	token, _, err := a.store.createSession(username)
+	if err != nil {
+		// 常见原因:另一 Console 实例占着 sqlite 锁(双开/僵尸进程),或磁盘满。
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "创建会话失败(数据库忙或不可写)。请确认只运行一个 Console 实例后重试",
+		})
+		return
+	}
 	// 不设 Expires/MaxAge → session cookie:浏览器关闭即清除,重开必须重新登录。
 	// 服务端另有闲置超时(滑动续期,见 userByToken),双重保证。
 	http.SetCookie(w, &http.Cookie{

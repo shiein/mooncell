@@ -18,7 +18,7 @@ func TestChunkedUploadResume(t *testing.T) {
 	if err := s.createUser("admin", "pw", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := s.createSession("admin")
+	tok, _, _ := s.createSession("admin")
 	a := &api{store: s, maxUpload: 64 << 20, uploads: map[string]*uploadSession{}}
 
 	mux := http.NewServeMux()
@@ -140,7 +140,7 @@ func TestUploadRequiresAppACL(t *testing.T) {
 	if err := s.createUser("u1", "pw", "user"); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := s.createSession("u1")
+	tok, _, _ := s.createSession("u1")
 	a := &api{store: s, maxUpload: 64 << 20, uploads: map[string]*uploadSession{}}
 
 	body, _ := json.Marshal(map[string]any{"filename": "x.bin", "size": 10, "appId": "nope"})

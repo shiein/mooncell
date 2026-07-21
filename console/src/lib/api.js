@@ -14,15 +14,28 @@ window.fetch = async (...args) => {
 };
 
 async function login(username, password) {
-  const r = await fetch('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-    credentials: 'same-origin',
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || '登录失败');
-  return data; // { user }
+  // 15s 超时:自更新后若另一实例占着 sqlite 或进程未真正起来,避免浏览器一直 pending。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      credentials: 'same-origin',
+      signal: ctrl.signal,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || '登录失败');
+    return data; // { user, role }
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      throw new Error('登录超时:服务无响应。若刚自更新,请确认只运行一个 Console 进程后重试');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function logout() {

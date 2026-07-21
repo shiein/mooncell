@@ -14,9 +14,15 @@ function LoginPage({ onLogin }) {
     setErr(""); setBusy(true);
     try {
       const res = await apiLogin(u, p); // { user, role }
+      if (!res || !res.user) {
+        setErr("登录响应异常,请刷新页面后重试");
+        return;
+      }
       onLogin(res);
     } catch (e) {
       setErr(e.message || "登录失败");
+    } finally {
+      // 成功进入主壳后 Login 会卸载;失败/异常必须清 busy,避免一直「登录中…」
       setBusy(false);
     }
   };
