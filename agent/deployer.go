@@ -541,8 +541,11 @@ func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 	return dir, nil
 }
 
-// backupKeepDefault 滚动保留默认份数:Console 与 Agent 约定固定 10 份,缺省/非法值时兜底。
+// backupKeepDefault 备份滚动保留默认份数(与 Console backupKeepFixed 对齐)。
 const backupKeepDefault = 10
+
+// releaseKeepDefault 静态站点 release 目录滚动保留份数(与备份独立;历史默认 5,避免与备份 10 绑死占盘)。
+const releaseKeepDefault = 5
 
 // rotateBackups 按份数滚动保留(时间戳命名,字典序即时间序)。
 func (a *agent) rotateBackups(id string, keep int) {
@@ -1356,8 +1359,8 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 	var hlog []string
 	if reloadOK && healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
-		// 软链 release 也按份数滚动清理
-		a.rotateReleases(releasesDir, cfg.BackupKeep)
+		// 软链 release 按独立份数滚动(不与备份 BackupKeep 共用,避免备份 10 份连带 release 占盘翻倍)
+		a.rotateReleases(releasesDir, releaseKeepDefault)
 		res.Result = "success"
 		return res
 	}
@@ -1400,7 +1403,7 @@ func (a *agent) runDeployStatic(cfg DeployConfig, artifact string, emit func(Ste
 // rotateReleases 按份数滚动保留 release 目录;当前软链指向的目录永不删除。
 func (a *agent) rotateReleases(releasesDir string, keep int) {
 	if keep <= 0 {
-		keep = backupKeepDefault
+		keep = releaseKeepDefault
 	}
 	entries, err := os.ReadDir(releasesDir)
 	if err != nil {

@@ -11,9 +11,14 @@ import (
 )
 
 // 分块上传 + 断点续传:顺序追加、乱序拒绝并给 nextIndex、重复幂等、收齐后可读出完整制品。
+// 须绑定 appId + 登录会话(uploadStart 鉴权)。
 func TestChunkedUploadResume(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()
+	if err := s.createUser("admin", "pw", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := s.createSession("admin")
 	a := &api{store: s, maxUpload: 64 << 20, uploads: map[string]*uploadSession{}}
 
 	mux := http.NewServeMux()
@@ -26,9 +31,27 @@ func TestChunkedUploadResume(t *testing.T) {
 	full := []byte(strings.Repeat("MOONCELL", 1000)) // 8000 字节
 	chunks := [][]byte{full[:3000], full[3000:6000], full[6000:]}
 
-	// start
+	withAuth := func(req *http.Request) {
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+	}
+
+	// start:无 appId 应 400
 	body, _ := json.Marshal(map[string]any{"filename": "app.bin", "size": len(full)})
-	r, _ := http.Post(srv.URL+"/api/upload/start", "application/json", bytes.NewReader(body))
+	req0, _ := http.NewRequest("POST", srv.URL+"/api/upload/start", bytes.NewReader(body))
+	req0.Header.Set("Content-Type", "application/json")
+	withAuth(req0)
+	r0, _ := http.DefaultClient.Do(req0)
+	if r0.StatusCode != http.StatusBadRequest {
+		t.Fatalf("无 appId 应 400,got %d", r0.StatusCode)
+	}
+	r0.Body.Close()
+
+	// start
+	body, _ = json.Marshal(map[string]any{"filename": "app.bin", "size": len(full), "appId": "demo"})
+	req, _ := http.NewRequest("POST", srv.URL+"/api/upload/start", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	withAuth(req)
+	r, _ := http.DefaultClient.Do(req)
 	var st struct {
 		UploadID string `json:"uploadId"`
 	}
@@ -39,6 +62,7 @@ func TestChunkedUploadResume(t *testing.T) {
 	}
 	put := func(idx int, data []byte) *http.Response {
 		req, _ := http.NewRequest("PUT", srv.URL+"/api/upload/"+st.UploadID+"?index="+itoa(idx), bytes.NewReader(data))
+		withAuth(req)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -79,7 +103,9 @@ func TestChunkedUploadResume(t *testing.T) {
 	put(2, chunks[2]).Body.Close()
 
 	// status:收齐
-	r2, _ := http.Get(srv.URL + "/api/upload/" + st.UploadID)
+	reqS, _ := http.NewRequest("GET", srv.URL+"/api/upload/"+st.UploadID, nil)
+	withAuth(reqS)
+	r2, _ := http.DefaultClient.Do(reqS)
 	var stat struct {
 		Received int64 `json:"received"`
 		Complete bool  `json:"complete"`
@@ -104,6 +130,26 @@ func TestChunkedUploadResume(t *testing.T) {
 	a.finishUpload(st.UploadID)
 	if _, ok := a.getUpload(st.UploadID); ok {
 		t.Error("finishUpload 后会话应删除")
+	}
+}
+
+// 非 admin 无应用授权时 upload/start 403。
+func TestUploadRequiresAppACL(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	if err := s.createUser("u1", "pw", "user"); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := s.createSession("u1")
+	a := &api{store: s, maxUpload: 64 << 20, uploads: map[string]*uploadSession{}}
+
+	body, _ := json.Marshal(map[string]any{"filename": "x.bin", "size": 10, "appId": "nope"})
+	req, _ := http.NewRequest("POST", "/api/upload/start", bytes.NewReader(body))
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+	w := httptest.NewRecorder()
+	a.uploadStart(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("无授权应 403,got %d body=%s", w.Code, w.Body.String())
 	}
 }
 

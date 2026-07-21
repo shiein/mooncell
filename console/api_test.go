@@ -206,6 +206,23 @@ func TestRequireRole(t *testing.T) {
 	}
 }
 
+// 删应用时清理 user_apps 中对应 app_id。
+func TestDeleteUserAppsByApp(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	s.createUser("u1", "pw", "user")
+	s.setUserApps("u1", []string{"app-a", "app-b"})
+	if err := s.deleteUserAppsByApp("app-a"); err != nil {
+		t.Fatal(err)
+	}
+	if s.userHasApp("u1", "app-a") {
+		t.Fatal("app-a 授权应已清")
+	}
+	if !s.userHasApp("u1", "app-b") {
+		t.Fatal("app-b 授权应保留")
+	}
+}
+
 // user_apps 授权:set/list/has;requireAppOp 对未授权应用 403。
 func TestUserAppACL(t *testing.T) {
 	s := testStore(t)

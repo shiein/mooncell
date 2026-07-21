@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +28,8 @@ type uploadSession struct {
 	Size      int64 // 客户端声明的总字节
 	Received  int64 // 已落盘字节
 	NextIndex int   // 下一个期望的块序号(0 起)
+	AppID     string // 绑定的目标应用:非 admin 必填;部署时与路径 app id 复验
+	Owner     string // 创建会话的用户,块上传/中止须本人
 	Created   time.Time
 	mu        sync.Mutex
 }
@@ -43,12 +46,19 @@ func (a *api) uploadDirPath() string {
 	return d
 }
 
-// uploadStart 处理 POST /api/upload/start {filename,size}:建会话与临时文件,返回 uploadId。
+// uploadStart 处理 POST /api/upload/start {filename,size,appId}:建会话与临时文件,返回 uploadId。
+// appId 绑定目标应用:非 admin 必须已授权该应用,防止零授权用户撑满临时盘。
 func (a *api) uploadStart(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	user, role, ok := a.currentUser(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
+		return
+	}
 	var req struct {
 		Filename string `json:"filename"`
 		Size     int64  `json:"size"`
+		AppID    string `json:"appId"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -56,6 +66,15 @@ func (a *api) uploadStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Size <= 0 || req.Size > a.maxUpload {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "声明大小超出上限或非法"})
+		return
+	}
+	appID := strings.TrimSpace(req.AppID)
+	if appID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 appId"})
+		return
+	}
+	if !a.canAccessApp(user, role, appID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权为该应用上传制品"})
 		return
 	}
 	id := newUploadID()
@@ -66,11 +85,23 @@ func (a *api) uploadStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.Close()
-	sess := &uploadSession{ID: id, Path: path, Filename: req.Filename, Size: req.Size, Created: time.Now()}
+	sess := &uploadSession{ID: id, Path: path, Filename: req.Filename, Size: req.Size, AppID: appID, Owner: user, Created: time.Now()}
 	a.uploadsMu.Lock()
 	a.uploads[id] = sess
 	a.uploadsMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"uploadId": id, "received": 0, "nextIndex": 0})
+}
+
+// uploadOwned 校验上传会话归属当前用户(admin 可操作任意会话)。
+func (a *api) uploadOwned(r *http.Request, sess *uploadSession) bool {
+	user, role, ok := a.currentUser(r)
+	if !ok {
+		return false
+	}
+	if isAdmin(role) {
+		return true
+	}
+	return sess.Owner == user
 }
 
 func (a *api) getUpload(id string) (*uploadSession, bool) {
@@ -87,6 +118,10 @@ func (a *api) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	sess, ok := a.getUpload(r.PathValue("uploadId"))
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "上传会话不存在或已过期"})
+		return
+	}
+	if !a.uploadOwned(r, sess) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权写入该上传会话"})
 		return
 	}
 	idx, err := strconv.Atoi(r.URL.Query().Get("index"))
@@ -142,6 +177,10 @@ func (a *api) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "上传会话不存在或已过期"})
 		return
 	}
+	if !a.uploadOwned(r, sess) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权查看该上传会话"})
+		return
+	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"received": sess.Received, "nextIndex": sess.NextIndex, "size": sess.Size, "complete": sess.Received >= sess.Size})
@@ -150,6 +189,10 @@ func (a *api) uploadStatus(w http.ResponseWriter, r *http.Request) {
 // uploadAbort 处理 DELETE /api/upload/{uploadId}:放弃上传,删会话与临时文件。
 func (a *api) uploadAbort(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("uploadId")
+	if sess, ok := a.getUpload(id); ok && !a.uploadOwned(r, sess) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "无权中止该上传会话"})
+		return
+	}
 	a.finishUpload(id)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

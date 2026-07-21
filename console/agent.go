@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -743,6 +744,11 @@ func (a *api) appDelete(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.deleteEntity("app", id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "已下线但删除元数据失败: " + err.Error()})
 		return
+	}
+	// 3. 清理用户对该应用的授权,避免 user_apps 残留 stale app_id。
+	if err := a.store.deleteUserAppsByApp(id); err != nil {
+		// 元数据已删,授权清理失败只记日志,不回滚删除(否则 Agent 已下线但 Console 又留半残 app)。
+		log.Printf("[appDelete] 清理 user_apps 失败 app=%s: %v", id, err)
 	}
 	a.store.appendAudit(a.sessionUser(r), "删除应用", id, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

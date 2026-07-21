@@ -87,16 +87,15 @@ func main() {
 	// - admin:全量
 	// - 普通用户:仅授权应用的部署/还原/启停/查看;不可新建/删除/改配置;不可访文件柜/审计/Agent/系统
 	adminOnly := a.requireRole("admin")
-	appOp := a.requireAppOp // 部署/还原/启停:admin 或已授权用户
-	// 分块上传服务于部署,任意已登录可上传(部署时再校验应用授权)。
+	appOp := a.requireAppOp // 部署/还原/启停/读状态:admin 或已授权用户
 	anyLogin := a.requireAuth
 
-	// Agent 代理(需登录):Console 持共享 token 调用本机/远端 Agent,前端只与 Console 通信。
-	mux.HandleFunc("GET /api/agent/ping", anyLogin(a.agentProxy("/api/ping")))
-	mux.HandleFunc("GET /api/agent/capabilities", anyLogin(a.agentProxy("/api/capabilities")))
-	mux.HandleFunc("GET /api/agent/system", anyLogin(a.agentProxy("/api/system")))
-	mux.HandleFunc("GET /api/agent/precheck", anyLogin(a.agentPrecheck))
-	// 分块上传(断点续传):大制品先分块传到 Console,完成后用 uploadId 触发部署。
+	// Agent 探测/预检仅 admin(非 admin 侧栏不拉真实 system;预检仅创建/改配置需要)。
+	mux.HandleFunc("GET /api/agent/ping", adminOnly(a.agentProxy("/api/ping")))
+	mux.HandleFunc("GET /api/agent/capabilities", adminOnly(a.agentProxy("/api/capabilities")))
+	mux.HandleFunc("GET /api/agent/system", adminOnly(a.agentProxy("/api/system")))
+	mux.HandleFunc("GET /api/agent/precheck", adminOnly(a.agentPrecheck))
+	// 分块上传:须登录;handler 内校验 appId 授权并绑定会话(部署时复验)。
 	mux.HandleFunc("POST /api/upload/start", anyLogin(a.uploadStart))
 	mux.HandleFunc("PUT /api/upload/{uploadId}", anyLogin(a.uploadChunk))
 	mux.HandleFunc("GET /api/upload/{uploadId}", anyLogin(a.uploadStatus))

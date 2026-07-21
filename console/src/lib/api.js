@@ -338,11 +338,11 @@ const CHUNK_THRESHOLD = 16 * 1024 * 1024;  // 超过 16MB 走分块上传 + 断�
 const CHUNK_RETRY = 3;                      // 单块失败重试次数(断点续传)
 
 // uploadChunked 把大文件分块顺序传到 Console,失败按 nextIndex 续传;返回 uploadId(失败抛错)。
-// onProgress(sent,total) 用于进度展示。
-async function uploadChunked(file, onProgress) {
+// appId 绑定目标应用(服务端 ACL);onProgress(sent,total) 用于进度展示。
+async function uploadChunked(file, appId, onProgress) {
   const startR = await fetch('/api/upload/start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ filename: file.name, size: file.size }), credentials: 'same-origin',
+    body: JSON.stringify({ filename: file.name, size: file.size, appId }), credentials: 'same-origin',
   });
   if (!startR.ok) { const d = await startR.json().catch(() => ({})); throw new Error(d.error || '上传初始化失败'); }
   const { uploadId } = await startR.json();
@@ -374,7 +374,7 @@ async function deployViaAgentStream(appId, version, releaseId, file, onEvent, on
     fd.append('releaseId', releaseId || '');
     if (file && file.size > CHUNK_THRESHOLD) {
       // 大制品:先分块上传(断点续传)到 Console,再用 uploadId 触发部署;小制品直接随表单上传。
-      const uploadId = await uploadChunked(file, onUpload);
+      const uploadId = await uploadChunked(file, appId, onUpload);
       fd.append('uploadId', uploadId);
     } else {
       fd.append('artifact', file);

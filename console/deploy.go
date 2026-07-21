@@ -464,10 +464,10 @@ func buildAgentConfig(raw json.RawMessage, version, expectedSha256, releaseID st
 
 // appDeclaresLog 校验请求的日志文件路径是否在该应用已存配置声明的 logPaths 内。
 //
-// 信任边界(务必理解):这是给 **viewer(只读角色)** 的授权闸——viewer 不能改 logPaths
-// (那是 admin/operator 的 write 权限),故只能 tail 管理员/operator 声明过的日志,符合"只读看日志"。
-// 对 admin/operator 而言这不是提权:他们本就能通过部署任意制品/脚本在目标机执行代码读任意文件,
-// 声明 logPath 不构成新能力。真正的穿越/越界由 Agent 端 log_roots 白名单兜底(防路径穿越)。
+// 信任边界:授权用户(含历史 operator/viewer)不能改 logPaths(那是 admin 的 manage 权限),
+// 故只能 tail 管理员在应用配置中声明过的日志路径,符合"可部署可查看、不可改配置"。
+// 对 admin 而言这不是提权:他们本就能改配置并部署。真正的穿越/越界由 Agent 端
+// log_roots 白名单兜底(防路径穿越)。
 //
 // 匹配收紧为"必须绝对路径 + 规范化比对",fail-closed:相对路径/含 ../ 一律拒绝,规范化后精确相等才放行。
 func (a *api) appDeclaresLog(id, path string) bool {
@@ -644,6 +644,13 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case uploadID != "":
+		if sess, ok := a.getUpload(uploadID); ok {
+			// 上传会话绑定的 appId 须与部署目标一致,防止用 A 应用授权上传后投到 B 应用。
+			if sess.AppID != "" && sess.AppID != id {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "上传会话与目标应用不匹配"})
+				return
+			}
+		}
 		f, ok := a.openUploadArtifact(uploadID)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "上传未完成或会话不存在"})

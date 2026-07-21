@@ -141,19 +141,22 @@ test('配置页 Runner 按 Agent 能力置灰(pm2 不可用)', async ({ page }) 
   await expect(page.locator('option[value="pm2"]')).toBeDisabled();
 });
 
-test('配置页编辑数值字段保存成功(port/backupKeep 归一化,不再 400)', async ({ page }) => {
+test('配置页编辑端口保存成功(数值归一化;备份保留固定 10 只读)', async ({ page }) => {
   await login(page);
   await page.request.put('/api/apps/e2e-save/config', {
-    data: { id: 'e2e-save', name: 'E2E 保存测试', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-save/app', port: 8080, backupKeep: 5, logPaths: [] },
+    data: { id: 'e2e-save', name: 'E2E 保存测试', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-save/app', port: 8080, backupKeep: 10, logPaths: [] },
   });
   await page.reload();
   await page.getByRole('button', { name: '应用', exact: true }).click();
   await page.getByText('E2E 保存测试').click();
   await page.locator('button.tab').filter({ hasText: '配置' }).click();
   await page.getByRole('button', { name: /编辑/ }).click();
-  // 改备份份数(输入框值变字符串)→ 保存应归一化为数值、服务端校验通过、提示"配置已保存"
+  // 备份保留份数固定 10、只读;改端口应归一化为数值并保存成功
   const keepInput = page.locator('xpath=//label[contains(@class,"field-label") and contains(.,"备份保留份数")]/following-sibling::input[1]');
-  await keepInput.fill('7');
+  await expect(keepInput).toBeDisabled();
+  await expect(keepInput).toHaveValue('10');
+  const portInput = page.locator('xpath=//label[contains(@class,"field-label") and contains(.,"端口")]/following-sibling::input[1]');
+  await portInput.fill('9090');
   await page.getByRole('button', { name: /保存配置/ }).click();
   await expect(page.getByText('配置已保存')).toBeVisible({ timeout: 8000 });
 });

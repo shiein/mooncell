@@ -35,13 +35,41 @@ function App() {
   const [view, setView] = React.useState("login");
   const user = session || "admin";
 
+  // ---- route ----
+  // 非 admin 仅允许应用相关页;初始化与切换时同步钳制,避免先渲染 overview 再跳转的闪烁。
+  const clampRoute = React.useCallback((r, roleNow) => {
+    if (!r) return { page: "apps" };
+    if (roleNow && roleNow !== "admin") {
+      const allowed = new Set(["apps", "app-detail"]);
+      if (!allowed.has(r.page)) return { page: "apps" };
+    }
+    return r;
+  }, []);
+  const [route, setRoute] = React.useState(() => {
+    try { return JSON.parse(localStorage.getItem("mc_route")) || { page: "overview" }; }
+    catch (e) { return { page: "overview" }; }
+  });
+  const nav = (page, opts = {}) => {
+    const r = clampRoute({
+      page, appId: opts.appId, tab: opts.tab || (page === "app-detail" ? (opts.tab || "overview") : undefined),
+    }, role);
+    setRoute(r);
+    try { localStorage.setItem("mc_route", JSON.stringify(r)); } catch (e) {}
+  };
+
   React.useEffect(() => {
     let alive = true;
     getSession().then((s) => {
-      if (alive && s) { setSession(s.user); setRole(s.role || "viewer"); setView("console"); }
+      if (alive && s) {
+        const r = s.role || "viewer";
+        setSession(s.user);
+        setRole(r);
+        setRoute((cur) => clampRoute(cur, r));
+        setView("console");
+      }
     });
     return () => { alive = false; };
-  }, []);
+  }, [clampRoute]);
 
   // 会话失效统一回登录页:任何请求 401(闲置 1h 超时 / 关浏览器后 cookie 失效)→ 清状态并提示重新登录。
   React.useEffect(() => {
@@ -53,22 +81,16 @@ function App() {
     });
   }, []);
 
-  // ---- route ----
-  const [route, setRoute] = React.useState(() => {
-    try { return JSON.parse(localStorage.getItem("mc_route")) || { page: "overview" }; }
-    catch (e) { return { page: "overview" }; }
-  });
-  const nav = (page, opts = {}) => {
-    const r = { page, appId: opts.appId, tab: opts.tab || (page === "app-detail" ? (opts.tab || "overview") : undefined) };
-    setRoute(r);
-    try { localStorage.setItem("mc_route", JSON.stringify(r)); } catch (e) {}
-  };
-  // 非 admin 仅允许应用相关页;旧路由/深链落到 overview 等时回落到 apps。
+  // 会话/角色就绪后同步钳制(含 localStorage 里的 admin-only 旧路由)。
   React.useEffect(() => {
-    if (!session || role === "admin") return;
-    const allowed = new Set(["apps", "app-detail"]);
-    if (!allowed.has(route.page)) nav("apps");
-  }, [session, role, route.page]);
+    if (!session) return;
+    setRoute((cur) => {
+      const next = clampRoute(cur, role);
+      if (next === cur || (next.page === cur.page && next.appId === cur.appId)) return cur;
+      try { localStorage.setItem("mc_route", JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  }, [session, role, clampRoute]);
 
   // ---- domain state ----
   // 初始为 mock,登录后从后端水合(首启用 mock 作种子,后续取持久化数据);后端不可达则保留 mock。
@@ -331,7 +353,11 @@ function App() {
   // 只接受后端登录返回的 {user, role};不再有任何前端绕过入口(演示向导已移除)。
   const login = (res) => {
     if (!res || !res.user) return; // 防御:无后端返回不进入主壳
-    setSession(res.user); setRole(res.role || "viewer"); setView("console");
+    const r = res.role || "viewer";
+    setSession(res.user);
+    setRole(r);
+    setRoute((cur) => clampRoute(cur, r)); // 同步钳制,避免先闪 admin-only 页
+    setView("console");
     toast(`欢迎回来,${res.user}`);
   };
   const logout = async () => {

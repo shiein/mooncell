@@ -39,7 +39,12 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.setUserApps(body.Username, normalizeAppIDs(body.AppIDs)); err != nil {
 		// 用户已建但授权失败:回滚用户,避免半成品账号。
-		a.store.deleteUser(body.Username)
+		if deleted, derr := a.store.deleteUser(body.Username); !deleted || derr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "写入应用授权失败,且回滚用户未完成,请管理员清理账号: " + body.Username,
+			})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入应用授权失败"})
 		return
 	}

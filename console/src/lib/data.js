@@ -23,7 +23,7 @@ const DEPLOY_TYPES = {
 };
 
 // artifactNameOK:文件名是否符合该类型的扩展名白名单(不区分大小写;无白名单=放行)。
-// 部署对话框选文件/拖拽/选制品库条目共用,保证三条入口一个口径。
+// 部署对话框选文件与拖拽共用,保证入口口径一致。
 const artifactNameOK = (type, name) => {
   const accepts = (DEPLOY_TYPES[type] || {}).accepts || [];
   if (!accepts.length) return true;

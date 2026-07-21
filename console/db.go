@@ -267,9 +267,14 @@ func (s *Store) createUser(username, password, role string) error {
 	return err // UNIQUE 冲突 → 用户名已存在
 }
 
-// setUserApps 全量替换用户的应用授权列表(先删后插)。
+// setUserApps 全量替换用户的应用授权列表(事务:失败回滚,不留半成品 ACL)。
 func (s *Store) setUserApps(username string, appIDs []string) error {
-	if _, err := s.db.Exec("DELETE FROM user_apps WHERE username = ?", username); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM user_apps WHERE username = ?", username); err != nil {
 		return err
 	}
 	for _, id := range appIDs {
@@ -277,11 +282,17 @@ func (s *Store) setUserApps(username string, appIDs []string) error {
 		if id == "" {
 			continue
 		}
-		if _, err := s.db.Exec("INSERT INTO user_apps (username, app_id) VALUES (?, ?)", username, id); err != nil {
+		if _, err := tx.Exec("INSERT INTO user_apps (username, app_id) VALUES (?, ?)", username, id); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
+}
+
+// deleteUserAppsByApp 删除应用时清理所有用户对该 app 的授权行。
+func (s *Store) deleteUserAppsByApp(appID string) error {
+	_, err := s.db.Exec("DELETE FROM user_apps WHERE app_id = ?", appID)
+	return err
 }
 
 func (s *Store) userAppIDs(username string) ([]string, error) {
