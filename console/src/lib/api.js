@@ -356,16 +356,13 @@ async function uploadChunked(file, onProgress) {
   return uploadId;
 }
 
-// 部署制品来源三选一:artifactId(制品库已留存,优先)> file(本次上传)> 都无则报错。
-// artifactId 模式免重复上传——多 Agent 部署同一制品 / 重部署历史制品时尤其有用。
-async function deployViaAgentStream(appId, version, releaseId, file, onEvent, onUpload, artifactId) {
+// 部署:file 为本次上传制品;大文件先分块到 Console 再用 uploadId 触发部署。
+async function deployViaAgentStream(appId, version, releaseId, file, onEvent, onUpload) {
   try {
     const fd = new FormData();
     fd.append('version', version || '');
     fd.append('releaseId', releaseId || '');
-    if (artifactId) {
-      fd.append('artifactId', artifactId);
-    } else if (file && file.size > CHUNK_THRESHOLD) {
+    if (file && file.size > CHUNK_THRESHOLD) {
       // 大制品:先分块上传(断点续传)到 Console,再用 uploadId 触发部署;小制品直接随表单上传。
       const uploadId = await uploadChunked(file, onUpload);
       fd.append('uploadId', uploadId);
@@ -460,42 +457,6 @@ async function streamAppLogs(appId, { tail = 200, signal, onLine, agentId, runne
   return { ended: true };
 }
 
-// ---------- 制品仓库(版本化制品库)----------
-// 上传一次 → 留存 → 可部署到任意应用/Agent,或一键重部署历史制品。复用文件柜地基,无 TTL。
-async function listArtifacts() {
-  try {
-    const r = await fetch('/api/artifacts', { credentials: 'same-origin' });
-    if (!r.ok) return null;
-    return (await r.json()).artifacts || [];
-  } catch (e) { return null; }
-}
-
-async function uploadArtifact(file, version) {
-  const fd = new FormData();
-  fd.append('file', file);
-  if (version) fd.append('version', version);
-  const r = await fetch('/api/artifacts', { method: 'POST', body: fd, credentials: 'same-origin' });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || '上传失败');
-  return d; // { artifact, deduped? }
-}
-
-async function deleteArtifact(id) {
-  const r = await fetch(`/api/artifacts/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'same-origin' });
-  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); }
-}
-
-// ⭐ 标记/取消重要:被标记的制品豁免每应用滚动淘汰,永久保留。
-async function pinArtifact(id, pinned) {
-  const r = await fetch(`/api/artifacts/${encodeURIComponent(id)}/pin`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pinned }), credentials: 'same-origin',
-  });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || '操作失败');
-  return d;
-}
-
 // ---------- Console 自更新(管理员从浏览器直传新 Console 二进制,本地校验后替换自身并 self-exec 重启)----------
 // getConsoleInfo:返回当前 Console 版本 + os/arch;升级后轮询此端点,版本变为新版即重启完成。
 async function getConsoleInfo() {
@@ -525,7 +486,6 @@ export {
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, getPubLimits,
-  listArtifacts, uploadArtifact, deleteArtifact, pinArtifact,
   getAgentCapabilities, getAgentSystem, getAgentPing, getAgentMetrics, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,

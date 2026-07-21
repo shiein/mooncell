@@ -187,36 +187,6 @@ test('真实应用日志流失败显示错误态(不伪造模拟日志)', async 
   await expect(page.getByRole('button', { name: /重试/ })).toBeVisible();
 });
 
-test('制品仓库「重部署」:手动制品经目标应用选择器下发并部署成功', async ({ page }) => {
-  await login(page);
-  // 目标应用:native-binary(accepts 为空 → 任意扩展名制品都匹配),假 Agent deploy/stream 回 success。
-  await page.request.put('/api/apps/e2e-rd/config', {
-    data: { id: 'e2e-rd', name: 'E2E 重部署', type: 'native-binary', runner: 'systemd', status: 'running', version: 'v1', path: '/srv/apps/e2e-rd/app', backupKeep: 5, logPaths: [] },
-  });
-  // 手动上传一个制品(无来源应用 → 触发目标应用选择器路径)。
-  await page.request.post('/api/artifacts', {
-    multipart: {
-      version: 'v9',
-      file: { name: 'e2e-redeploy.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('e2e-artifact-bytes') },
-    },
-  });
-  await page.reload();
-  await page.locator('.nav-item').filter({ hasText: '制品仓库' }).click();
-  // 制品行出现 → 点「重部署」(zap 按钮,title 含"重部署")
-  await expect(page.getByText('e2e-redeploy.bin')).toBeVisible();
-  await page.getByTitle(/重部署/).click();
-  // 手动制品无来源应用 → 弹出目标应用选择器,选中 E2E 重部署
-  await expect(page.getByText('选择重部署目标应用')).toBeVisible();
-  await page.getByRole('button', { name: /E2E 重部署/ }).click();
-  // 全局部署对话框预选该制品 → 标题为「部署 · E2E 重部署」,直接是待部署态
-  await expect(page.getByText('部署 · E2E 重部署')).toBeVisible({ timeout: 8000 });
-  const deployBtn = page.getByRole('button', { name: '开始部署' });
-  await expect(deployBtn).toBeEnabled({ timeout: 8000 });
-  await deployBtn.click();
-  // 假 Agent 回 success → 成功态出现「查看应用日志」按钮
-  await expect(page.getByRole('button', { name: /查看应用日志/ })).toBeVisible({ timeout: 8000 });
-});
-
 test('真实应用备份接口失败显示错误态(不回退 mock)', async ({ page }) => {
   await login(page);
   // 经 API 建一个真实类型应用(假 Agent 的 backups 端点会 500)

@@ -631,51 +631,34 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 	version := r.FormValue("version")
 	releaseID := r.FormValue("releaseId")
 	uploadID := r.FormValue("uploadId")
-	artifactID := r.FormValue("artifactId") // 制品仓库:引用已留存制品,免重复上传
 
 	appRaw, ok := a.store.getEntity("app", id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "应用不存在,无法部署"})
 		return
 	}
-	// 制品来源优先级:artifactId(制品库已留存)> uploadId(分块上传临时文件)> 本次 multipart artifact。
+	// 制品来源:uploadId(分块上传临时文件)> 本次 multipart artifact。
 	var file interface {
 		io.Reader
 		io.Seeker
 		io.Closer
 	}
-	// fresh=本次新上传的制品(uploadId/multipart),部署成功后自动归档进制品库;
-	// artifactId 是库里已有制品的复部署,不重复归档。srcName 为归档命名用的原始文件名。
-	fresh, srcName := false, ""
 	switch {
-	case artifactID != "":
-		f, ok := a.openArtifactFile(artifactID)
-		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "制品库中不存在该制品"})
-			return
-		}
-		file = f
 	case uploadID != "":
 		f, ok := a.openUploadArtifact(uploadID)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "上传未完成或会话不存在"})
 			return
 		}
-		if sess, ok := a.getUpload(uploadID); ok {
-			srcName = sess.Filename
-		}
-		defer a.finishUpload(uploadID) // 部署消费后删会话与临时文件(归档发生在本函数返回前,fd 仍有效)
+		defer a.finishUpload(uploadID) // 部署消费后删会话与临时文件
 		file = f
-		fresh = true
 	default:
-		f, hdr, err := r.FormFile("artifact")
+		f, _, err := r.FormFile("artifact")
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品(或 uploadId / artifactId)"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品(或 uploadId)"})
 			return
 		}
-		srcName = hdr.Filename
 		file = f
-		fresh = true
 	}
 	defer file.Close()
 	// 服务端权威计算制品 sha256(不信任客户端传值),保证 Console→Agent 完整性;Agent 强校验。
@@ -709,24 +692,7 @@ func (a *api) agentDeployStream(w http.ResponseWriter, r *http.Request) {
 
 	body, ct := buildDeployBody(cfgJSON, file)
 	resp, perr := cl.postStream("/api/apps/"+id+"/deploy/stream", ct, body)
-	result, ver := a.streamAndAudit(w, r, cl, resp, perr, "部署", id, releaseID, fp)
-
-	// 部署成功即归档:把本次上传的制品自动沉淀进制品库(source=auto,记来源应用),
-	// 免去「先传仓库再引用部署」的拧巴流程。artifactId 复部署不重复归档;失败/回滚不归档。
-	if fresh && result == "success" {
-		av := ver
-		if av == "" {
-			av = version
-		}
-		name := srcName
-		if name == "" {
-			name = id
-			if av != "" {
-				name += "-" + av
-			}
-		}
-		a.archiveDeployedArtifact(id, name, av, sha, a.sessionUser(r), file)
-	}
+	a.streamAndAudit(w, r, cl, resp, perr, "部署", id, releaseID, fp)
 }
 
 // agentRestoreStream 服务端还原:读已存应用配置生成 Agent 请求(前端只提交 backup + version + releaseId)。
