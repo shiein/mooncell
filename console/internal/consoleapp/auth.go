@@ -91,6 +91,10 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) logout(w http.ResponseWriter, r *http.Request) {
+	// 先解析用户，回滚其工作台事务后再删会话（不得提交未完成事务）
+	if username, _, ok := a.currentUser(r); ok && a.dataResSvc != nil {
+		a.dataResSvc.InvalidateAllForUser(username)
+	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		a.store.deleteSession(c.Value)
 	}

@@ -141,6 +141,22 @@ func (wm *WorkspaceManager) InvalidateUserResource(username, resourceID string) 
 	}
 }
 
+// InvalidateAllForUser 回滚并删除某用户的全部工作台（退出登录/删用户/会话失效时调用）。
+// 设计：退出登录、会话失效不得提交未完成事务。
+func (wm *WorkspaceManager) InvalidateAllForUser(username string) {
+	wm.mu.Lock()
+	var ids []string
+	for id, ws := range wm.workspaces {
+		if ws.Username == username {
+			ids = append(ids, id)
+		}
+	}
+	wm.mu.Unlock()
+	for _, id := range ids {
+		wm.DeleteWorkspace(id)
+	}
+}
+
 // CleanupIdle 回滚超时的手工事务。由后台定期调用。
 func (wm *WorkspaceManager) CleanupIdle() int {
 	wm.mu.Lock()

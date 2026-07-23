@@ -133,6 +133,10 @@ func (a *api) deleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不能删除最后一个管理员"})
 		return
 	}
+	// 删除前先回滚并清理该用户全部数据资源工作台事务。
+	if a.dataResSvc != nil {
+		a.dataResSvc.InvalidateAllForUser(target)
+	}
 	// 原子删除:即便上面的预检因并发互删而失效,deleteUser 内末位 admin 守卫也会拦下。
 	deleted, err := a.store.deleteUser(target)
 	if err != nil {
