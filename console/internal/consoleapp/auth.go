@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"mooncell/console/internal/dataresource"
 )
 
 const sessionCookie = "mc_sid"
@@ -199,4 +201,17 @@ func (a *api) canAccessApp(user, role, appID string) bool {
 		return true
 	}
 	return appID != "" && a.store.userHasApp(user, appID)
+}
+
+// requireAuthDR 是数据资源模块的认证 wrapper：验证登录后注入用户/角色到 context，
+// 交由 dataresource handler 做细粒度权限校验（admin 管理资源、普通用户按授权访问）。
+func (a *api) requireAuthDR(next func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, role, ok := a.currentUser(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
+			return
+		}
+		next(w, dataresource.WithUser(r, user, role))
+	}
 }

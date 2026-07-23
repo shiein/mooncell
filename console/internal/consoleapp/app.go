@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
+	"mooncell/console/internal/dataresource"
 )
 
 // consoleVersion 由根 package main 的构建版本传入，供版本接口和自更新审计使用。
@@ -70,6 +72,9 @@ func Run(distFS fs.FS, version string, args []string) {
 		agentBinDir = "agentbin"
 	}
 	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}, appMu: map[string]*sync.Mutex{}, appEpoch: map[string]uint64{}, requireTLSAgents: cfg.Security.RequireTLSAgents}
+
+	// 数据资源模块服务：持有 SQLite 句柄和凭据密钥。
+	dataResSvc := dataresource.NewService(store.db, store.credKey)
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
 	go func() {
@@ -135,6 +140,16 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("POST /api/users", adminOnly(a.createUser))
 	mux.HandleFunc("PUT /api/users/{username}", adminOnly(a.updateUser))
 	mux.HandleFunc("DELETE /api/users/{username}", adminOnly(a.deleteUser))
+
+	// 数据资源管理:认证后注入用户信息到 context,handler 内做细粒度权限校验。
+	drAuth := a.requireAuthDR
+	mux.HandleFunc("GET /api/data-resources", drAuth(dataResSvc.ListResources))
+	mux.HandleFunc("POST /api/data-resources", drAuth(dataResSvc.CreateResource))
+	mux.HandleFunc("GET /api/data-resources/{id}", drAuth(dataResSvc.GetResource))
+	mux.HandleFunc("PUT /api/data-resources/{id}", drAuth(dataResSvc.UpdateResource))
+	mux.HandleFunc("DELETE /api/data-resources/{id}", drAuth(dataResSvc.DeleteResource))
+	mux.HandleFunc("POST /api/data-resources/test", drAuth(dataResSvc.TestConnectionHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/test", drAuth(dataResSvc.TestExistingConnection))
 
 	// 多 Agent 管理:仅 admin
 	mux.HandleFunc("GET /api/agents", adminOnly(a.listAgents))
