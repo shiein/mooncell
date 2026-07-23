@@ -89,6 +89,7 @@ func (wm *WorkspaceManager) GetWorkspace(id string) (*Workspace, bool) {
 }
 
 // DeleteWorkspace 删除工作台。有活动事务时回滚。
+// 必须持 ws.mu 再动 Tx，避免与 ExecuteInWorkspace/Commit 并发 Rollback/Query。
 func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	wm.mu.Lock()
 	ws, ok := wm.workspaces[id]
@@ -98,10 +99,14 @@ func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	}
 	delete(wm.workspaces, id)
 	wm.mu.Unlock()
+	ws.mu.Lock()
 	if ws.Tx != nil {
 		ws.Tx.Rollback()
+		ws.Tx = nil
+		ws.TxState = TxNone
 		wm.pool.EndTx(ws.ResourceID)
 	}
+	ws.mu.Unlock()
 }
 
 // RollbackUserTx 回滚用户在某资源上的所有活动事务（撤权/退出时调用）。
@@ -185,14 +190,22 @@ func (wm *WorkspaceManager) CleanupIdle() int {
 // CloseAll 关闭所有工作台（Console 退出时）。
 func (wm *WorkspaceManager) CloseAll() {
 	wm.mu.Lock()
-	defer wm.mu.Unlock()
+	list := make([]*Workspace, 0, len(wm.workspaces))
 	for _, ws := range wm.workspaces {
-		if ws.Tx != nil {
-			ws.Tx.Rollback()
-			wm.pool.EndTx(ws.ResourceID)
-		}
+		list = append(list, ws)
 	}
 	wm.workspaces = map[string]*Workspace{}
+	wm.mu.Unlock()
+	for _, ws := range list {
+		ws.mu.Lock()
+		if ws.Tx != nil {
+			ws.Tx.Rollback()
+			ws.Tx = nil
+			ws.TxState = TxNone
+			wm.pool.EndTx(ws.ResourceID)
+		}
+		ws.mu.Unlock()
+	}
 }
 
 // ExecuteInWorkspace 在工作台中执行 SQL，处理自动提交和手工事务逻辑。
