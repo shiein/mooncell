@@ -3,7 +3,10 @@
 package dataresource
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"sync"
 )
 
@@ -47,6 +50,22 @@ func (s *Service) auditLog(user, action, target, result string) {
 	if s.audit != nil {
 		s.audit(user, action, target, result)
 	}
+}
+
+// sqlHashShort 返回 SQL 的短哈希（SHA-256 前 8 字节 hex），不保存完整 SQL。
+func sqlHashShort(sqlText string) string {
+	sum := sha256.Sum256([]byte(sqlText))
+	return hex.EncodeToString(sum[:8])
+}
+
+// auditSQL 记录 SQL 相关审计：target=资源·语句类型·哈希，result 含结果与耗时。
+// 设计：只保存资源、用户、语句类型、SQL 哈希、结果和耗时。
+func (s *Service) auditSQL(user, action, resourceID string, stmtType StatementType, sqlText, result string, durationMs int64) {
+	target := fmt.Sprintf("%s·%s·%s", resourceID, string(stmtType), sqlHashShort(sqlText))
+	if durationMs >= 0 {
+		result = fmt.Sprintf("%s·%dms", result, durationMs)
+	}
+	s.auditLog(user, action, target, result)
 }
 
 // SetImportMaxMB 设置导入文件大小上限（MB）。

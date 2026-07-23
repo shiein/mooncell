@@ -117,12 +117,14 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 	stmtType := ClassifySQL(body.SQL)
 	// 无写权限（只读或其它非 write）一律拒绝写操作；mode=="" 已在 resolve 拦截
 	if !canWriteAccess(mode) && !stmtType.IsReadOnly() {
+		s.auditSQL(user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
 		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许执行写操作")
 		return
 	}
 
 	// 危险 SQL 二次确认：TRUNCATE/DROP/无 WHERE 的 DELETE/UPDATE
 	if stmtType.IsDangerousWrite(body.SQL) && !body.Confirmed {
+		s.auditSQL(user, "危险SQL被拒绝", id, stmtType, body.SQL, "拒绝·DANGEROUS", 0)
 		writeErr(w, http.StatusForbidden, "DANGEROUS_SQL", "危险操作需二次确认：TRUNCATE/DROP/无 WHERE 的 DELETE 或 UPDATE")
 		return
 	}
@@ -130,19 +132,23 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 	result, err := s.workspaces.ExecuteInWorkspace(r.Context(), ws, body.SQL, body.Limit)
 	if err != nil {
 		if apiErr, isAPIErr := err.(*APIError); isAPIErr {
+			if apiErr.Code == "DATA_RESOURCE_READ_ONLY" {
+				s.auditSQL(user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
+			}
 			writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
 			return
 		}
+		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败", 0)
 		writeErr(w, http.StatusBadRequest, "EXEC_ERROR", err.Error())
 		return
 	}
-	// 审计：只记录写操作（DML/DDL）和只读拦截，不记录普通 SELECT。
+	// 审计：写操作（DML/DDL）记录类型、哈希、行数、耗时；不记录普通 SELECT 全文。
 	if stmtType.IsWrite() || stmtType.IsDDLorDCL() || stmtType == StmtTruncate || stmtType == StmtCall {
 		auditResult := "成功"
 		if result.AffectedRows >= 0 {
 			auditResult = fmt.Sprintf("成功·%d行", result.AffectedRows)
 		}
-		s.auditLog(user, "执行"+string(stmtType), id, auditResult)
+		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, auditResult, result.DurationMs)
 	}
 	writeOK(w, result)
 }
