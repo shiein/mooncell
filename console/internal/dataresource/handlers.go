@@ -84,6 +84,15 @@ func formatTestInfo(status string, at int64) string {
 
 // --- 资源 CRUD ---
 
+// ListDrivers 处理 GET /api/data-resources/drivers：返回可选驱动及实验性标记。
+func (s *Service) ListDrivers(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := userFromCtx(r); !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
+		return
+	}
+	writeOK(w, map[string]any{"drivers": DriverCatalog()})
+}
+
 // ListResources 处理 GET /api/data-resources。
 // admin 返回全部；普通用户仅返回授权资源。
 func (s *Service) ListResources(w http.ResponseWriter, r *http.Request) {

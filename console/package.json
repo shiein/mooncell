@@ -14,8 +14,15 @@
     "test:e2e": "sh e2e/run-e2e.sh"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.10.4",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
+    "@uiw/react-codemirror": "^4.25.11",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "sql-formatter": "^15.8.2"
   },
   "comment:browserslist": "与 vite.config.js 的构建目标对齐:钉死低版本浏览器,让 autoprefixer/Tailwind 确定性地按 chrome92 生成前缀,不随其默认查询漂移。",
   "browserslist": [

@@ -14,6 +14,8 @@ import { AppDetailPage } from './pages/AppDetail.jsx';
 import { UsersPage } from './pages/Users.jsx';
 import { AgentsPage } from './pages/Agents.jsx';
 import { SystemPage } from './pages/System.jsx';
+import { DataResourcesPage } from './pages/DataResources.jsx';
+import { DataWorkspacePage } from './pages/DataWorkspace.jsx';
 import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
@@ -36,11 +38,11 @@ function App() {
   const user = session || "admin";
 
   // ---- route ----
-  // 非 admin 仅允许应用相关页;初始化与切换时同步钳制,避免先渲染 overview 再跳转的闪烁。
+  // 非 admin 仅允许应用与数据资源相关页;初始化与切换时同步钳制。
   const clampRoute = React.useCallback((r, roleNow) => {
     if (!r) return { page: "apps" };
     if (roleNow && roleNow !== "admin") {
-      const allowed = new Set(["apps", "app-detail"]);
+      const allowed = new Set(["apps", "app-detail", "data-resources", "data-workspace"]);
       if (!allowed.has(r.page)) return { page: "apps" };
     }
     return r;
@@ -51,10 +53,19 @@ function App() {
   });
   const nav = (page, opts = {}) => {
     const r = clampRoute({
-      page, appId: opts.appId, tab: opts.tab || (page === "app-detail" ? (opts.tab || "overview") : undefined),
+      page,
+      appId: opts.appId,
+      tab: opts.tab || (page === "app-detail" ? (opts.tab || "overview") : undefined),
+      resourceId: opts.resourceId,
+      resource: opts.resource,
     }, role);
     setRoute(r);
-    try { localStorage.setItem("mc_route", JSON.stringify(r)); } catch (e) {}
+    try {
+      // 不把完整 resource 对象写入 localStorage（含敏感配置）
+      const persist = { ...r };
+      delete persist.resource;
+      localStorage.setItem("mc_route", JSON.stringify(persist));
+    } catch (e) {}
   };
 
   React.useEffect(() => {
@@ -401,7 +412,8 @@ function App() {
   const screenLabel =
     view !== "console" ? (view === "login" ? "登录" : "初始化向导") :
     route.page === "app-detail" ? `应用详情 · ${detailApp ? detailApp.name : ""}` :
-    ({ overview: "总览", apps: "应用列表", cabinet: "文件柜", audit: "审计日志", users: "用户管理", agents: "Agent 管理", system: "系统" })[route.page] || route.page;
+    route.page === "data-workspace" ? `数据工作台 · ${route.resource?.name || ""}` :
+    ({ overview: "总览", apps: "应用列表", "data-resources": "数据资源", cabinet: "文件柜", audit: "审计日志", users: "用户管理", agents: "Agent 管理", system: "系统" })[route.page] || route.page;
 
   return (
     <MCStore.Provider value={store}>
@@ -416,6 +428,15 @@ function App() {
             {route.page === "app-detail" ? (
               <AppDetailPage appId={route.appId} tab={route.tab || "overview"}
                 onTab={(tab) => nav("app-detail", { appId: route.appId, tab })} />
+            ) : null}
+            {route.page === "data-resources" ? (
+              <DataResourcesPage onOpenWorkspace={(res) => nav("data-workspace", { resourceId: res.id, resource: res })} />
+            ) : null}
+            {route.page === "data-workspace" && route.resource ? (
+              <DataWorkspacePage resource={route.resource} onBack={() => nav("data-resources")} />
+            ) : null}
+            {route.page === "data-workspace" && !route.resource ? (
+              <DataResourcesPage onOpenWorkspace={(res) => nav("data-workspace", { resourceId: res.id, resource: res })} />
             ) : null}
             {route.page === "cabinet" ? <CabinetPage /> : null}
             {route.page === "audit" ? <AuditPage /> : null}

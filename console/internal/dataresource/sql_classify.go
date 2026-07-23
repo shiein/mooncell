@@ -50,7 +50,7 @@ func (st StatementType) IsWrite() bool {
 	return false
 }
 
-// IsTransactionControl 返回是否为显式事务控制语句。
+// IsTransactionControl 返回是否为显式事务控制语句（含方言别名 END/ABORT）。
 func (st StatementType) IsTransactionControl() bool {
 	switch st {
 	case StmtBegin, StmtCommit, StmtRollback, StmtSavepoint:
@@ -84,12 +84,35 @@ func (st StatementType) IsDangerousWrite(sqlText string) bool {
 	return false
 }
 
-// hasWhereClause 检查 SQL 是否包含 WHERE 子句（粗略检查，不解析 SQL）。
+// hasWhereClause 检查顶层 DELETE/UPDATE 是否带 WHERE（尽力而为，非完整解析）。
+// 忽略括号内子查询中的 WHERE，避免 USING (SELECT … WHERE …) 绕过危险确认。
 func hasWhereClause(sqlText string) bool {
-	upper := strings.ToUpper(sqlText)
-	// 去除字符串和注释中的 WHERE
-	cleaned := stripStringLiteralsAndComments(upper)
-	return strings.Contains(cleaned, " WHERE ")
+	upper := strings.ToUpper(stripStringLiteralsAndComments(sqlText))
+	depth := 0
+	runes := []rune(upper)
+	for i := 0; i < len(runes); i++ {
+		switch runes[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth != 0 {
+				continue
+			}
+			// 匹配独立的 WHERE 关键字
+			if i+5 <= len(runes) && string(runes[i:i+5]) == "WHERE" {
+				beforeOK := i == 0 || !isIdentRune(runes[i-1])
+				afterOK := i+5 >= len(runes) || !isIdentRune(runes[i+5])
+				if beforeOK && afterOK {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // stripStringLiteralsAndComments 移除 SQL 中的字符串字面量、注释与 dollar quote，避免误判关键字。
@@ -226,9 +249,11 @@ func ClassifySQL(sql string) StatementType {
 		return StmtCall
 	case "BEGIN", "START":
 		return StmtBegin
-	case "COMMIT":
+	case "COMMIT", "END":
+		// PostgreSQL END ≡ COMMIT
 		return StmtCommit
-	case "ROLLBACK":
+	case "ROLLBACK", "ABORT":
+		// PostgreSQL ABORT ≡ ROLLBACK
 		return StmtRollback
 	case "SAVEPOINT":
 		return StmtSavepoint

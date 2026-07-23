@@ -29,7 +29,9 @@ func TestClassifySQL(t *testing.T) {
 		{"CALL proc()", StmtCall},
 		{"BEGIN", StmtBegin},
 		{"COMMIT", StmtCommit},
+		{"END", StmtCommit},
 		{"ROLLBACK", StmtRollback},
+		{"ABORT", StmtRollback},
 		{"SAVEPOINT sp1", StmtSavepoint},
 		{"", StmtUnknown},
 		{"WEIRD STATEMENT", StmtUnknown},
@@ -142,14 +144,16 @@ func TestDangerousWrite(t *testing.T) {
 	}{
 		{"TRUNCATE TABLE t", true},
 		{"DROP TABLE t", true},
-		{"DELETE FROM t", true},           // 无 WHERE
+		{"DELETE FROM t", true}, // 无 WHERE
 		{"DELETE FROM t WHERE id = 1", false},
-		{"UPDATE t SET a = 1", true},      // 无 WHERE
+		{"UPDATE t SET a = 1", true}, // 无 WHERE
 		{"UPDATE t SET a = 1 WHERE id = 1", false},
 		{"INSERT INTO t VALUES (1)", false},
 		{"SELECT * FROM t", false},
 		// WHERE 在字符串中不应误判
 		{"DELETE FROM t WHERE name = 'hello WHERE world'", false},
+		// 子查询内 WHERE 不应让无 WHERE 的外层 DELETE 逃过确认
+		{"DELETE FROM target USING (SELECT 1 WHERE true) s", true},
 	}
 	for _, c := range cases {
 		stmtType := ClassifySQL(c.sql)

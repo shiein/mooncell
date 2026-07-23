@@ -126,20 +126,45 @@ func serverInfoSQL(dbType string) (versionSQL, currentDBSQL string) {
 	return "", ""
 }
 
-// testReadOnlyTx 测试数据库是否支持只读事务。
+// testReadOnlyTx 测试数据库是否真正执行只读事务约束。
+// 仅 BeginTx(ReadOnly)+SELECT 不足以证明：部分驱动会接受 ReadOnly 但忽略写保护。
+// 必须再尝试一条无害写操作，并期望其失败。
 func testReadOnlyTx(ctx context.Context, db *sql.DB, dbType string) bool {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return false
 	}
 	defer tx.Rollback()
-	// 在只读事务中执行一条无害查询
+
 	var v interface{}
-	row := tx.QueryRowContext(ctx, "SELECT 1")
-	if err := row.Scan(&v); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT 1").Scan(&v); err != nil {
+		return false
+	}
+
+	// 写探针：若成功说明驱动未强制只读
+	probeSQL := readOnlyProbeSQL(dbType)
+	if probeSQL == "" {
+		return false
+	}
+	if _, err := tx.ExecContext(ctx, probeSQL); err == nil {
 		return false
 	}
 	return true
+}
+
+// readOnlyProbeSQL 返回应在只读事务中失败的写语句（临时对象，即使误执行也易清理）。
+func readOnlyProbeSQL(dbType string) string {
+	switch dbType {
+	case DriverPostgreSQL, DriverKingbase, DriverVastbase:
+		return "CREATE TEMP TABLE mooncell_ro_probe (id int)"
+	case DriverMySQL:
+		return "CREATE TEMPORARY TABLE mooncell_ro_probe (id int)"
+	case DriverDM:
+		// 达梦：临时表语法因版本而异，用无副作用的 DML 探针
+		return "CREATE TABLE mooncell_ro_probe_should_fail (id int)"
+	default:
+		return "CREATE TABLE mooncell_ro_probe_should_fail (id int)"
+	}
 }
 
 // classifyConnError 将底层连接错误归类为稳定的错误码（不含敏感信息）。

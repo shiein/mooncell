@@ -421,9 +421,9 @@ func (s *Store) updateUserPassword(username, password string) error {
 	return nil
 }
 
-// deleteUser 原子删除用户并清其会话与应用授权。admin 仅在「删除后仍至少剩 1 个 admin」时才删——
-// 末位 admin 守卫下推进单条 SQL,杜绝两个 admin 并发互删各自通过「先 count 再 delete」的
-// 非原子预检、最终把管理员清零。返回是否实际删除(false 且 err==nil = 被守卫拦下或用户不存在)。
+// deleteUser 原子删除用户并清其会话、应用授权、数据资源授权与个人保存 SQL。
+// admin 仅在「删除后仍至少剩 1 个 admin」时才删。
+// 返回是否实际删除(false 且 err==nil = 被守卫拦下或用户不存在)。
 func (s *Store) deleteUser(username string) (bool, error) {
 	res, err := s.db.Exec(
 		`DELETE FROM users
@@ -438,8 +438,53 @@ func (s *Store) deleteUser(username string) (bool, error) {
 		s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
 		s.db.Exec("DELETE FROM user_apps WHERE username = ?", username)
 		s.db.Exec("DELETE FROM data_resource_grants WHERE username = ?", username)
+		s.db.Exec("DELETE FROM saved_sql WHERE username = ?", username)
 	}
 	return n > 0, nil
+}
+
+// updateUserBundle 在同一 SQLite 事务中更新口令(可选)、应用授权(可选)与数据资源授权(可选)。
+// 任一失败整单回滚，避免半成品。
+func (s *Store) updateUserBundle(username, password string, appIDs *[]string, grants *[]dataresource.DataResourceGrant, grantedBy string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if strings.TrimSpace(password) != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return err
+		}
+		res, err := tx.Exec("UPDATE users SET password_hash = ? WHERE username = ?", string(hash), username)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return sql.ErrNoRows
+		}
+	}
+	if appIDs != nil {
+		if _, err := tx.Exec("DELETE FROM user_apps WHERE username = ?", username); err != nil {
+			return err
+		}
+		for _, id := range *appIDs {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, err := tx.Exec("INSERT INTO user_apps (username, app_id) VALUES (?, ?)", username, id); err != nil {
+				return err
+			}
+		}
+	}
+	if grants != nil {
+		if err := dataresource.SetUserGrantsTx(tx, username, *grants, grantedBy); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // countAdmins 用于防止删掉最后一个管理员。

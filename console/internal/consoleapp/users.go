@@ -86,35 +86,34 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	if strings.TrimSpace(body.Password) != "" {
-		if err := a.store.updateUserPassword(target, body.Password); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新密码失败"})
-			return
-		}
-	}
+	// 密码 / 应用授权 / 数据资源授权必须同一事务，避免半成品。
+	var appIDs *[]string
 	if body.AppIDs != nil {
-		if err := a.store.setUserApps(target, normalizeAppIDs(*body.AppIDs)); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新应用授权失败"})
-			return
-		}
+		n := normalizeAppIDs(*body.AppIDs)
+		appIDs = &n
 	}
+	var grants *[]dataresource.DataResourceGrant
+	var oldGrants []dataresource.DataResourceGrant
 	if body.DataResourceGrants != nil {
-		grants := *body.DataResourceGrants
-		for i := range grants {
-			grants[i].Username = target
+		g := *body.DataResourceGrants
+		for i := range g {
+			g[i].Username = target
 		}
-		// 必须在写库前读取旧授权；否则比较新旧时「旧」已是新数据，撤权回滚永远不命中。
-		oldGrants, err := dataresource.UserGrants(a.store.db, target)
+		// 写库前快照旧授权，供撤权失效工作台
+		var err error
+		oldGrants, err = dataresource.UserGrants(a.store.db, target)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取数据资源授权失败"})
 			return
 		}
-		if err := dataresource.SetUserGrants(a.store.db, target, grants, a.sessionUser(r)); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新数据资源授权失败"})
-			return
-		}
-		// 撤销或降级授权后，立即回滚活动事务并失效工作台。
-		a.rollbackRevokedDataResourceTx(target, oldGrants, grants)
+		grants = &g
+	}
+	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, a.sessionUser(r)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新用户失败: " + err.Error()})
+		return
+	}
+	if grants != nil {
+		a.rollbackRevokedDataResourceTx(target, oldGrants, *grants)
 	}
 	a.store.appendAudit(a.sessionUser(r), "更新用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

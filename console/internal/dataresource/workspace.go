@@ -238,6 +238,10 @@ func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspac
 	if stmtType.IsTransactionControl() {
 		return nil, fmt.Errorf("显式事务控制语句不允许，请使用工作台按钮")
 	}
+	// 无法可靠分类的语句 fail-closed，避免 UNKNOWN 走写路径破坏事务状态
+	if stmtType == StmtUnknown {
+		return nil, fmt.Errorf("无法识别的 SQL 类型，已拒绝执行")
+	}
 
 	// DDL/DCL/TRUNCATE/CALL 只允许自动提交模式
 	if stmtType.IsAutoCommitOnly() && !ws.AutoCommit {

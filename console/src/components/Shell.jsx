@@ -7,6 +7,7 @@ import { useAgent } from '../lib/agent.js';
 const NAV_ITEMS = [
   { id: "overview", label: "总览", en: "Overview", icon: "gauge", adminOnly: true },
   { id: "apps", label: "应用", en: "Applications", icon: "box" },
+  { id: "data-resources", label: "数据资源", en: "Data Resources", icon: "server" },
   { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder", adminOnly: true },
   { id: "audit", label: "审计日志", en: "Audit", icon: "shield", adminOnly: true },
   { id: "agents", label: "Agent 管理", en: "Agents", icon: "server", adminOnly: true },
@@ -53,7 +54,11 @@ function Sidebar({ page, onNav, user, role, onLogout, agent }) {
 
       <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         {navItems.map((n) => (
-          <button key={n.id} className="nav-item" data-active={String(page === n.id || (n.id === "apps" && page === "app-detail"))}
+          <button key={n.id} className="nav-item" data-active={String(
+            page === n.id
+            || (n.id === "apps" && page === "app-detail")
+            || (n.id === "data-resources" && page === "data-workspace")
+          )}
             onClick={() => onNav(n.id)}>
             <Icon name={n.icon} size={16} />
             <span style={{ flex: 1 }}>{n.label}</span>

@@ -170,6 +170,7 @@ func Run(distFS fs.FS, version string, args []string) {
 
 	// 数据资源管理:认证后注入用户信息到 context,handler 内做细粒度权限校验。
 	drAuth := a.requireAuthDR
+	mux.HandleFunc("GET /api/data-resources/drivers", drAuth(dataResSvc.ListDrivers))
 	mux.HandleFunc("GET /api/data-resources", drAuth(dataResSvc.ListResources))
 	mux.HandleFunc("POST /api/data-resources", drAuth(dataResSvc.CreateResource))
 	mux.HandleFunc("GET /api/data-resources/{id}", drAuth(dataResSvc.GetResource))

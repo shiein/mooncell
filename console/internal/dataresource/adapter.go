@@ -152,7 +152,7 @@ type DataSourceAdapter interface {
 	// SQLTemplate 生成 SQL 模板（SELECT/INSERT/UPDATE/DELETE）。
 	SQLTemplate(object MetadataNode, operation string) (string, error)
 
-	// PageSQL 包装查询语句为分页查询。
+	// PageSQL 包装查询语句为分页查询（子查询包装，避免与用户已有 LIMIT 冲突）。
 	PageSQL(sql string, limit, offset int) (string, error)
 	// CountSQL 包装查询语句为计数查询。
 	CountSQL(sql string) (string, error)

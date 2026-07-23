@@ -248,7 +248,7 @@ func (a *pgAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 			}
 			ci, ok := conMap[conName.String]
 			if !ok {
-				ci = &ConstraintInfo{Name: conName.String, Type: strings.ToLower(conType.String)}
+				ci = &ConstraintInfo{Name: conName.String, Type: normalizeConstraintType(conType.String)}
 				conMap[conName.String] = ci
 			}
 			if colName.Valid {
@@ -270,27 +270,30 @@ func (a *pgAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 		}
 	}
 
-	// 索引
+	// 索引：用 unnest+ordinality 保证列序，且无未分组裸列
 	idxRows, err := a.db.QueryContext(ctx, `
-		SELECT i.relname AS index_name, a.attname AS column_name,
-			ix.indisunique, array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) AS columns
+		SELECT i.relname AS index_name, ix.indisunique,
+			(SELECT array_agg(a.attname ORDER BY u.ord)
+			 FROM unnest(ix.indkey) WITH ORDINALITY AS u(attnum, ord)
+			 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = u.attnum
+			) AS columns
 		FROM pg_index ix
 		JOIN pg_class c ON c.oid = ix.indrelid
 		JOIN pg_class i ON i.oid = ix.indexrelid
-		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(ix.indkey)
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2
-		GROUP BY i.relname, ix.indisunique
+		WHERE n.nspname = $1 AND c.relname = $2 AND NOT ix.indisprimary
 		ORDER BY i.relname`, obj.Schema, obj.Name)
 	if err == nil {
 		for idxRows.Next() {
 			var idxName string
-			var colName string
 			var unique bool
 			var columns []string
-			if err := idxRows.Scan(&idxName, &colName, &unique, &columns); err != nil {
+			// pgx 可能将 text[] 扫为 []uint8 或专用类型；用 interface 再解析
+			var colsAny interface{}
+			if err := idxRows.Scan(&idxName, &unique, &colsAny); err != nil {
 				continue
 			}
+			columns = parsePGTextArray(colsAny)
 			structure.Indexes = append(structure.Indexes, IndexInfo{
 				Name: idxName, Columns: columns, Unique: unique,
 			})
@@ -299,6 +302,64 @@ func (a *pgAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 	}
 
 	return structure, nil
+}
+
+// normalizeConstraintType 将 information_schema 的 "PRIMARY KEY" 等规范为 primary/foreign/unique/check。
+func normalizeConstraintType(t string) string {
+	s := strings.ToLower(strings.TrimSpace(t))
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "_", "")
+	switch s {
+	case "primarykey", "primary":
+		return "primary"
+	case "foreignkey", "foreign":
+		return "foreign"
+	case "unique":
+		return "unique"
+	case "check":
+		return "check"
+	default:
+		return strings.ToLower(strings.TrimSpace(t))
+	}
+}
+
+// parsePGTextArray 解析 PostgreSQL text[] / array_agg 扫描结果。
+func parsePGTextArray(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []byte:
+		return parsePGArrayLiteral(string(t))
+	case string:
+		return parsePGArrayLiteral(t)
+	default:
+		return parsePGArrayLiteral(fmt.Sprintf("%v", t))
+	}
+}
+
+func parsePGArrayLiteral(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "{}" {
+		return nil
+	}
+	s = strings.TrimPrefix(s, "{")
+	s = strings.TrimSuffix(s, "}")
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		p = strings.Trim(p, `"`)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // DDL 生成表的 CREATE TABLE 语句（v1 只保证字段、默认值、主外键、唯一约束、检查约束、索引和注释）。
@@ -343,6 +404,15 @@ func (a *pgAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
 		lines[len(lines)-1] = strings.TrimSuffix(lines[len(lines)-1], ",")
 	}
 	lines = append(lines, ");")
+	// 非主键索引以独立 CREATE INDEX 输出
+	for _, idx := range structure.Indexes {
+		uniq := ""
+		if idx.Unique {
+			uniq = "UNIQUE "
+		}
+		lines = append(lines, fmt.Sprintf("CREATE %sINDEX %s ON %s (%s);",
+			uniq, a.QuoteIdentifier(idx.Name), qualifiedName, joinQuoted(a, idx.Columns)))
+	}
 	return strings.Join(lines, "\n"), nil
 }
 
@@ -370,10 +440,10 @@ func (a *pgAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 	return "", fmt.Errorf("不支持的操作: %s", operation)
 }
 
-// PageSQL 包装查询为分页查询。
+// PageSQL 包装查询为分页查询（子查询包装，兼容用户 SQL 已含 LIMIT）。
 func (a *pgAdapter) PageSQL(query string, limit, offset int) (string, error) {
 	q := strings.TrimRight(strings.TrimSpace(query), ";")
-	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil
+	return fmt.Sprintf("SELECT * FROM (%s) AS _page LIMIT %d OFFSET %d", q, limit, offset), nil
 }
 
 // CountSQL 包装查询为计数查询。
