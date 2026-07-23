@@ -16,7 +16,8 @@ const (
 	DriverMySQL      = "mysql"     // github.com/go-sql-driver/mysql
 	DriverDM         = "dm"        // gitee.com/chunanyong/dm
 	DriverKingbase   = "kingbase"  // gitea.com/kingbase/gokb
-	DriverVastbase   = "opengauss" // gitcode.com/opengauss/openGauss-connector-go-pq（Vastbase G100 基于 openGauss）
+	// 实验性：openGauss connector，可编译；未完成设计文档要求的 Vastbase 真机认证。
+	DriverVastbase = "opengauss" // gitcode.com/opengauss/openGauss-connector-go-pq
 )
 
 // SupportedDrivers 返回当前二进制内置的全部数据资源驱动名（排序后稳定）。
