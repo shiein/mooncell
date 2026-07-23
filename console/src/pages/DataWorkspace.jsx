@@ -45,13 +45,6 @@ function cellToEditString(v) {
   return String(v);
 }
 
-/** 单元格哨兵：显式 NULL（与空字符串区分） */
-const CELL_NULL = { __null: true };
-
-function isCellNull(v) {
-  return v === null || (v && typeof v === 'object' && v.__null);
-}
-
 function isTreeLeaf(kind) {
   return kind === 'table' || kind === 'view' || kind === 'matview';
 }
