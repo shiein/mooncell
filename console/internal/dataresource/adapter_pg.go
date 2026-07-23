@@ -361,11 +361,11 @@ func (a *pgAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 	case "SELECT":
 		return fmt.Sprintf("SELECT * FROM %s LIMIT 100;", qualified), nil
 	case "INSERT":
-		return fmt.Sprintf("INSERT INTO %s (col1, col2) VALUES (?, ?);", qualified), nil
+		return fmt.Sprintf("INSERT INTO %s (col1, col2) VALUES ($1, $2);", qualified), nil
 	case "UPDATE":
-		return fmt.Sprintf("UPDATE %s SET col1 = ? WHERE col2 = ?;", qualified), nil
+		return fmt.Sprintf("UPDATE %s SET col1 = $1 WHERE col2 = $2;", qualified), nil
 	case "DELETE":
-		return fmt.Sprintf("DELETE FROM %s WHERE col1 = ?;", qualified), nil
+		return fmt.Sprintf("DELETE FROM %s WHERE col1 = $1;", qualified), nil
 	}
 	return "", fmt.Errorf("不支持的操作: %s", operation)
 }
