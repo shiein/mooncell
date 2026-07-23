@@ -155,7 +155,8 @@ func normalizeAppIDs(ids []string) []string {
 
 // rollbackRevokedDataResourceTx 比较写库前的旧授权与新授权：
 // - 资源被完全撤销：回滚事务并删除工作台
-// - write → read 降级：同样失效工作台（可能持有可写事务）
+// - access_mode 任意变化（write→read 降级或 read→write 升级）：同样失效
+//   降级避免可写事务残留；升级避免工作台创建时固化的 ReadOnly 粘滞导致已授权写仍 403
 // 设计文档：撤销或降级授权后，立即回滚该用户在对应资源上的活动事务并使工作台失效。
 func (a *api) rollbackRevokedDataResourceTx(username string, oldGrants, newGrants []dataresource.DataResourceGrant) {
 	if a.dataResSvc == nil {
@@ -167,11 +168,7 @@ func (a *api) rollbackRevokedDataResourceTx(username string, oldGrants, newGrant
 	}
 	for _, old := range oldGrants {
 		newMode, still := newModes[old.ResourceID]
-		if !still {
-			a.dataResSvc.InvalidateUserResource(username, old.ResourceID)
-			continue
-		}
-		if old.AccessMode == dataresource.AccessWrite && newMode == dataresource.AccessRead {
+		if !still || old.AccessMode != newMode {
 			a.dataResSvc.InvalidateUserResource(username, old.ResourceID)
 		}
 	}

@@ -51,6 +51,12 @@ func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return nil, "", false
 	}
+	// 以最新授权刷新只读标志，避免授权升级后仍沿用创建时的 ReadOnly 快照。
+	// 授权变更主路径会 Invalidate 工作台；此处为防御性同步。
+	wantRO := !canWriteAccess(mode)
+	ws.mu.Lock()
+	ws.ReadOnly = wantRO
+	ws.mu.Unlock()
 	return ws, mode, true
 }
 
