@@ -184,11 +184,8 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/ddl", drAuth(dataResSvc.MetadataDDL))
 	mux.HandleFunc("POST /api/data-resources/{id}/metadata/sql-template", drAuth(dataResSvc.MetadataSQLTemplate))
 
-	// 数据资源 SQL 执行和导出(Phase 3:自动提交模式)。
-	mux.HandleFunc("POST /api/data-resources/{id}/execute", drAuth(dataResSvc.ExecuteHandler))
-	mux.HandleFunc("POST /api/data-resources/{id}/export", drAuth(dataResSvc.ExportHandler))
-
-	// 数据资源工作台(Phase 4:事务支持)。
+	// 数据资源工作台：执行/导出仅经 workspace 契约（设计文档第三节），
+	// 不再暴露无工作台状态的 /execute、/export 简化入口，避免危险确认与权限分叉。
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces", drAuth(dataResSvc.CreateWorkspaceHandler))
 	mux.HandleFunc("PATCH /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit", drAuth(dataResSvc.PatchAutoCommit))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/execute", drAuth(dataResSvc.ExecuteInWorkspaceHandler))
