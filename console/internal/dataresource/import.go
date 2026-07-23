@@ -262,6 +262,11 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "READ_ONLY", "只读授权不允许导入")
 		return
 	}
+	// 与 preview 一致：有活动手工事务时禁止导入（预览与执行之间可能已开启事务）
+	if s.pools.HasActiveTx(id) {
+		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再导入")
+		return
+	}
 
 	// 原子占用会话，防止同一 importId 并发 execute 双插
 	s.importMu.Lock()
