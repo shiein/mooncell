@@ -15,6 +15,43 @@ import (
 	"net/http"
 )
 
+// canWriteAccess 返回当前 access mode 是否允许写操作（admin 隐式 write）。
+func canWriteAccess(mode string) bool {
+	return mode == "admin" || mode == AccessWrite
+}
+
+// resolveWorkspaceForRequest 校验工作台存在、归属当前用户、path 资源 id 与工作台一致，
+// 且用户对该资源仍有授权（mode != ""）。撤权后 mode 为空，所有工作台操作立即拒绝。
+func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Request) (*Workspace, string, bool) {
+	wsID := r.PathValue("workspaceId")
+	ws, ok := s.workspaces.GetWorkspace(wsID)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
+		return nil, "", false
+	}
+	user, role, ok := userFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
+		return nil, "", false
+	}
+	if ws.Username != user {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
+		return nil, "", false
+	}
+	id := r.PathValue("id")
+	if id != ws.ResourceID {
+		// path 与工作台资源不一致：按不存在处理，避免跨资源误操作
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
+		return nil, "", false
+	}
+	mode, _ := UserAccessMode(s.db, user, role, id)
+	if mode == "" {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
+		return nil, "", false
+	}
+	return ws, mode, true
+}
+
 // CreateWorkspace 处理 POST /api/data-resources/{id}/workspaces
 func (s *Service) CreateWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 	adapter, _, ok := s.getAdapterForRequest(w, r)
@@ -33,16 +70,8 @@ func (s *Service) CreateWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 
 // PatchAutoCommit 处理 PATCH /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit
 func (s *Service) PatchAutoCommit(w http.ResponseWriter, r *http.Request) {
-	wsID := r.PathValue("workspaceId")
-	ws, ok := s.workspaces.GetWorkspace(wsID)
+	ws, _, ok := s.resolveWorkspaceForRequest(w, r)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
-		return
-	}
-	// 校验工作台归属
-	user, _, _ := userFromCtx(r)
-	if ws.Username != user {
-		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
 		return
 	}
 	var body struct {
@@ -64,17 +93,12 @@ func (s *Service) PatchAutoCommit(w http.ResponseWriter, r *http.Request) {
 
 // ExecuteInWorkspace 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/execute
 func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
-	wsID := r.PathValue("workspaceId")
-	ws, ok := s.workspaces.GetWorkspace(wsID)
+	ws, mode, ok := s.resolveWorkspaceForRequest(w, r)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
 		return
 	}
 	user, _, _ := userFromCtx(r)
-	if ws.Username != user {
-		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
-		return
-	}
+	id := r.PathValue("id")
 	var body struct {
 		SQL       string `json:"sql"`
 		Limit     int    `json:"limit,omitempty"`
@@ -89,12 +113,9 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// 权限：只读用户只能执行 SELECT
-	_, role, _ := userFromCtx(r)
-	id := r.PathValue("id")
-	mode, _ := UserAccessMode(s.db, user, role, id)
 	stmtType := ClassifySQL(body.SQL)
-	if mode == AccessRead && !stmtType.IsReadOnly() {
+	// 无写权限（只读或其它非 write）一律拒绝写操作；mode=="" 已在 resolve 拦截
+	if !canWriteAccess(mode) && !stmtType.IsReadOnly() {
 		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许执行写操作")
 		return
 	}
@@ -127,48 +148,42 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 
 // CommitWorkspaceHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/commit
 func (s *Service) CommitWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
-	wsID := r.PathValue("workspaceId")
-	ws, ok := s.workspaces.GetWorkspace(wsID)
+	ws, mode, ok := s.resolveWorkspaceForRequest(w, r)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
+		return
+	}
+	if !canWriteAccess(mode) {
+		// 只读用户不应持有可写事务；提交写事务需 write/admin
+		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许提交写事务")
 		return
 	}
 	user, _, _ := userFromCtx(r)
-	if ws.Username != user {
-		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
-		return
-	}
 	if err := s.workspaces.CommitWorkspace(ws); err != nil {
 		writeErr(w, http.StatusConflict, "COMMIT_FAILED", err.Error())
 		return
 	}
 	s.auditLog(user, "提交事务", ws.ResourceID, "成功")
 	writeOK(w, map[string]any{
-		"txState":   string(ws.TxState),
+		"txState":    string(ws.TxState),
 		"autoCommit": ws.AutoCommit,
 	})
 }
 
 // RollbackWorkspaceHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/rollback
+// 回滚允许只读用户调用（只读事务也需要能主动结束）。
 func (s *Service) RollbackWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
-	wsID := r.PathValue("workspaceId")
-	ws, ok := s.workspaces.GetWorkspace(wsID)
+	ws, _, ok := s.resolveWorkspaceForRequest(w, r)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
 		return
 	}
 	user, _, _ := userFromCtx(r)
-	if ws.Username != user {
-		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
-		return
-	}
 	if err := s.workspaces.RollbackWorkspace(ws); err != nil {
 		writeErr(w, http.StatusInternalServerError, "ROLLBACK_FAILED", err.Error())
 		return
 	}
 	s.auditLog(user, "回滚事务", ws.ResourceID, "成功")
 	writeOK(w, map[string]any{
-		"txState":   string(ws.TxState),
+		"txState":    string(ws.TxState),
 		"autoCommit": ws.AutoCommit,
 	})
 }
@@ -176,15 +191,8 @@ func (s *Service) RollbackWorkspaceHandler(w http.ResponseWriter, r *http.Reques
 // ExportFromWorkspace 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/export
 // 全量导出重新执行最近一次成功的查询。
 func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
-	wsID := r.PathValue("workspaceId")
-	ws, ok := s.workspaces.GetWorkspace(wsID)
+	ws, mode, ok := s.resolveWorkspaceForRequest(w, r)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
-		return
-	}
-	user, _, _ := userFromCtx(r)
-	if ws.Username != user {
-		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
 		return
 	}
 	var body struct {
@@ -207,12 +215,8 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		body.Format = "csv"
 	}
 
-	// 只读用户只能导出 SELECT
 	stmtType := ClassifySQL(sqlText)
-	_, role, _ := userFromCtx(r)
-	id := r.PathValue("id")
-	mode, _ := UserAccessMode(s.db, user, role, id)
-	if mode == AccessRead && !stmtType.IsReadOnly() {
+	if !canWriteAccess(mode) && !stmtType.IsReadOnly() {
 		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许导出写操作结果")
 		return
 	}
@@ -229,15 +233,24 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 
 // DeleteWorkspaceHandler 处理 DELETE /api/data-resources/{id}/workspaces/{workspaceId}
 func (s *Service) DeleteWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
+	// 删除：校验归属与 path 一致即可；授权已撤时仍允许用户清理本地工作台状态
 	wsID := r.PathValue("workspaceId")
 	ws, ok := s.workspaces.GetWorkspace(wsID)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
 		return
 	}
-	user, _, _ := userFromCtx(r)
+	user, _, ok := userFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
+		return
+	}
 	if ws.Username != user {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
+		return
+	}
+	if r.PathValue("id") != ws.ResourceID {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
 		return
 	}
 	s.workspaces.DeleteWorkspace(wsID)
