@@ -117,6 +117,10 @@ func (a *api) session(w http.ResponseWriter, r *http.Request) {
 	}
 	username, ok := a.store.userByToken(c.Value)
 	if !ok {
+		// 会话过期：回滚该用户未完成的数据资源事务
+		if username != "" && a.dataResSvc != nil {
+			a.dataResSvc.InvalidateAllForUser(username)
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 		return
 	}
@@ -141,6 +145,10 @@ func (a *api) currentUser(r *http.Request) (string, string, bool) {
 	}
 	u, ok := a.store.userByToken(c.Value)
 	if !ok {
+		// 闲置/绝对过期：不得留下未完成的工作台事务
+		if u != "" && a.dataResSvc != nil {
+			a.dataResSvc.InvalidateAllForUser(u)
+		}
 		return "", "", false
 	}
 	if !isPassiveRequest(r) {

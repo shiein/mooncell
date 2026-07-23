@@ -476,6 +476,7 @@ const sessionAbsoluteMax = 12 * time.Hour
 
 // userByToken 仅校验会话有效性(闲置过期 / 超绝对寿命即清理并失败),不做续期。
 // 续期由 touchSession 单独负责,且只在"用户动作"请求上调用——避免后台轮询把闲置会话续命。
+// 过期时仍返回 username 且 ok=false，便于调用方回滚该用户数据资源工作台事务。
 func (s *Store) userByToken(token string) (string, bool) {
 	var username string
 	var created, exp int64
@@ -485,7 +486,7 @@ func (s *Store) userByToken(token string) (string, bool) {
 	now := time.Now().UnixMilli()
 	if exp < now || now-created > sessionAbsoluteMax.Milliseconds() {
 		s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
-		return "", false
+		return username, false
 	}
 	return username, true
 }
