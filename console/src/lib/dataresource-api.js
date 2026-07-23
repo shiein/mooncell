@@ -86,6 +86,18 @@ export async function executeSQL(resourceId, workspaceId, { sql, limit, confirme
   );
 }
 
+/** 结果区就地编辑：按主键批量 UPDATE/DELETE（仅单表且有主键） */
+export async function applyRowEdits(resourceId, workspaceId, payload) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/row-edits`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 export async function commitWorkspace(resourceId, workspaceId) {
   return jsonFetch(
     `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/commit`,

@@ -56,14 +56,20 @@ func (t *pgTx) Commit() error   { return t.tx.Commit() }
 func (t *pgTx) Rollback() error { return t.tx.Rollback() }
 
 // Children 返回元数据树子节点。
-// parent.Kind == "root" → 返回 schemas
-// parent.Kind == "schema" → 返回该 schema 下的表、视图、物化视图、函数、序列
+// root → 用户 schema（隐藏系统 schema）
+// schema → 「表」「视图」分组
+// tables_folder → 用户表；views_folder → 用户视图/物化视图
+// 不展示系统函数、序列等，避免树被系统对象淹没。
 func (a *pgAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
 	switch parent.Kind {
 	case NodeRoot, "":
 		return a.listSchemas(ctx)
 	case NodeSchema:
-		return a.listObjects(ctx, parent.Name)
+		return objectGroupNodes(parent.Name), nil
+	case NodeTablesFolder:
+		return a.listTables(ctx, parent.Schema)
+	case NodeViewsFolder:
+		return a.listViews(ctx, parent.Schema)
 	}
 	return nil, nil
 }
@@ -72,6 +78,7 @@ func (a *pgAdapter) listSchemas(ctx context.Context) ([]MetadataNode, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT schema_name FROM information_schema.schemata
 		WHERE schema_name NOT IN ('pg_catalog', 'pg_toast', 'information_schema')
+		  AND schema_name NOT LIKE 'pg\_%' ESCAPE '\'
 		ORDER BY schema_name`)
 	if err != nil {
 		return nil, fmt.Errorf("查询 schema 失败: %w", err)
@@ -90,89 +97,69 @@ func (a *pgAdapter) listSchemas(ctx context.Context) ([]MetadataNode, error) {
 	return out, rows.Err()
 }
 
-func (a *pgAdapter) listObjects(ctx context.Context, schema string) ([]MetadataNode, error) {
-	schema = a.QuoteIdentifier(schema)
+func (a *pgAdapter) listTables(ctx context.Context, schema string) ([]MetadataNode, error) {
 	var out []MetadataNode
-
-	// 表
 	tableRows, err := a.db.QueryContext(ctx, `
 		SELECT table_name FROM information_schema.tables
 		WHERE table_schema = $1 AND table_type = 'BASE TABLE'
-		ORDER BY table_name`, strings.Trim(schema, `"`))
-	if err == nil {
-		for tableRows.Next() {
-			var name string
-			tableRows.Scan(&name)
-			n := MetadataNode{Kind: NodeTable, Schema: strings.Trim(schema, `"`), Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		tableRows.Close()
+		ORDER BY table_name`, schema)
+	if err != nil {
+		return nil, err
 	}
+	defer tableRows.Close()
+	for tableRows.Next() {
+		var name string
+		if err := tableRows.Scan(&name); err != nil {
+			return nil, err
+		}
+		n := MetadataNode{Kind: NodeTable, Schema: schema, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
+	}
+	return out, tableRows.Err()
+}
 
-	// 视图
+func (a *pgAdapter) listViews(ctx context.Context, schema string) ([]MetadataNode, error) {
+	var out []MetadataNode
 	viewRows, err := a.db.QueryContext(ctx, `
 		SELECT table_name FROM information_schema.views
 		WHERE table_schema = $1
-		ORDER BY table_name`, strings.Trim(schema, `"`))
+		ORDER BY table_name`, schema)
 	if err == nil {
 		for viewRows.Next() {
 			var name string
-			viewRows.Scan(&name)
-			n := MetadataNode{Kind: NodeView, Schema: strings.Trim(schema, `"`), Name: name}
+			if err := viewRows.Scan(&name); err != nil {
+				viewRows.Close()
+				return nil, err
+			}
+			n := MetadataNode{Kind: NodeView, Schema: schema, Name: name}
 			n.ID = n.EncodeID()
 			out = append(out, n)
 		}
 		viewRows.Close()
+		if err := viewRows.Err(); err != nil {
+			return nil, err
+		}
 	}
-
-	// 物化视图（pg_matviews）
 	matRows, err := a.db.QueryContext(ctx, `
 		SELECT matviewname FROM pg_matviews WHERE schemaname = $1
-		ORDER BY matviewname`, strings.Trim(schema, `"`))
+		ORDER BY matviewname`, schema)
 	if err == nil {
 		for matRows.Next() {
 			var name string
-			matRows.Scan(&name)
-			n := MetadataNode{Kind: NodeMatView, Schema: strings.Trim(schema, `"`), Name: name}
+			if err := matRows.Scan(&name); err != nil {
+				matRows.Close()
+				return nil, err
+			}
+			n := MetadataNode{Kind: NodeMatView, Schema: schema, Name: name}
 			n.ID = n.EncodeID()
 			out = append(out, n)
 		}
 		matRows.Close()
-	}
-
-	// 函数
-	funcRows, err := a.db.QueryContext(ctx, `
-		SELECT routine_name FROM information_schema.routines
-		WHERE routine_schema = $1 AND routine_type = 'FUNCTION'
-		ORDER BY routine_name`, strings.Trim(schema, `"`))
-	if err == nil {
-		for funcRows.Next() {
-			var name string
-			funcRows.Scan(&name)
-			n := MetadataNode{Kind: NodeFunction, Schema: strings.Trim(schema, `"`), Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
+		if err := matRows.Err(); err != nil {
+			return nil, err
 		}
-		funcRows.Close()
 	}
-
-	// 序列
-	seqRows, err := a.db.QueryContext(ctx, `
-		SELECT sequence_name FROM information_schema.sequences
-		WHERE sequence_schema = $1
-		ORDER BY sequence_name`, strings.Trim(schema, `"`))
-	if err == nil {
-		for seqRows.Next() {
-			var name string
-			seqRows.Scan(&name)
-			n := MetadataNode{Kind: NodeSequence, Schema: strings.Trim(schema, `"`), Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		seqRows.Close()
-	}
-
 	return out, nil
 }
 

@@ -548,19 +548,43 @@ input[type="file"].input::file-selector-button:hover { background: var(--primary
 
 /* ---------- data resource workspace ---------- */
 .dr-workspace {
-  height: calc(100vh - 102px); min-height: 520px;
-  display: flex; flex-direction: column; gap: 14px;
+  /* 去掉 PageHead 后占满内容区可视高度 */
+  height: calc(100vh - 54px - 48px); min-height: 480px;
+  display: flex; flex-direction: column; gap: 0;
+  margin: -8px 0 0;
 }
-.dr-workspace .page-head { flex: none; }
-.dr-workspace-grid { flex: 1; min-height: 0; display: flex; align-items: stretch; }
+/* portal 到 body：盖住整个 Mooncell（侧栏 + 顶栏 + 内容），不是内容区局部。
+   z-index 低于 Dialog(200)/Toast(300)，全屏时弹窗仍可盖在工作台之上。 */
+.dr-workspace.is-fullscreen {
+  position: fixed; inset: 0; z-index: 150;
+  width: 100vw; height: 100vh; min-height: 0; margin: 0;
+  padding: 10px 12px 12px;
+  background: var(--bg);
+  box-sizing: border-box;
+}
+.dr-workspace-placeholder {
+  height: calc(100vh - 54px - 48px); min-height: 480px;
+}
+html[data-dr-fullscreen="1"] .shell {
+  /* 全屏时壳层不可点，避免漏出侧栏可操作 */
+  pointer-events: none;
+}
+.dr-workspace-grid { flex: 1; min-height: 0; display: flex; align-items: stretch; gap: 0; }
 .dr-tree-pane {
   flex: none; min-width: 210px; max-width: 520px; min-height: 0;
   display: flex; flex-direction: column; overflow: hidden; padding: 0;
 }
 .dr-pane-head {
   height: 40px; flex: none; display: flex; align-items: center; justify-content: space-between;
-  padding: 0 8px 0 12px; border-bottom: 1px solid var(--border);
-  font-size: 12px; font-weight: 600; color: var(--fg-secondary);
+  padding: 0 6px 0 4px; border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--fg-secondary); gap: 6px;
+}
+.dr-pane-head-meta {
+  display: flex; align-items: center; gap: 2px; min-width: 0; flex: 1;
+}
+.dr-pane-title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg); font-weight: 650; font-size: 12.5px;
 }
 .dr-tree-scroll { flex: 1; min-height: 0; overflow: auto; padding: 6px; }
 .dr-tree-node {
@@ -572,13 +596,20 @@ input[type="file"].input::file-selector-button:hover { background: var(--primary
 .dr-tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dr-tree-kind {
   margin-left: auto; color: var(--muted-fg); font-size: 10px;
-  text-transform: lowercase; white-space: nowrap;
+  white-space: nowrap;
 }
-.dr-tree-expand { align-self: flex-start; margin-right: 4px; }
+.dr-tree-rail {
+  flex: none; display: flex; flex-direction: column; gap: 6px;
+  align-self: flex-start; margin-right: 6px; padding-top: 2px;
+}
 .dr-main-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .dr-toolbar {
   min-height: 42px; flex: none; display: flex; align-items: center; flex-wrap: wrap;
   gap: 3px; padding: 5px 7px; border-radius: 10px 10px 0 0;
+}
+.dr-toolbar-resource {
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; font-weight: 600; color: var(--fg-secondary); padding: 0 4px;
 }
 .dr-toolbar-sep { width: 1px; height: 20px; margin: 0 3px; background: var(--border); }
 .dr-editor-card {
@@ -592,10 +623,15 @@ input[type="file"].input::file-selector-button:hover { background: var(--primary
   overflow: hidden; padding: 0; border-radius: 0 0 10px 10px;
 }
 .dr-result-status {
-  height: 34px; flex: none; display: flex; align-items: center; gap: 8px;
-  padding: 0 11px; border-bottom: 1px solid var(--border);
+  min-height: 34px; flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 4px 11px; border-bottom: 1px solid var(--border);
   color: var(--muted-fg); font-size: 11.5px;
 }
+.dr-pk-mark { color: var(--primary); font-size: 10px; font-weight: 650; }
+.dr-cell-input {
+  width: 100%; min-width: 72px; height: 28px; padding: 2px 6px; font-size: 12.5px;
+}
+.dr-row-deleted td { text-decoration: line-through; background: color-mix(in srgb, var(--error) 8%, transparent); }
 .dr-table-scroll { min-width: 0; overflow: auto; }
 .dr-result-card > .dr-table-scroll { flex: 1; min-height: 0; }
 .dr-result-card .table { width: max-content; min-width: 100%; }
@@ -615,9 +651,11 @@ input[type="file"].input::file-selector-button:hover { background: var(--primary
   min-height: 44px; display: flex; align-items: center; justify-content: center;
   gap: 7px; color: var(--muted-fg); font-size: 12px;
 }
+/* 菜单挂 body + fixed + 视口坐标，避免被滚动容器/transform 祖先带偏 */
 .dr-context-menu {
-  position: fixed; z-index: 220; min-width: 190px; max-width: 280px;
+  position: fixed; z-index: 250; min-width: 190px; max-width: 280px;
   padding: 5px; box-shadow: var(--shadow-lg);
+  margin: 0;
 }
 .dr-context-title {
   padding: 6px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -665,7 +703,8 @@ input[type="file"].input::file-selector-button:hover { background: var(--primary
 .dr-mapping-row:last-child { border-bottom: 0; }
 
 @media (max-width: 820px) {
-  .dr-workspace { height: auto; min-height: calc(100vh - 100px); }
+  .dr-workspace { height: auto; min-height: calc(100vh - 54px - 32px); }
+  .dr-workspace.is-fullscreen { height: 100vh; }
   .dr-workspace-grid { min-height: 620px; position: relative; }
   .dr-tree-pane {
     position: absolute; inset: 0 auto 0 0; z-index: 20;

@@ -42,15 +42,25 @@ func (a *dmAdapter) Begin(ctx context.Context, readOnly bool) (Transaction, erro
 	return &pgTx{tx: tx}, nil
 }
 
-// Children: root → schemas(owners), schema → tables/views/functions/procedures/sequences
+// Children: root → 业务 schema；schema → 表/视图分组；隐藏系统用户与系统函数等。
 func (a *dmAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
 	switch parent.Kind {
 	case NodeRoot, "":
 		return a.listSchemas(ctx)
 	case NodeSchema:
-		return a.listObjects(ctx, parent.Name)
+		return objectGroupNodes(parent.Name), nil
+	case NodeTablesFolder:
+		return a.listTables(ctx, parent.Schema)
+	case NodeViewsFolder:
+		return a.listViews(ctx, parent.Schema)
 	}
 	return nil, nil
+}
+
+// dmSystemOwners 达梦/Oracle 风格系统 schema，不在业务元数据树展示。
+var dmSystemOwners = map[string]bool{
+	"SYS": true, "SYSDBA": true, "SYSSSO": true, "SYSAUDITOR": true,
+	"CTISYS": true, "SYSGEO": true, "PUBLIC": true, "OUTLN": true, "DMSERVER": true,
 }
 
 func (a *dmAdapter) listSchemas(ctx context.Context) ([]MetadataNode, error) {
@@ -63,7 +73,12 @@ func (a *dmAdapter) listSchemas(ctx context.Context) ([]MetadataNode, error) {
 	var out []MetadataNode
 	for rows.Next() {
 		var name string
-		rows.Scan(&name)
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if dmSystemOwners[strings.ToUpper(name)] {
+			continue
+		}
 		n := MetadataNode{Kind: NodeSchema, Schema: name, Name: name}
 		n.ID = n.EncodeID()
 		out = append(out, n)
@@ -71,84 +86,48 @@ func (a *dmAdapter) listSchemas(ctx context.Context) ([]MetadataNode, error) {
 	return out, rows.Err()
 }
 
-func (a *dmAdapter) listObjects(ctx context.Context, owner string) ([]MetadataNode, error) {
+func (a *dmAdapter) listTables(ctx context.Context, owner string) ([]MetadataNode, error) {
 	var out []MetadataNode
-	// 表
 	tableRows, err := a.db.QueryContext(ctx, `
 		SELECT object_name FROM all_objects
 		WHERE owner = ? AND object_type = 'TABLE'
 		ORDER BY object_name`, owner)
-	if err == nil {
-		for tableRows.Next() {
-			var name string
-			tableRows.Scan(&name)
-			n := MetadataNode{Kind: NodeTable, Schema: owner, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		tableRows.Close()
+	if err != nil {
+		return nil, err
 	}
-	// 视图
+	defer tableRows.Close()
+	for tableRows.Next() {
+		var name string
+		if err := tableRows.Scan(&name); err != nil {
+			return nil, err
+		}
+		n := MetadataNode{Kind: NodeTable, Schema: owner, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
+	}
+	return out, tableRows.Err()
+}
+
+func (a *dmAdapter) listViews(ctx context.Context, owner string) ([]MetadataNode, error) {
+	var out []MetadataNode
 	viewRows, err := a.db.QueryContext(ctx, `
 		SELECT object_name FROM all_objects
 		WHERE owner = ? AND object_type = 'VIEW'
 		ORDER BY object_name`, owner)
-	if err == nil {
-		for viewRows.Next() {
-			var name string
-			viewRows.Scan(&name)
-			n := MetadataNode{Kind: NodeView, Schema: owner, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		viewRows.Close()
+	if err != nil {
+		return nil, err
 	}
-	// 函数
-	funcRows, err := a.db.QueryContext(ctx, `
-		SELECT object_name FROM all_objects
-		WHERE owner = ? AND object_type = 'FUNCTION'
-		ORDER BY object_name`, owner)
-	if err == nil {
-		for funcRows.Next() {
-			var name string
-			funcRows.Scan(&name)
-			n := MetadataNode{Kind: NodeFunction, Schema: owner, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
+	defer viewRows.Close()
+	for viewRows.Next() {
+		var name string
+		if err := viewRows.Scan(&name); err != nil {
+			return nil, err
 		}
-		funcRows.Close()
+		n := MetadataNode{Kind: NodeView, Schema: owner, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
 	}
-	// 存储过程
-	procRows, err := a.db.QueryContext(ctx, `
-		SELECT object_name FROM all_objects
-		WHERE owner = ? AND object_type = 'PROCEDURE'
-		ORDER BY object_name`, owner)
-	if err == nil {
-		for procRows.Next() {
-			var name string
-			procRows.Scan(&name)
-			n := MetadataNode{Kind: NodeProcedure, Schema: owner, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		procRows.Close()
-	}
-	// 序列
-	seqRows, err := a.db.QueryContext(ctx, `
-		SELECT object_name FROM all_objects
-		WHERE owner = ? AND object_type = 'SEQUENCE'
-		ORDER BY object_name`, owner)
-	if err == nil {
-		for seqRows.Next() {
-			var name string
-			seqRows.Scan(&name)
-			n := MetadataNode{Kind: NodeSequence, Schema: owner, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		seqRows.Close()
-	}
-	return out, nil
+	return out, viewRows.Err()
 }
 
 func (a *dmAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStructure, error) {

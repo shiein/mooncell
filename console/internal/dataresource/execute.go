@@ -40,6 +40,8 @@ type ExecutionResult struct {
 	DurationMs    int64           `json:"durationMs"`
 	Messages      []string        `json:"messages,omitempty"`
 	TxState       string          `json:"txState"` // none/active/failed
+	// Editable 非空表示该 SELECT 结果支持就地编辑（单表 + 有主键）；只读用户由 handler 省略。
+	Editable *EditableInfo `json:"editable,omitempty"`
 }
 
 // ExecuteOptions 控制执行行为。

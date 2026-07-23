@@ -18,16 +18,27 @@ import (
 type MetadataNodeKind string
 
 const (
-	NodeRoot      MetadataNodeKind = "root"      // 根：代表数据库本身
-	NodeSchema    MetadataNodeKind = "schema"    // schema/owner
-	NodeTable     MetadataNodeKind = "table"     // 表
-	NodeView      MetadataNodeKind = "view"      // 视图
-	NodeMatView   MetadataNodeKind = "matview"   // 物化视图
-	NodeFunction  MetadataNodeKind = "function"  // 函数
-	NodeProcedure MetadataNodeKind = "procedure" // 存储过程
-	NodeSequence  MetadataNodeKind = "sequence"  // 序列
-	NodeTrigger   MetadataNodeKind = "trigger"   // 触发器
+	NodeRoot         MetadataNodeKind = "root"          // 根：代表数据库本身
+	NodeSchema       MetadataNodeKind = "schema"        // schema/owner
+	NodeTablesFolder MetadataNodeKind = "tables_folder" // 虚拟分组：表
+	NodeViewsFolder  MetadataNodeKind = "views_folder"  // 虚拟分组：视图（含物化视图）
+	NodeTable        MetadataNodeKind = "table"         // 表
+	NodeView         MetadataNodeKind = "view"          // 视图
+	NodeMatView      MetadataNodeKind = "matview"       // 物化视图
+	NodeFunction     MetadataNodeKind = "function"      // 函数（树默认不展示系统函数）
+	NodeProcedure    MetadataNodeKind = "procedure"     // 存储过程
+	NodeSequence     MetadataNodeKind = "sequence"      // 序列
+	NodeTrigger      MetadataNodeKind = "trigger"       // 触发器
 )
+
+// objectGroupNodes 在 schema 下返回「表 / 视图」分组节点，不再把函数等系统对象混在一级列表。
+func objectGroupNodes(schema string) []MetadataNode {
+	tables := MetadataNode{Kind: NodeTablesFolder, Schema: schema, Name: "表"}
+	tables.ID = tables.EncodeID()
+	views := MetadataNode{Kind: NodeViewsFolder, Schema: schema, Name: "视图"}
+	views.ID = views.EncodeID()
+	return []MetadataNode{tables, views}
+}
 
 // MetadataNode 是元数据树中的一个节点。
 // ID 是服务端编码的不透明标识符，前端不可解码；服务端解码后仍重新校验。

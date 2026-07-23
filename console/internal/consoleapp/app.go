@@ -190,6 +190,7 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces", drAuth(dataResSvc.CreateWorkspaceHandler))
 	mux.HandleFunc("PATCH /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit", drAuth(dataResSvc.PatchAutoCommit))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/execute", drAuth(dataResSvc.ExecuteInWorkspaceHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/row-edits", drAuth(dataResSvc.ApplyRowEditsHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/commit", drAuth(dataResSvc.CommitWorkspaceHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/rollback", drAuth(dataResSvc.RollbackWorkspaceHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/export", drAuth(dataResSvc.ExportFromWorkspace))

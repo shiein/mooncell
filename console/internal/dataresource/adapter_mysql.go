@@ -61,13 +61,17 @@ func (a *mysqlAdapter) ensureBoundSchema(ctx context.Context, schema string) err
 	return nil
 }
 
-// Children: root → 仅绑定库, schema(database) → tables/views/functions/procedures/triggers
+// Children: root → 仅绑定库；schema → 表/视图分组；不展示系统函数/过程/触发器。
 func (a *mysqlAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
 	switch parent.Kind {
 	case NodeRoot, "":
 		return a.listDatabases(ctx)
 	case NodeSchema:
-		return a.listTables(ctx, parent.Name)
+		return objectGroupNodes(parent.Name), nil
+	case NodeTablesFolder:
+		return a.listBaseTables(ctx, parent.Schema)
+	case NodeViewsFolder:
+		return a.listViews(ctx, parent.Schema)
 	}
 	return nil, nil
 }
@@ -78,92 +82,60 @@ func (a *mysqlAdapter) listDatabases(ctx context.Context) ([]MetadataNode, error
 	if err != nil {
 		return nil, err
 	}
+	// 系统库本身不作为业务树根（绑定资源若误指系统库仍展示，由管理员配置约束）
 	n := MetadataNode{Kind: NodeSchema, Schema: name, Name: name}
 	n.ID = n.EncodeID()
 	return []MetadataNode{n}, nil
 }
 
-func (a *mysqlAdapter) listTables(ctx context.Context, dbName string) ([]MetadataNode, error) {
+func (a *mysqlAdapter) listBaseTables(ctx context.Context, dbName string) ([]MetadataNode, error) {
 	if err := a.ensureBoundSchema(ctx, dbName); err != nil {
 		return nil, err
 	}
 	var out []MetadataNode
-	// 表
 	tableRows, err := a.db.QueryContext(ctx, `
 		SELECT table_name FROM information_schema.tables
 		WHERE table_schema = ? AND table_type = 'BASE TABLE'
 		ORDER BY table_name`, dbName)
-	if err == nil {
-		for tableRows.Next() {
-			var name string
-			tableRows.Scan(&name)
-			n := MetadataNode{Kind: NodeTable, Schema: dbName, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		tableRows.Close()
+	if err != nil {
+		return nil, err
 	}
-	// 视图
+	defer tableRows.Close()
+	for tableRows.Next() {
+		var name string
+		if err := tableRows.Scan(&name); err != nil {
+			return nil, err
+		}
+		n := MetadataNode{Kind: NodeTable, Schema: dbName, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
+	}
+	return out, tableRows.Err()
+}
+
+func (a *mysqlAdapter) listViews(ctx context.Context, dbName string) ([]MetadataNode, error) {
+	if err := a.ensureBoundSchema(ctx, dbName); err != nil {
+		return nil, err
+	}
+	var out []MetadataNode
 	viewRows, err := a.db.QueryContext(ctx, `
 		SELECT table_name FROM information_schema.views
 		WHERE table_schema = ?
 		ORDER BY table_name`, dbName)
-	if err == nil {
-		for viewRows.Next() {
-			var name string
-			viewRows.Scan(&name)
-			n := MetadataNode{Kind: NodeView, Schema: dbName, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		viewRows.Close()
+	if err != nil {
+		return nil, err
 	}
-	// 函数
-	funcRows, err := a.db.QueryContext(ctx, `
-		SELECT routine_name FROM information_schema.routines
-		WHERE routine_schema = ? AND routine_type = 'FUNCTION'
-		ORDER BY routine_name`, dbName)
-	if err == nil {
-		for funcRows.Next() {
-			var name string
-			funcRows.Scan(&name)
-			n := MetadataNode{Kind: NodeFunction, Schema: dbName, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
+	defer viewRows.Close()
+	for viewRows.Next() {
+		var name string
+		if err := viewRows.Scan(&name); err != nil {
+			return nil, err
 		}
-		funcRows.Close()
+		n := MetadataNode{Kind: NodeView, Schema: dbName, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
 	}
-	// 存储过程
-	procRows, err := a.db.QueryContext(ctx, `
-		SELECT routine_name FROM information_schema.routines
-		WHERE routine_schema = ? AND routine_type = 'PROCEDURE'
-		ORDER BY routine_name`, dbName)
-	if err == nil {
-		for procRows.Next() {
-			var name string
-			procRows.Scan(&name)
-			n := MetadataNode{Kind: NodeProcedure, Schema: dbName, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		procRows.Close()
-	}
-	// 触发器
-	trigRows, err := a.db.QueryContext(ctx, `
-		SELECT trigger_name FROM information_schema.triggers
-		WHERE trigger_schema = ?
-		ORDER BY trigger_name`, dbName)
-	if err == nil {
-		for trigRows.Next() {
-			var name string
-			trigRows.Scan(&name)
-			n := MetadataNode{Kind: NodeTrigger, Schema: dbName, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		trigRows.Close()
-	}
-	return out, nil
+	return out, viewRows.Err()
 }
 
 func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStructure, error) {

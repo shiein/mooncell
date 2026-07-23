@@ -1,5 +1,6 @@
 // 数据资源工作台：元数据树 + SQL 编辑器 + 结果/结构/导入导出。
 import React from 'react';
+import { createPortal } from 'react-dom';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql } from '@codemirror/lang-sql';
 import { format as formatSQL } from 'sql-formatter';
@@ -7,9 +8,8 @@ import { useMC } from '../lib/data.js';
 import {
   Btn, Icon, Spinner, EmptyState, Dialog, toast, Badge, Field, confirmDialog,
 } from '../components/primitives.jsx';
-import { PageHead } from '../components/Shell.jsx';
 import {
-  createWorkspace, deleteWorkspace, executeSQL, patchAutoCommit,
+  createWorkspace, deleteWorkspace, executeSQL, patchAutoCommit, applyRowEdits,
   commitWorkspace, rollbackWorkspace, metadataChildren, metadataStructure, metadataDDL,
   sqlTemplate, listSavedSQL, createSavedSQL, updateSavedSQL, deleteSavedSQL,
   exportWorkspace, previewImport, selectImportSheet, executeImport, deleteImport,
@@ -19,6 +19,31 @@ const TREE_MIN = 180;
 const TREE_MAX = 480;
 const EDITOR_MIN = 120;
 const EDITOR_MAX = 560;
+
+/** schema 节点：MySQL 下是 database（库）；PG/Kingbase/DM 是 schema/owner（模式） */
+function kindLabelFor(kind, dbType) {
+  if (kind === 'schema') {
+    return dbType === 'mysql' ? '库' : '模式';
+  }
+  if (kind === 'table') return '表';
+  if (kind === 'view') return '视图';
+  if (kind === 'matview') return '物化';
+  return '';
+}
+
+function cellIsBinary(v) {
+  return v != null && typeof v === 'object' && v.type === 'binary';
+}
+
+function cellToEditString(v) {
+  if (v == null) return '';
+  if (cellIsBinary(v)) return '';
+  return String(v);
+}
+
+function isTreeLeaf(kind) {
+  return kind === 'table' || kind === 'view' || kind === 'matview';
+}
 
 function dialectFor(dbType) {
   if (dbType === 'mysql') return 'mysql';
@@ -124,6 +149,12 @@ function DataWorkspacePage({ resource, onBack }) {
   const [busy, setBusy] = React.useState(false);
   const [result, setResult] = React.useState(null);
   const [msg, setMsg] = React.useState('');
+  // 结果区就地编辑（仅单表 + 主键 + 写权限）
+  const [editMode, setEditMode] = React.useState(false);
+  const [draftRows, setDraftRows] = React.useState([]); // 与 result.rows 对齐的可编辑副本
+  const [deletedRows, setDeletedRows] = React.useState(() => new Set());
+  const [editSaving, setEditSaving] = React.useState(false);
+  const lastSQLRef = React.useRef('');
   const [tree, setTree] = React.useState([]);
   const [expanded, setExpanded] = React.useState({});
   const [childrenMap, setChildrenMap] = React.useState({});
@@ -140,6 +171,30 @@ function DataWorkspacePage({ resource, onBack }) {
   const [treeCollapsed, setTreeCollapsed] = React.useState(false);
   const [treeWidth, setTreeWidth] = React.useState(() => Number(localStorage.getItem('mc_dr_tree_width')) || 280);
   const [editorHeight, setEditorHeight] = React.useState(() => Number(localStorage.getItem('mc_dr_editor_height')) || 220);
+  const [fullscreen, setFullscreen] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!fullscreen) return undefined;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    // 全屏时给 body 打标，便于全局样式屏蔽侧栏/顶栏层叠干扰
+    document.documentElement.setAttribute('data-dr-fullscreen', '1');
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (contextMenu) {
+          setContextMenu(null);
+          return;
+        }
+        setFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      document.documentElement.removeAttribute('data-dr-fullscreen');
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [fullscreen, contextMenu]);
 
   const refreshSaved = React.useCallback(async () => {
     const items = await listSavedSQL(resource.id);
@@ -206,6 +261,16 @@ function DataWorkspacePage({ resource, onBack }) {
     return findStatementRange(view.state.doc.toString(), selection.head);
   }, [sqlText]);
 
+  const resetEditState = React.useCallback((res) => {
+    setEditMode(false);
+    setDeletedRows(new Set());
+    if (res?.rows) {
+      setDraftRows(res.rows.map((row) => row.map((cell) => (cellIsBinary(cell) ? cell : cell))));
+    } else {
+      setDraftRows([]);
+    }
+  }, []);
+
   const runSQL = async (confirmed = false, fixedSQL = '') => {
     const target = fixedSQL || editorTarget().sql;
     if (!wsId || !target) return;
@@ -217,14 +282,24 @@ function DataWorkspacePage({ resource, onBack }) {
       const res = await executeSQL(resource.id, wsId, {
         sql: target, limit: 100, confirmed, signal: controller.signal,
       });
+      lastSQLRef.current = target;
       setResult(res);
+      resetEditState(res);
       setTxState(res.txState || 'none');
       if (res.statementType && res.statementType !== 'SELECT') {
         setMsg(`${res.statementType} · 影响 ${res.affectedRows ?? 0} 行 · ${res.durationMs}ms`);
       } else {
+        let extra = '';
+        if (canWrite && res.editable) {
+          if (res.editable.primaryKeys?.length) {
+            extra = ' · 可就地编辑';
+          } else if (res.editable.reason) {
+            extra = ' · 不可就地编辑';
+          }
+        }
         setMsg(`返回 ${res.returnedRows ?? 0} 行`
           + (res.totalStatus === 'available' ? ` / 共 ${res.total}` : '')
-          + ` · ${res.durationMs}ms`);
+          + ` · ${res.durationMs}ms` + extra);
       }
     } catch (e) {
       if (e.name === 'AbortError') {
@@ -284,6 +359,112 @@ function DataWorkspacePage({ resource, onBack }) {
       toast('已回滚');
     } catch (e) {
       toast(e.message || '回滚失败', { tone: 'error' });
+    }
+  };
+
+  const canGridEdit = !!(canWrite && result?.editable?.primaryKeys?.length && result?.columns?.length);
+  const pkSet = React.useMemo(() => {
+    const s = new Set();
+    (result?.editable?.primaryKeys || []).forEach((k) => s.add(String(k).toLowerCase()));
+    return s;
+  }, [result]);
+
+  const beginEdit = () => {
+    if (!canGridEdit) return;
+    setDraftRows((result.rows || []).map((row) => row.slice()));
+    setDeletedRows(new Set());
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => {
+    resetEditState(result);
+  };
+
+  const setCellValue = (rowIndex, colIndex, value) => {
+    setDraftRows((rows) => {
+      const next = rows.map((r) => r.slice());
+      if (!next[rowIndex]) return rows;
+      next[rowIndex][colIndex] = value === '' ? null : value;
+      return next;
+    });
+  };
+
+  const toggleDeleteRow = (rowIndex) => {
+    setDeletedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowIndex)) next.delete(rowIndex);
+      else next.add(rowIndex);
+      return next;
+    });
+  };
+
+  const saveEdits = async () => {
+    if (!wsId || !result?.editable || !canGridEdit) return;
+    const cols = result.columns || [];
+    const pks = result.editable.primaryKeys || [];
+    const orig = result.rows || [];
+    const updates = [];
+    const deletes = [];
+
+    for (let ri = 0; ri < orig.length; ri += 1) {
+      const keys = {};
+      pks.forEach((pk) => {
+        const ci = cols.findIndex((c) => String(c).toLowerCase() === String(pk).toLowerCase());
+        if (ci >= 0) keys[pk] = orig[ri][ci];
+      });
+      if (deletedRows.has(ri)) {
+        deletes.push({ keys });
+        continue;
+      }
+      const set = {};
+      let changed = false;
+      cols.forEach((col, ci) => {
+        if (pkSet.has(String(col).toLowerCase())) return;
+        if (cellIsBinary(orig[ri][ci]) || cellIsBinary(draftRows[ri]?.[ci])) return;
+        const before = orig[ri][ci];
+        const after = draftRows[ri]?.[ci];
+        const b = before == null ? null : String(before);
+        const a = after == null ? null : String(after);
+        if (b !== a) {
+          set[col] = after === '' ? null : after;
+          changed = true;
+        }
+      });
+      if (changed) updates.push({ keys, set });
+    }
+
+    if (!updates.length && !deletes.length) {
+      toast('没有需要保存的变更', { tone: 'warn' });
+      return;
+    }
+    if (deletes.length) {
+      const ok = await confirmDialog({
+        title: '确认删除行',
+        message: `将删除 ${deletes.length} 行，并更新 ${updates.length} 行。此操作直接写入数据库。`,
+        confirmText: '保存',
+        tone: 'danger',
+      });
+      if (!ok) return;
+    }
+
+    setEditSaving(true);
+    try {
+      const res = await applyRowEdits(resource.id, wsId, {
+        schema: result.editable.schema || '',
+        table: result.editable.table,
+        updates,
+        deletes,
+      });
+      toast(`已保存 · 更新 ${res.updated || 0} · 删除 ${res.deleted || 0}`);
+      setEditMode(false);
+      // 重新执行原查询刷新
+      if (lastSQLRef.current) {
+        await runSQL(false, lastSQLRef.current);
+      }
+    } catch (e) {
+      toast(e.message || '保存失败', { tone: 'error' });
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -514,7 +695,7 @@ function DataWorkspacePage({ resource, onBack }) {
 
   const contextActions = (node) => {
     const table = node.kind === 'table';
-    const leaf = table || node.kind === 'view' || node.kind === 'matview';
+    const leaf = isTreeLeaf(node.kind);
     if (!leaf) return [];
     const actions = [
       { label: '生成 SELECT', action: () => insertTemplate(node, 'SELECT') },
@@ -537,7 +718,8 @@ function DataWorkspacePage({ resource, onBack }) {
     const id = node.id || node.name;
     const kids = childrenMap[id];
     const isOpen = expanded[id];
-    const leaf = node.kind === 'table' || node.kind === 'view' || node.kind === 'matview';
+    const leaf = isTreeLeaf(node.kind);
+    const kindLabel = kindLabelFor(node.kind, resource.dbType);
     return (
       <div key={id}>
         <div className="dr-tree-node" style={{ paddingLeft: 8 + depth * 13 }}
@@ -548,33 +730,60 @@ function DataWorkspacePage({ resource, onBack }) {
             if (actions.length === 0) return;
             event.preventDefault();
             event.stopPropagation();
-            setContextMenu({ x: event.clientX, y: event.clientY, node, actions });
+            // clientX/Y 是视口坐标；菜单 portal 到 body 后用 fixed，避免 .content 祖先 transform 导致漂移
+            const pad = 8;
+            const estW = 220;
+            const estH = 36 + actions.length * 34;
+            let x = event.clientX;
+            let y = event.clientY;
+            if (x + estW > window.innerWidth - pad) x = Math.max(pad, window.innerWidth - estW - pad);
+            if (y + estH > window.innerHeight - pad) y = Math.max(pad, window.innerHeight - estH - pad);
+            setContextMenu({ x, y, node, actions });
           }}>
           {!leaf ? <Icon name={isOpen ? 'chevronD' : 'chevronR'} size={12} /> : <span style={{ width: 12 }} />}
           <Icon name={leaf ? 'box' : 'folder'} size={13} />
           <span className="dr-tree-label">{node.name}</span>
-          <span className="dr-tree-kind">{node.kind}</span>
+          {kindLabel ? <span className="dr-tree-kind">{kindLabel}</span> : null}
         </div>
         {isOpen && kids ? kids.map((child) => renderNode(child, depth + 1)) : null}
       </div>
     );
   };
 
-  return (
-    <div className="dr-workspace">
-      <PageHead title={resource.name}
-        desc={`${resource.host}:${resource.port} / ${resource.databaseName} · ${resource.accessMode || ''}`}
-        actions={<Btn variant="ghost" icon="chevronL" onClick={onBack}>返回列表</Btn>} />
+  const contextMenuNode = contextMenu
+    ? createPortal(
+      <div
+        className="card dr-context-menu"
+        style={{ left: contextMenu.x, top: contextMenu.y }}
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      >
+        <div className="dr-context-title">{contextMenu.node.name}</div>
+        {contextMenu.actions.map((item) => (
+          <button key={item.label} type="button" onClick={() => {
+            setContextMenu(null);
+            item.action();
+          }}>{item.label}</button>
+        ))}
+      </div>,
+      document.body,
+    )
+    : null;
 
+  const workspace = (
+    <div className={`dr-workspace${fullscreen ? ' is-fullscreen' : ''}`}>
       <div className="dr-workspace-grid">
         {!treeCollapsed ? (
           <React.Fragment>
             <aside className="card dr-tree-pane" style={{ width: treeWidth }}>
               <div className="dr-pane-head">
-                <span>元数据</span>
+                <div className="dr-pane-head-meta" title={`${resource.host}:${resource.port}/${resource.databaseName}`}>
+                  <Btn size="sm" variant="ghost" icon="chevronL" title="返回列表" onClick={onBack} />
+                  <span className="dr-pane-title">{resource.name}</span>
+                </div>
                 <div style={{ display: 'flex', gap: 2 }}>
                   <Btn size="sm" variant="ghost" icon="rotate" title="刷新" disabled={treeLoading} onClick={refreshRoot} />
-                  <Btn size="sm" variant="ghost" icon="chevronL" title="折叠" onClick={() => setTreeCollapsed(true)} />
+                  <Btn size="sm" variant="ghost" icon="chevronL" title="折叠元数据" onClick={() => setTreeCollapsed(true)} />
                 </div>
               </div>
               <div className="dr-tree-scroll">
@@ -586,12 +795,20 @@ function DataWorkspacePage({ resource, onBack }) {
             <div className="dr-resizer dr-resizer-x" onMouseDown={(e) => beginResize('tree', e)} />
           </React.Fragment>
         ) : (
-          <Btn className="dr-tree-expand" size="sm" variant="outline" icon="chevronR"
-            title="展开元数据" onClick={() => setTreeCollapsed(false)} />
+          <div className="dr-tree-rail">
+            <Btn size="sm" variant="outline" icon="chevronL" title="返回列表" onClick={onBack} />
+            <Btn size="sm" variant="outline" icon="chevronR" title="展开元数据" onClick={() => setTreeCollapsed(false)} />
+          </div>
         )}
 
         <main className="dr-main-pane">
           <div className="card dr-toolbar">
+            {treeCollapsed ? (
+              <React.Fragment>
+                <span className="dr-toolbar-resource" title={resource.name}>{resource.name}</span>
+                <span className="dr-toolbar-sep" />
+              </React.Fragment>
+            ) : null}
             <Btn size="sm" variant="primary" icon="play" disabled={busy || !wsId} onClick={() => runSQL(false)}>执行</Btn>
             <Btn size="sm" variant="ghost" icon="stop" disabled={!busy}
               onClick={() => runControllerRef.current?.abort()}>取消</Btn>
@@ -610,6 +827,11 @@ function DataWorkspacePage({ resource, onBack }) {
             <div style={{ flex: 1 }} />
             <Badge tone={txState === 'active' ? 'warn' : txState === 'failed' ? 'error' : 'info'}>事务 {txState}</Badge>
             {!canWrite ? <Badge tone="info">只读</Badge> : null}
+            <Btn size="sm" variant="ghost" icon={fullscreen ? 'x' : 'layers'}
+              title={fullscreen ? '退出全屏 (Esc)' : '全屏工作台'}
+              onClick={() => setFullscreen((v) => !v)}>
+              {fullscreen ? '退出全屏' : '全屏'}
+            </Btn>
           </div>
 
           <div className="card dr-editor-card" style={{ flexBasis: editorHeight }}>
@@ -622,19 +844,79 @@ function DataWorkspacePage({ resource, onBack }) {
 
           <div className="card dr-result-card">
             <div className="dr-result-status">
-              <span>{msg || '结果'}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {msg || '结果'}
+                {canWrite && result?.editable?.reason ? (
+                  <span style={{ marginLeft: 8, color: 'var(--warn)' }} title={result.editable.reason}>
+                    · {result.editable.reason}
+                  </span>
+                ) : null}
+              </span>
               {busy ? <Spinner size={13} /> : null}
+              {canGridEdit && !editMode ? (
+                <Btn size="sm" variant="outline" disabled={busy} onClick={beginEdit}>编辑结果</Btn>
+              ) : null}
+              {editMode ? (
+                <React.Fragment>
+                  <Btn size="sm" variant="ghost" disabled={editSaving} onClick={cancelEdit}>取消</Btn>
+                  <Btn size="sm" variant="primary" disabled={editSaving} onClick={saveEdits}>
+                    {editSaving ? <Spinner size={12} /> : '保存变更'}
+                  </Btn>
+                </React.Fragment>
+              ) : null}
             </div>
             {result?.columns ? (
               <div className="dr-table-scroll">
                 <table className="table">
-                  <thead><tr>{result.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+                  <thead>
+                    <tr>
+                      {editMode ? <th style={{ width: 44 }}>删除</th> : null}
+                      {result.columns.map((column) => (
+                        <th key={column}>
+                          {column}
+                          {pkSet.has(String(column).toLowerCase()) ? (
+                            <span className="dr-pk-mark" title="主键"> PK</span>
+                          ) : null}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
                   <tbody>
-                    {(result.rows || []).map((row, rowIndex) => (
-                      <tr key={rowIndex}>
-                        {row.map((cell, cellIndex) => <td key={cellIndex} style={{ fontSize: 12.5 }}>{cellDisplay(cell)}</td>)}
-                      </tr>
-                    ))}
+                    {(editMode ? draftRows : (result.rows || [])).map((row, rowIndex) => {
+                      const markedDel = editMode && deletedRows.has(rowIndex);
+                      return (
+                        <tr key={rowIndex} className={markedDel ? 'dr-row-deleted' : undefined}>
+                          {editMode ? (
+                            <td>
+                              <input type="checkbox" checked={!!markedDel}
+                                onChange={() => toggleDeleteRow(rowIndex)}
+                                title="标记删除" />
+                            </td>
+                          ) : null}
+                          {row.map((cell, cellIndex) => {
+                            const col = result.columns[cellIndex];
+                            const isPK = pkSet.has(String(col).toLowerCase());
+                            const binary = cellIsBinary(cell) || cellIsBinary(result.rows?.[rowIndex]?.[cellIndex]);
+                            if (editMode && !markedDel && !isPK && !binary) {
+                              return (
+                                <td key={cellIndex} style={{ fontSize: 12.5, padding: '2px 4px' }}>
+                                  <input
+                                    className="input dr-cell-input"
+                                    value={cellToEditString(cell)}
+                                    onChange={(e) => setCellValue(rowIndex, cellIndex, e.target.value)}
+                                  />
+                                </td>
+                              );
+                            }
+                            return (
+                              <td key={cellIndex} style={{ fontSize: 12.5, opacity: markedDel ? 0.45 : 1 }}>
+                                {cellDisplay(editMode ? (result.rows?.[rowIndex]?.[cellIndex] ?? cell) : cell)}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -642,19 +924,6 @@ function DataWorkspacePage({ resource, onBack }) {
           </div>
         </main>
       </div>
-
-      {contextMenu ? (
-        <div className="card dr-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}
-          onClick={(e) => e.stopPropagation()}>
-          <div className="dr-context-title">{contextMenu.node.name}</div>
-          {contextMenu.actions.map((item) => (
-            <button key={item.label} type="button" onClick={() => {
-              setContextMenu(null);
-              item.action();
-            }}>{item.label}</button>
-          ))}
-        </div>
-      ) : null}
 
       <Dialog open={saveOpen} onClose={() => setSaveOpen(false)} width={420}
         title={activeSaved ? '更新保存的 SQL' : '保存 SQL'}
@@ -744,6 +1013,16 @@ function DataWorkspacePage({ resource, onBack }) {
           onFile={chooseImportFile} onSheet={changeImportSheet} /> : null}
       </Dialog>
     </div>
+  );
+
+  // 全屏：portal 到 body，盖住侧栏/顶栏整个 Mooncell 壳层（避免 .content-inner transform 把 fixed 困在内容区）
+  return (
+    <React.Fragment>
+      {fullscreen ? createPortal(workspace, document.body) : workspace}
+      {contextMenuNode}
+      {/* 全屏时原内容区占位，避免路由区塌陷闪动 */}
+      {fullscreen ? <div className="dr-workspace-placeholder" aria-hidden="true" /> : null}
+    </React.Fragment>
   );
 }
 

@@ -12,8 +12,10 @@
 package dataresource
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -156,6 +158,10 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusBadRequest, "EXEC_ERROR", err.Error())
 		return
 	}
+	// 读写用户：单表 SELECT 且有主键时附带 editable 元数据，供结果区就地改删
+	if canWriteAccess(mode) && result != nil && stmtType.IsReadOnly() {
+		s.attachEditableMeta(r.Context(), ws, body.SQL, result)
+	}
 	// 审计：写操作（DML/DDL）记录类型、哈希、行数、耗时；不记录普通 SELECT 全文。
 	if stmtType.IsWrite() || stmtType.IsDDLorDCL() || stmtType == StmtTruncate || stmtType == StmtCall {
 		auditResult := "成功"
@@ -164,6 +170,94 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		}
 		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, auditResult, result.DurationMs)
 	}
+	writeOK(w, result)
+}
+
+// attachEditableMeta 为单表 SELECT 结果附加就地编辑元数据（仅表、需主键）。
+func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText string, result *ExecutionResult) {
+	target, ok := DetectEditableSelect(sqlText)
+	if !ok {
+		return
+	}
+	schema := target.Schema
+	if schema == "" {
+		if res, found, _ := GetDataResource(s.db, ws.ResourceID); found {
+			schema = res.DefaultSchema
+			if schema == "" {
+				schema = res.DatabaseName
+			}
+		}
+	}
+	obj := MetadataNode{Kind: NodeTable, Schema: schema, Name: target.Table}
+	structure, err := ws.Adapter.Describe(ctx, obj)
+	if err != nil {
+		// 可能是视图或对象不存在：不开放编辑
+		return
+	}
+	pks := primaryKeyColumns(structure)
+	info := &EditableInfo{Schema: schema, Table: target.Table}
+	if len(pks) == 0 {
+		info.Reason = "该表没有主键，无法安全地修改或删除行（需主键定位目标行，与 Navicat 等工具一致）"
+	} else {
+		info.PrimaryKeys = pks
+	}
+	result.Editable = info
+}
+
+// ApplyRowEditsHandler 处理 POST .../workspaces/{workspaceId}/row-edits
+// 仅 write/admin；按主键批量 UPDATE/DELETE。
+func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
+	ws, mode, ok := s.resolveWorkspaceForRequest(w, r)
+	if !ok {
+		return
+	}
+	if !canWriteAccess(mode) {
+		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许就地编辑")
+		return
+	}
+	user, _, _ := userFromCtx(r)
+	var body RowEditRequest
+	if err := jsonDecodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	body.Table = strings.TrimSpace(body.Table)
+	body.Schema = strings.TrimSpace(body.Schema)
+	if body.Table == "" {
+		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", "表名不能为空")
+		return
+	}
+
+	// 重新读取主键，不信任客户端传入的 PK 列表作为权威
+	obj := MetadataNode{Kind: NodeTable, Schema: body.Schema, Name: body.Table}
+	structure, err := ws.Adapter.Describe(r.Context(), obj)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "NOT_A_TABLE", "无法读取表结构，仅支持单表结果编辑")
+		return
+	}
+	pks := primaryKeyColumns(structure)
+	if len(pks) == 0 {
+		writeErr(w, http.StatusBadRequest, "NO_PRIMARY_KEY", "该表没有主键，无法安全地修改或删除行")
+		return
+	}
+
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	// 有活动手工事务时禁止就地编辑，避免与用户事务交错
+	if ws.TxState == TxActive || ws.TxState == TxFailed {
+		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再就地编辑")
+		return
+	}
+	ws.LastActivity = time.Now()
+
+	result, err := ApplyRowEdits(r.Context(), ws.Adapter, body.Schema, body.Table, pks, body)
+	if err != nil {
+		s.auditLog(user, "就地编辑", body.Schema+"."+body.Table, "失败·"+err.Error())
+		writeErr(w, http.StatusBadRequest, "ROW_EDIT_ERROR", err.Error())
+		return
+	}
+	s.auditLog(user, "就地编辑", body.Schema+"."+body.Table,
+		fmt.Sprintf("成功·更新%d·删除%d", result.Updated, result.Deleted))
 	writeOK(w, result)
 }
 
