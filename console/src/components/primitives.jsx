@@ -1,5 +1,6 @@
 // Mooncell — UI 原语(shadcn 风格)
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { APP_STATUS, DEPLOY_TYPES } from '../lib/data.js';
 
 const IC = {
@@ -169,14 +170,32 @@ function Dialog({ open, onClose, title, desc, width, children, foot, noClose }) 
     if (!open) return;
     const fn = (e) => { if (e.key === "Escape" && !noClose) onClose && onClose(); };
     window.addEventListener("keydown", fn);
-    return () => window.removeEventListener("keydown", fn);
-  }, [open, noClose]);
+    // 打开时锁住背景滚动，避免遮罩下页面滚动与弹层裁切感
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", fn);
+      document.body.style.overflow = prev;
+    };
+  }, [open, noClose, onClose]);
   if (!open) return null;
-  return (
-    <div className="dialog-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !noClose) onClose && onClose(); }}>
-      <div className="dialog" style={width ? { width } : undefined}>
+  // portal 到 body：避开 .content / .content-inner 的 overflow、动画 transform 造成的
+  // fixed 定位失效、顶栏/PageHead 压住弹层、以及背后容器局部发灰的观感问题。
+  return createPortal(
+    <div
+      className="dialog-overlay"
+      role="presentation"
+      onMouseDown={(e) => { if (e.target === e.currentTarget && !noClose) onClose && onClose(); }}
+    >
+      <div
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        style={width ? { width } : undefined}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <div className="dialog-head">
-          <div>
+          <div style={{ minWidth: 0 }}>
             <h3 style={{ fontSize: 16 }}>{title}</h3>
             {desc ? <p style={{ fontSize: 12.5, color: "var(--muted-fg)", marginTop: 3 }}>{desc}</p> : null}
           </div>
@@ -185,7 +204,8 @@ function Dialog({ open, onClose, title, desc, width, children, foot, noClose }) 
         <div className="dialog-body">{children}</div>
         {foot ? <div className="dialog-foot">{foot}</div> : null}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

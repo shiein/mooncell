@@ -424,21 +424,42 @@ input[type="file"].input::file-selector-button:hover { background: var(--primary
 .table tbody tr:hover { background: var(--muted); }
 .table .mono { font-size: 12px; }
 
-/* ---------- dialog ---------- */
+/* ---------- dialog ----------
+   portal 到 body 后仍用 fixed 盖满视口；遮罩用主题感知半透明，避免背后整页被压成脏灰。
+   过高弹层：overlay 可滚动 + dialog 自身 max-height，body 区滚动，避免顶栏/PageHead 裁切标题。 */
 .dialog-overlay {
-  position: fixed; inset: 0; background: rgba(20,18,12,.45); z-index: 100;
-  display: flex; align-items: center; justify-content: center; padding: 24px;
-  backdrop-filter: blur(2px);
+  position: fixed; inset: 0; z-index: 200;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: max(24px, 4vh) 24px 32px;
+  overflow-y: auto;
+  /* 兜底 + 主题色半透明：比原先 rgba(20,18,12,.45)+blur 更轻，背后容器不至于脏灰 */
+  background: rgba(15, 18, 28, 0.28);
+}
+[data-theme="dark"] .dialog-overlay {
+  background: rgba(0, 0, 0, 0.48);
 }
 .dialog {
   background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-  box-shadow: var(--shadow-lg); width: 560px; max-width: 100%; max-height: calc(100vh - 64px);
+  box-shadow: var(--shadow-lg); width: 560px; max-width: 100%;
+  max-height: min(720px, calc(100vh - 48px));
+  margin: auto 0; /* 内容矮时在可滚动 overlay 内视觉居中 */
   display: flex; flex-direction: column;
+  min-height: 0;
+  flex: none;
 }
-.dialog-head { padding: 18px 22px 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dialog-head {
+  padding: 18px 22px 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  flex: none;
+}
 .dialog-head h3 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dialog-body { padding: 16px 22px 20px; overflow-y: auto; }
-.dialog-foot { padding: 14px 22px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+.dialog-body {
+  padding: 16px 22px 20px; overflow-y: auto; min-height: 0; flex: 1 1 auto;
+}
+.dialog-foot {
+  padding: 14px 22px; border-top: 1px solid var(--border);
+  display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px;
+  flex: none;
+}
 @keyframes mc-fade { from { opacity: 0; } }
 
 /* ---------- toast ---------- */
