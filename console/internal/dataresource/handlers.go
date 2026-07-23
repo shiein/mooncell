@@ -227,6 +227,8 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新资源失败")
 		return
 	}
+	// 配置变更后关闭旧连接池，下次 GetDB 按新 DSN/凭据懒加载
+	s.pools.CloseDB(id)
 	res, _, _ := GetDataResource(s.db, id)
 	s.auditLog(user, "更新数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
