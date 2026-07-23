@@ -15,7 +15,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math/big"
-	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -363,48 +362,4 @@ func (de DatabaseError) toError() error {
 	return fmt.Errorf("[%s] %s", de.Code, de.Message)
 }
 
-// ExecuteHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/execute
-// Phase 3 简化版：自动提交模式执行，无工作台状态。
-func (s *Service) ExecuteHandler(w http.ResponseWriter, r *http.Request) {
-	adapter, mode, ok := s.getAdapterForRequest(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		SQL     string `json:"sql"`
-		Limit   int    `json:"limit,omitempty"`
-	}
-	if err := jsonDecodeBody(r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
-		return
-	}
-	if strings.TrimSpace(body.SQL) == "" {
-		writeErr(w, http.StatusBadRequest, "EMPTY_SQL", "SQL 不能为空")
-		return
-	}
 
-	// 权限：只读用户只能执行 SELECT
-	stmtType := ClassifySQL(body.SQL)
-	readOnly := mode == AccessRead
-	if readOnly && !stmtType.IsReadOnly() {
-		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许执行写操作")
-		return
-	}
-
-	opts := ExecuteOptions{
-		Limit:      body.Limit,
-		ReadOnly:   readOnly,
-		AutoCommit: true, // Phase 3 全部自动提交
-	}
-
-	result, err := ExecuteSQL(r.Context(), adapter, body.SQL, opts)
-	if err != nil {
-		if apiErr, isAPIErr := err.(*APIError); isAPIErr {
-			writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
-			return
-		}
-		writeErr(w, http.StatusBadRequest, "EXEC_ERROR", err.Error())
-		return
-	}
-	writeOK(w, result)
-}

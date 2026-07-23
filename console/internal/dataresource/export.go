@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -182,50 +181,4 @@ func valueToCSV(v any, dbTypeName string) string {
 	}
 }
 
-// ExportHandler 处理 POST /api/data-resources/{id}/export
-// Phase 3 简化版：直接导出请求体中的 SQL 查询结果。
-func (s *Service) ExportHandler(w http.ResponseWriter, r *http.Request) {
-	adapter, mode, ok := s.getAdapterForRequest(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		SQL    string `json:"sql"`
-		Format string `json:"format"` // csv 或 xlsx
-	}
-	if err := jsonDecodeBody(r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
-		return
-	}
-	if strings.TrimSpace(body.SQL) == "" {
-		writeErr(w, http.StatusBadRequest, "EMPTY_SQL", "SQL 不能为空")
-		return
-	}
 
-	if err := prepareExportSQL(body.SQL); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_SQL", err.Error())
-		return
-	}
-	_ = mode // 授权已在 getAdapterForRequest 校验；SQL 已限制为只读
-
-	if body.Format == "" {
-		body.Format = "csv"
-	}
-
-	switch body.Format {
-	case "csv":
-		if err := ExportCSV(r.Context(), adapter, body.SQL, w); err != nil {
-			// 若尚未写 body 头外的错误，尽量返回 JSON；流已开始时只能放弃
-			if _, isLimit := err.(*ErrExportLimit); !isLimit {
-				// 响应可能已开始，无法安全回写 JSON
-			}
-			return
-		}
-	case "xlsx":
-		if err := ExportXLSX(r.Context(), adapter, body.SQL, w); err != nil {
-			return
-		}
-	default:
-		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: "+body.Format)
-	}
-}
