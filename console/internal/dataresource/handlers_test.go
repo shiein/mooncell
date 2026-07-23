@@ -12,7 +12,8 @@ func TestDSNBuilders(t *testing.T) {
 	r := DataResource{DBType: DriverPostgreSQL, Host: "h", Port: 5432, Username: "u", DatabaseName: "d", SSLMode: "disable"}
 
 	pg := BuildDSN(r, "secret")
-	if !strings.Contains(pg, "host=h") || !strings.Contains(pg, "password=secret") || !strings.Contains(pg, "sslmode=disable") {
+	// libpq key=value：值以单引号包裹
+	if !strings.Contains(pg, "host='h'") || !strings.Contains(pg, "password='secret'") || !strings.Contains(pg, "sslmode=disable") {
 		t.Errorf("pgDSN 不符: %s", pg)
 	}
 
@@ -30,14 +31,38 @@ func TestDSNBuilders(t *testing.T) {
 
 	r.DBType = DriverKingbase
 	kb := BuildDSN(r, "secret")
-	if !strings.Contains(kb, "host=h") {
+	if !strings.Contains(kb, "host='h'") {
 		t.Errorf("kingbase DSN 应兼容 PG 格式: %s", kb)
 	}
 
 	r.DBType = DriverVastbase
 	vb := BuildDSN(r, "secret")
-	if !strings.Contains(vb, "host=h") {
+	if !strings.Contains(vb, "host='h'") {
 		t.Errorf("vastbase DSN 应兼容 PG 格式: %s", vb)
+	}
+}
+
+func TestDSNSpecialChars(t *testing.T) {
+	// 密码含空格、@、:、'、\ 等时不得破坏 DSN 字段边界
+	pass := `p@ss:w0rd 'with\chars`
+	r := DataResource{DBType: DriverPostgreSQL, Host: "h", Port: 5432, Username: "u", DatabaseName: "d", SSLMode: "disable"}
+	pg := BuildDSN(r, pass)
+	if !strings.Contains(pg, "password='p@ss:w0rd \\'with\\\\chars'") {
+		t.Errorf("pgDSN 特殊字符转义不符: %s", pg)
+	}
+
+	r.DBType = DriverMySQL
+	my := BuildDSN(r, pass)
+	// FormatDSN 编码密码后仍保留 tcp 地址；明文中的空格不得裸出现在 userinfo
+	if !strings.Contains(my, "@tcp(h:5432)/d") {
+		t.Errorf("mysqlDSN 特殊字符不符: %s", my)
+	}
+
+	r.DBType = DriverDM
+	dm := BuildDSN(r, "p@ss:word")
+	// URL 编码后 host 前的 @ 仍是 userinfo 分隔，密码中的 @ 被编码
+	if !strings.HasPrefix(dm, "dm://") || !strings.Contains(dm, "@h:5432") || strings.Contains(dm, "p@ss") {
+		t.Errorf("dmDSN 特殊字符不符: %s", dm)
 	}
 }
 
