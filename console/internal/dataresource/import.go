@@ -35,14 +35,16 @@ type ImportSession struct {
 	ID         string
 	ResourceID string
 	Username   string
-	FilePath   string    // 临时文件路径
-	FileName   string    // 原始文件名
-	Format     string    // csv 或 xlsx
-	Sheet      string    // XLSX 工作表名
-	HeaderRow  int       // 表头行号（0-based）
+	FilePath   string     // 临时文件路径
+	FileName   string     // 原始文件名
+	Format     string     // csv 或 xlsx
+	Sheet      string     // XLSX 工作表名
+	HeaderRow  int        // 表头行号（0-based）
 	Preview    [][]string // 预览数据（含表头）
-	Columns    []string  // 文件列名（来自表头）
+	Columns    []string   // 文件列名（来自表头）
 	CreatedAt  time.Time
+	// inUse 为 true 时表示正在 execute，禁止并发二次执行（由 importMu 保护）。
+	inUse bool
 }
 
 // ImportPreviewResult 是预览返回。
@@ -261,17 +263,36 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 原子占用会话，防止同一 importId 并发 execute 双插
 	s.importMu.Lock()
 	session, exists := s.importSessions[importID]
-	s.importMu.Unlock()
 	if !exists || session.ResourceID != id || session.Username != user {
+		s.importMu.Unlock()
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "导入会话不存在")
 		return
 	}
+	if session.inUse {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusConflict, "IMPORT_IN_PROGRESS", "该导入会话正在执行中")
+		return
+	}
+	session.inUse = true
+	s.importMu.Unlock()
+	// 失败可重试：清除 inUse；成功则 removeImportSession
+	releaseInUse := true
+	defer func() {
+		if releaseInUse {
+			s.importMu.Lock()
+			if session != nil {
+				session.inUse = false
+			}
+			s.importMu.Unlock()
+		}
+	}()
 
 	var body struct {
-		TableName   string   `json:"tableName"`
-		Schema      string   `json:"schema"`
+		TableName     string   `json:"tableName"`
+		Schema        string   `json:"schema"`
 		ColumnMapping []string `json:"columnMapping"` // 目标列名，顺序与文件列对应；空字符串表示跳过
 	}
 	if err := jsonDecodeBody(r, &body); err != nil {
@@ -316,7 +337,8 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, fmt.Sprintf("成功·%d行", result.ImportedRows))
-	// 导入完成，清理临时文件
+	// 成功：不再释放 inUse，直接销毁会话
+	releaseInUse = false
 	s.removeImportSession(importID)
 	writeOK(w, result)
 }
