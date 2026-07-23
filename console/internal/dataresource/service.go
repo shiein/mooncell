@@ -84,6 +84,13 @@ func (s *Service) RollbackUserTx(username, resourceID string) {
 	}
 }
 
+// InvalidateUserResource 回滚并删除用户在某资源上的全部工作台（撤销/降级授权时调用）。
+func (s *Service) InvalidateUserResource(username, resourceID string) {
+	if s.workspaces != nil {
+		s.workspaces.InvalidateUserResource(username, resourceID)
+	}
+}
+
 // CleanupExpiredImports 清理超时的导入会话和临时文件。
 func (s *Service) CleanupExpiredImports() {
 	s.cleanupExpiredImports()

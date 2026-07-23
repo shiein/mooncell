@@ -103,13 +103,18 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		for i := range grants {
 			grants[i].Username = target
 		}
+		// 必须在写库前读取旧授权；否则比较新旧时「旧」已是新数据，撤权回滚永远不命中。
+		oldGrants, err := dataresource.UserGrants(a.store.db, target)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取数据资源授权失败"})
+			return
+		}
 		if err := dataresource.SetUserGrants(a.store.db, target, grants, a.sessionUser(r)); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新数据资源授权失败"})
 			return
 		}
-		// 撤销或降级授权后，回滚该用户在对应资源上的活动事务。
-		// 比较新旧授权，对不再有 write/read 权限的资源回滚其工作台事务。
-		a.rollbackRevokedDataResourceTx(target, grants)
+		// 撤销或降级授权后，立即回滚活动事务并失效工作台。
+		a.rollbackRevokedDataResourceTx(target, oldGrants, grants)
 	}
 	a.store.appendAudit(a.sessionUser(r), "更新用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -156,25 +161,26 @@ func normalizeAppIDs(ids []string) []string {
 	return out
 }
 
-// rollbackRevokedDataResourceTx 在用户授权更新后，回滚其不再有权限的资源上的活动事务。
+// rollbackRevokedDataResourceTx 比较写库前的旧授权与新授权：
+// - 资源被完全撤销：回滚事务并删除工作台
+// - write → read 降级：同样失效工作台（可能持有可写事务）
 // 设计文档：撤销或降级授权后，立即回滚该用户在对应资源上的活动事务并使工作台失效。
-func (a *api) rollbackRevokedDataResourceTx(username string, newGrants []dataresource.DataResourceGrant) {
+func (a *api) rollbackRevokedDataResourceTx(username string, oldGrants, newGrants []dataresource.DataResourceGrant) {
 	if a.dataResSvc == nil {
 		return
 	}
-	// 构建新授权的资源集合
-	newSet := map[string]bool{}
+	newModes := map[string]string{}
 	for _, g := range newGrants {
-		newSet[g.ResourceID] = true
-	}
-	// 查询旧授权，对不再授权的资源回滚事务
-	oldGrants, err := dataresource.UserGrants(a.store.db, username)
-	if err != nil {
-		return
+		newModes[g.ResourceID] = g.AccessMode
 	}
 	for _, old := range oldGrants {
-		if !newSet[old.ResourceID] {
-			a.dataResSvc.RollbackUserTx(username, old.ResourceID)
+		newMode, still := newModes[old.ResourceID]
+		if !still {
+			a.dataResSvc.InvalidateUserResource(username, old.ResourceID)
+			continue
+		}
+		if old.AccessMode == dataresource.AccessWrite && newMode == dataresource.AccessRead {
+			a.dataResSvc.InvalidateUserResource(username, old.ResourceID)
 		}
 	}
 }

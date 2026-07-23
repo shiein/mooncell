@@ -122,6 +122,22 @@ func (wm *WorkspaceManager) RollbackUserTx(username, resourceID string) {
 	}
 }
 
+// InvalidateUserResource 回滚并删除用户在某资源上的全部工作台（撤销/降级授权时调用）。
+// 设计：撤权后立即回滚活动事务并使工作台失效。
+func (wm *WorkspaceManager) InvalidateUserResource(username, resourceID string) {
+	wm.mu.Lock()
+	var ids []string
+	for id, ws := range wm.workspaces {
+		if ws.Username == username && ws.ResourceID == resourceID {
+			ids = append(ids, id)
+		}
+	}
+	wm.mu.Unlock()
+	for _, id := range ids {
+		wm.DeleteWorkspace(id)
+	}
+}
+
 // CleanupIdle 回滚超时的手工事务。由后台定期调用。
 func (wm *WorkspaceManager) CleanupIdle() int {
 	wm.mu.Lock()
