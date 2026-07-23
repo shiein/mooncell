@@ -57,19 +57,22 @@ func (t *pgTx) Rollback() error { return t.tx.Rollback() }
 
 // Children 返回元数据树子节点。
 // root → 用户 schema（隐藏系统 schema）
-// schema → 「表」「视图」分组
-// tables_folder → 用户表；views_folder → 用户视图/物化视图
-// 不展示系统函数、序列等，避免树被系统对象淹没。
+// schema → 表/视图/函数/序列 分组
+// 各 folder → 对应对象（系统 schema 已过滤，此处为业务对象）
 func (a *pgAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
 	switch parent.Kind {
 	case NodeRoot, "":
 		return a.listSchemas(ctx)
 	case NodeSchema:
-		return objectGroupNodes(parent.Name), nil
+		return objectGroupNodes(parent.Name, NodeTablesFolder, NodeViewsFolder, NodeFunctionsFolder, NodeSequencesFolder), nil
 	case NodeTablesFolder:
 		return a.listTables(ctx, parent.Schema)
 	case NodeViewsFolder:
 		return a.listViews(ctx, parent.Schema)
+	case NodeFunctionsFolder:
+		return a.listFunctions(ctx, parent.Schema)
+	case NodeSequencesFolder:
+		return a.listSequences(ctx, parent.Schema)
 	}
 	return nil, nil
 }
@@ -161,6 +164,52 @@ func (a *pgAdapter) listViews(ctx context.Context, schema string) ([]MetadataNod
 		}
 	}
 	return out, nil
+}
+
+func (a *pgAdapter) listFunctions(ctx context.Context, schema string) ([]MetadataNode, error) {
+	var out []MetadataNode
+	// 排除系统扩展产生的内部函数名以 pg_ 开头的常见项；业务 schema 下仍展示用户函数
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT routine_name FROM information_schema.routines
+		WHERE routine_schema = $1 AND routine_type = 'FUNCTION'
+		  AND routine_name NOT LIKE 'pg\_%' ESCAPE '\'
+		ORDER BY routine_name`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		n := MetadataNode{Kind: NodeFunction, Schema: schema, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (a *pgAdapter) listSequences(ctx context.Context, schema string) ([]MetadataNode, error) {
+	var out []MetadataNode
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT sequence_name FROM information_schema.sequences
+		WHERE sequence_schema = $1
+		ORDER BY sequence_name`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		n := MetadataNode{Kind: NodeSequence, Schema: schema, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 // Describe 返回表/视图的完整结构。

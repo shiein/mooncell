@@ -5,6 +5,12 @@
 //   - 更新资源配置后关闭旧连接池。
 //   - 存在活动手工事务时禁止更新或删除资源并返回 409。
 //   - 外部数据库连接池与 Mooncell SQLite 的单连接池完全分离。
+//
+// 资源级占用（同一把 mu）：
+//   - activeTx：手工事务
+//   - importing：导入执行
+//   - exclusive：配置更新/删除
+// 三者互斥，在同一锁下竞争，避免 TOCTOU。
 package dataresource
 
 import (
@@ -20,8 +26,10 @@ type PoolManager struct {
 	pools map[string]*sql.DB // resourceID → *sql.DB
 	// activeTx 记录每个资源是否有活动手工事务（ref count）。
 	activeTx map[string]int
-	// importing 记录每个资源上正在执行的导入占用（ref count），与手工事务互斥。
+	// importing 记录每个资源上正在执行的导入占用（ref count）。
 	importing map[string]int
+	// exclusive 配置变更占用（更新/删除资源），与事务、导入互斥。
+	exclusive map[string]int
 	credKey   *CredentialKey
 }
 
@@ -31,6 +39,7 @@ func NewPoolManager(credKey *CredentialKey) *PoolManager {
 		pools:     map[string]*sql.DB{},
 		activeTx:  map[string]int{},
 		importing: map[string]int{},
+		exclusive: map[string]int{},
 		credKey:   credKey,
 	}
 }
@@ -90,12 +99,26 @@ func (pm *PoolManager) HasActiveTx(resourceID string) bool {
 	return pm.activeTx[resourceID] > 0
 }
 
-// BeginTx 增加活动事务计数。若资源正在导入则失败，避免与导入并行写。
+// IsBusy 资源是否被事务/导入/配置变更占用。
+func (pm *PoolManager) IsBusy(resourceID string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.isBusyLocked(resourceID)
+}
+
+func (pm *PoolManager) isBusyLocked(resourceID string) bool {
+	return pm.activeTx[resourceID] > 0 || pm.importing[resourceID] > 0 || pm.exclusive[resourceID] > 0
+}
+
+// BeginTx 增加活动事务计数。若资源正在导入或配置变更则失败。
 func (pm *PoolManager) BeginTx(resourceID string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.importing[resourceID] > 0 {
 		return fmt.Errorf("资源正在导入数据，请稍后再开启手工事务")
+	}
+	if pm.exclusive[resourceID] > 0 {
+		return fmt.Errorf("资源正在更新或删除，请稍后再开启手工事务")
 	}
 	pm.activeTx[resourceID]++
 	return nil
@@ -110,12 +133,11 @@ func (pm *PoolManager) EndTx(resourceID string) {
 	pm.mu.Unlock()
 }
 
-// TryBeginImport 在无活动手工事务时原子占用导入槽；失败表示有手工事务（或竞态）。
-// 与 BeginTx 互斥，消除「HasActiveTx 检查 → Begin 手工事务」之间的 TOCTOU。
+// TryBeginImport 在无活动手工事务且无配置变更时原子占用导入槽。
 func (pm *PoolManager) TryBeginImport(resourceID string) bool {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	if pm.activeTx[resourceID] > 0 {
+	if pm.activeTx[resourceID] > 0 || pm.exclusive[resourceID] > 0 {
 		return false
 	}
 	pm.importing[resourceID]++
@@ -131,6 +153,24 @@ func (pm *PoolManager) EndImport(resourceID string) {
 			delete(pm.importing, resourceID)
 		}
 	}
+	pm.mu.Unlock()
+}
+
+// TryBeginExclusive 配置更新/删除的互斥占用：要求无事务、无导入、无其他 exclusive。
+func (pm *PoolManager) TryBeginExclusive(resourceID string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.isBusyLocked(resourceID) {
+		return false
+	}
+	pm.exclusive[resourceID] = 1
+	return true
+}
+
+// EndExclusive 释放配置变更占用。
+func (pm *PoolManager) EndExclusive(resourceID string) {
+	pm.mu.Lock()
+	delete(pm.exclusive, resourceID)
 	pm.mu.Unlock()
 }
 

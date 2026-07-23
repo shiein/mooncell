@@ -6,7 +6,7 @@ import { PageHead } from '../components/Shell.jsx';
 import { useAsync } from '../lib/async.js';
 import {
   listDataResources, listDrivers, createDataResource, updateDataResource,
-  deleteDataResource, testDataResource, testDataResourceConfig,
+  deleteDataResource, testDataResource, testDataResourceConfig, testDataResourceDraft,
 } from '../lib/dataresource-api.js';
 
 const EMPTY_RESOURCE_FORM = {
@@ -222,24 +222,8 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
 
   const onTestConfig = async () => {
     const f = currentForm();
-    // 编辑且未改密码：用已保存资源测连接；新建/改了密码：用表单配置测
-    if (isEdit && !String(f.password || '')) {
-      setTesting(true);
-      try {
-        const res = await testDataResource(resource.id);
-        if (res.ok) {
-          toast(`连接成功 · ${res.latencyMs || 0}ms` + (res.readOnlyTxSupported ? ' · 只读事务可用' : ' · 只读事务不可用'));
-        } else {
-          toast(res.error || res.errorCode || '连接失败', { tone: 'error' });
-        }
-      } catch (e) {
-        toast(e.message || '测试失败', { tone: 'error' });
-      } finally {
-        setTesting(false);
-      }
-      return;
-    }
-    const v = validateResourceForm(f, { requirePassword: true });
+    // 新建必须有密码；编辑可空密码（服务端用已存密码 + 表单主机/库等）
+    const v = validateResourceForm(f, { requirePassword: !isEdit });
     if (!v.ok) {
       toast(v.message, { tone: 'warn' });
       return;
@@ -247,7 +231,14 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
     const payload = resourcePayloadFromForm(f);
     setTesting(true);
     try {
-      const res = await testDataResourceConfig(payload);
+      let res;
+      if (isEdit) {
+        // 始终测「当前表单配置」；密码空则 test-draft 用已保存凭据
+        if (!payload.password) delete payload.password;
+        res = await testDataResourceDraft(resource.id, payload);
+      } else {
+        res = await testDataResourceConfig(payload);
+      }
       if (res.ok) {
         toast(`连接成功 · ${res.latencyMs || 0}ms` + (res.readOnlyTxSupported ? ' · 只读事务可用' : ' · 只读事务不可用'));
       } else {

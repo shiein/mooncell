@@ -20,6 +20,8 @@ type RowEditRequest struct {
 type RowUpdateOp struct {
 	Keys map[string]any `json:"keys"` // 主键列 → 原值
 	Set  map[string]any `json:"set"`  // 要更新的列 → 新值
+	// Old 为变更列的查询时原值，用于乐观条件（主键 + 原值），避免静默覆盖他人修改。
+	Old map[string]any `json:"old,omitempty"`
 }
 
 // RowDeleteOp 以主键删除一行。
@@ -96,10 +98,14 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 		if len(up.Keys) == 0 || len(up.Set) == 0 {
 			return nil, fmt.Errorf("第 %d 条更新缺少主键或变更列", i+1)
 		}
-		setCols := make([]string, 0, len(up.Set))
-		setArgs := make([]any, 0, len(up.Set)+len(serverPKs))
+		setArgs := make([]any, 0, len(up.Set)+len(serverPKs)*2)
 		ph = 0
 		var setParts []string
+		type oldCond struct {
+			col string
+			val any
+		}
+		var oldConds []oldCond
 		for col, val := range up.Set {
 			col = strings.TrimSpace(col)
 			if col == "" || pkSet[col] || pkSet[strings.ToLower(col)] {
@@ -108,15 +114,36 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 			if !colSet[col] && !colSet[strings.ToLower(col)] {
 				return nil, fmt.Errorf("未知列: %s", col)
 			}
-			// 解析真实列名大小写
+			nv, err := normalizeEditValue(val)
+			if err != nil {
+				return nil, fmt.Errorf("第 %d 条更新列 %s: %w", i+1, col, err)
+			}
 			real := resolveColumnName(structure, col)
 			setParts = append(setParts, adapter.QuoteIdentifier(real)+" = "+nextPH())
-			setArgs = append(setArgs, normalizeEditValue(val))
-			setCols = append(setCols, real)
+			setArgs = append(setArgs, nv)
+			if up.Old != nil {
+				if ov, ok := lookupKey(up.Old, col); ok {
+					onv, err := normalizeEditValue(ov)
+					if err != nil {
+						return nil, fmt.Errorf("第 %d 条更新列 %s 原值: %w", i+1, col, err)
+					}
+					oldConds = append(oldConds, oldCond{col: real, val: onv})
+				}
+			}
 		}
 		whereSQL, whereArgs, err := buildPKWhere(adapter, serverPKs, up.Keys, &ph)
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 条更新: %w", i+1, err)
+		}
+		// 乐观条件接在主键 WHERE 之后，占位符序号连续
+		for _, oc := range oldConds {
+			if oc.val == nil {
+				whereSQL += " AND " + adapter.QuoteIdentifier(oc.col) + " IS NULL"
+			} else {
+				ph++
+				whereSQL += " AND " + adapter.QuoteIdentifier(oc.col) + " = " + adapter.Placeholder(ph)
+				whereArgs = append(whereArgs, oc.val)
+			}
 		}
 		sqlText := fmt.Sprintf("UPDATE %s SET %s WHERE %s", qual, strings.Join(setParts, ", "), whereSQL)
 		args := append(setArgs, whereArgs...)
@@ -126,10 +153,9 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 		}
 		n, _ := res.RowsAffected()
 		if n == 0 {
-			return nil, fmt.Errorf("第 %d 条更新未命中行（主键可能已变化）", i+1)
+			return nil, fmt.Errorf("第 %d 条更新未命中行（数据可能已被他人修改，请重新查询）", i+1)
 		}
 		updated += int(n)
-		_ = setCols
 	}
 
 	for i, del := range req.Deletes {
@@ -137,6 +163,14 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 			return nil, fmt.Errorf("第 %d 条删除缺少主键", i+1)
 		}
 		ph = 0
+		// 校验主键值类型
+		for _, pk := range serverPKs {
+			if v, ok := lookupKey(del.Keys, pk); ok {
+				if _, err := normalizeEditValue(v); err != nil {
+					return nil, fmt.Errorf("第 %d 条删除: %w", i+1, err)
+				}
+			}
+		}
 		whereSQL, whereArgs, err := buildPKWhere(adapter, serverPKs, del.Keys, &ph)
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 条删除: %w", i+1, err)
@@ -148,7 +182,7 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 		}
 		n, _ := res.RowsAffected()
 		if n == 0 {
-			return nil, fmt.Errorf("第 %d 条删除未命中行（主键可能已变化）", i+1)
+			return nil, fmt.Errorf("第 %d 条删除未命中行（数据可能已被他人修改，请重新查询）", i+1)
 		}
 		deleted += int(n)
 	}
@@ -180,9 +214,17 @@ func buildPKWhere(adapter DataSourceAdapter, primaryKeys []string, keys map[stri
 		if !ok {
 			return "", nil, fmt.Errorf("缺少主键值: %s", pk)
 		}
+		nv, err := normalizeEditValue(val)
+		if err != nil {
+			return "", nil, err
+		}
+		if nv == nil {
+			parts = append(parts, adapter.QuoteIdentifier(pk)+" IS NULL")
+			continue
+		}
 		*ph++
 		parts = append(parts, adapter.QuoteIdentifier(pk)+" = "+adapter.Placeholder(*ph))
-		args = append(args, normalizeEditValue(val))
+		args = append(args, nv)
 	}
 	return strings.Join(parts, " AND "), args, nil
 }
@@ -208,17 +250,16 @@ func resolveColumnName(structure ObjectStructure, name string) string {
 	return name
 }
 
-func normalizeEditValue(v any) any {
+func normalizeEditValue(v any) (any, error) {
 	if v == nil {
-		return nil
+		return nil, nil
 	}
-	// 前端二进制占位不允许写回
-	if m, ok := v.(map[string]any); ok {
-		if t, _ := m["type"].(string); t == "binary" {
-			return nil // 调用方应已拒绝；此处当 NULL 防御
-		}
+	// 拒绝对象/数组（含 binary 占位），避免被静默写成 NULL
+	switch v.(type) {
+	case map[string]any, []any:
+		return nil, fmt.Errorf("不支持的单元格值类型（对象/数组/二进制不可写回）")
 	}
-	return v
+	return v, nil
 }
 
 func sameStringSet(a, b []string) bool {

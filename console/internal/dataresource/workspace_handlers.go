@@ -173,8 +173,14 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 	writeOK(w, result)
 }
 
-// attachEditableMeta 为单表 SELECT 结果附加就地编辑元数据（仅表、需主键）。
+// attachEditableMeta 为 SELECT * 单表结果附加就地编辑元数据。
+// 要求：写权限调用方已过滤；autoCommit=true；表有主键且主键列均出现在结果中。
 func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText string, result *ExecutionResult) {
+	// 手工事务模式下禁用就地编辑，避免绕过自动提交开关与提交/回滚按钮
+	if !ws.AutoCommit {
+		result.Editable = &EditableInfo{Reason: "已关闭自动提交，请使用 SQL 编辑或先开启自动提交后再就地编辑"}
+		return
+	}
 	target, ok := DetectEditableSelect(sqlText)
 	if !ok {
 		return
@@ -191,16 +197,28 @@ func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText
 	obj := MetadataNode{Kind: NodeTable, Schema: schema, Name: target.Table}
 	structure, err := ws.Adapter.Describe(ctx, obj)
 	if err != nil {
-		// 可能是视图或对象不存在：不开放编辑
 		return
 	}
 	pks := primaryKeyColumns(structure)
 	info := &EditableInfo{Schema: schema, Table: target.Table}
 	if len(pks) == 0 {
 		info.Reason = "该表没有主键，无法安全地修改或删除行（需主键定位目标行，与 Navicat 等工具一致）"
-	} else {
-		info.PrimaryKeys = pks
+		result.Editable = info
+		return
 	}
+	// 结果列须包含全部主键（SELECT * 通常满足；双重校验）
+	colLower := map[string]bool{}
+	for _, c := range result.Columns {
+		colLower[strings.ToLower(c)] = true
+	}
+	for _, pk := range pks {
+		if !colLower[strings.ToLower(pk)] {
+			info.Reason = "结果中缺少主键列，无法就地编辑"
+			result.Editable = info
+			return
+		}
+	}
+	info.PrimaryKeys = pks
 	result.Editable = info
 }
 
@@ -243,6 +261,10 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	if !ws.AutoCommit {
+		writeErr(w, http.StatusConflict, "AUTO_COMMIT_REQUIRED", "已关闭自动提交时不可就地编辑，请开启自动提交或使用 SQL")
+		return
+	}
 	// 有活动手工事务时禁止就地编辑，避免与用户事务交错
 	if ws.TxState == TxActive || ws.TxState == TxFailed {
 		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再就地编辑")
@@ -322,11 +344,16 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = mode // 授权已在 resolve 校验；SQL 已限制为只读
 
-	// 同一工作台单飞：导出全程持 ws.mu，与 Execute/Commit/Rollback 互斥。
-	// 全量导出在适配器上独立执行只读查询，不读取手工事务未提交数据。
+	// 锁内仅快照 LastSQL/Adapter；导出走独立只读查询，不长时间占用 ws.mu，
+	// 避免慢客户端/大导出阻塞执行、提交与授权失效。
 	ws.mu.Lock()
-	defer ws.mu.Unlock()
 	ws.LastActivity = time.Now()
+	sqlText := body.SQL
+	if sqlText == "" {
+		sqlText = ws.LastSQL
+	}
+	adapter := ws.Adapter
+	ws.mu.Unlock()
 
 	if body.Scope == "current" {
 		var err error
@@ -345,11 +372,6 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sqlText := body.SQL
-	if sqlText == "" {
-		sqlText = ws.LastSQL
-	}
-	adapter := ws.Adapter
 	if sqlText == "" {
 		writeErr(w, http.StatusBadRequest, "NO_QUERY", "无可导出的查询")
 		return
@@ -363,10 +385,8 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	case "csv":
 		if err := ExportCSV(r.Context(), adapter, sqlText, w); err != nil {
 			if _, ok := err.(*ErrExportLimit); ok {
-				// CSV 可能已在流中写入截断提示
 				return
 			}
-			// 流未开始时尽量返回错误
 			return
 		}
 	case "xlsx":

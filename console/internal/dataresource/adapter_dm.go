@@ -42,17 +42,23 @@ func (a *dmAdapter) Begin(ctx context.Context, readOnly bool) (Transaction, erro
 	return &pgTx{tx: tx}, nil
 }
 
-// Children: root → 业务 schema；schema → 表/视图分组；隐藏系统用户与系统函数等。
+// Children: root → 业务 schema；schema → 表/视图/函数/过程/序列分组；系统用户已过滤。
 func (a *dmAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
 	switch parent.Kind {
 	case NodeRoot, "":
 		return a.listSchemas(ctx)
 	case NodeSchema:
-		return objectGroupNodes(parent.Name), nil
+		return objectGroupNodes(parent.Name, NodeTablesFolder, NodeViewsFolder, NodeFunctionsFolder, NodeProceduresFolder, NodeSequencesFolder), nil
 	case NodeTablesFolder:
 		return a.listTables(ctx, parent.Schema)
 	case NodeViewsFolder:
 		return a.listViews(ctx, parent.Schema)
+	case NodeFunctionsFolder:
+		return a.listObjectsByType(ctx, parent.Schema, "FUNCTION", NodeFunction)
+	case NodeProceduresFolder:
+		return a.listObjectsByType(ctx, parent.Schema, "PROCEDURE", NodeProcedure)
+	case NodeSequencesFolder:
+		return a.listObjectsByType(ctx, parent.Schema, "SEQUENCE", NodeSequence)
 	}
 	return nil, nil
 }
@@ -109,25 +115,29 @@ func (a *dmAdapter) listTables(ctx context.Context, owner string) ([]MetadataNod
 }
 
 func (a *dmAdapter) listViews(ctx context.Context, owner string) ([]MetadataNode, error) {
+	return a.listObjectsByType(ctx, owner, "VIEW", NodeView)
+}
+
+func (a *dmAdapter) listObjectsByType(ctx context.Context, owner, objectType string, kind MetadataNodeKind) ([]MetadataNode, error) {
 	var out []MetadataNode
-	viewRows, err := a.db.QueryContext(ctx, `
+	rows, err := a.db.QueryContext(ctx, `
 		SELECT object_name FROM all_objects
-		WHERE owner = ? AND object_type = 'VIEW'
-		ORDER BY object_name`, owner)
+		WHERE owner = ? AND object_type = ?
+		ORDER BY object_name`, owner, objectType)
 	if err != nil {
 		return nil, err
 	}
-	defer viewRows.Close()
-	for viewRows.Next() {
+	defer rows.Close()
+	for rows.Next() {
 		var name string
-		if err := viewRows.Scan(&name); err != nil {
+		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		n := MetadataNode{Kind: NodeView, Schema: owner, Name: name}
+		n := MetadataNode{Kind: kind, Schema: owner, Name: name}
 		n.ID = n.EncodeID()
 		out = append(out, n)
 	}
-	return out, viewRows.Err()
+	return out, rows.Err()
 }
 
 func (a *dmAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStructure, error) {

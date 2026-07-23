@@ -28,6 +28,10 @@ function kindLabelFor(kind, dbType) {
   if (kind === 'table') return '表';
   if (kind === 'view') return '视图';
   if (kind === 'matview') return '物化';
+  if (kind === 'function') return '函数';
+  if (kind === 'procedure') return '过程';
+  if (kind === 'sequence') return '序列';
+  if (kind === 'trigger') return '触发器';
   return '';
 }
 
@@ -39,6 +43,13 @@ function cellToEditString(v) {
   if (v == null) return '';
   if (cellIsBinary(v)) return '';
   return String(v);
+}
+
+/** 单元格哨兵：显式 NULL（与空字符串区分） */
+const CELL_NULL = { __null: true };
+
+function isCellNull(v) {
+  return v === null || (v && typeof v === 'object' && v.__null);
 }
 
 function isTreeLeaf(kind) {
@@ -362,7 +373,9 @@ function DataWorkspacePage({ resource, onBack }) {
     }
   };
 
-  const canGridEdit = !!(canWrite && result?.editable?.primaryKeys?.length && result?.columns?.length);
+  const canGridEdit = !!(
+    canWrite && autoCommit && result?.editable?.primaryKeys?.length && result?.columns?.length
+  );
   const pkSet = React.useMemo(() => {
     const s = new Set();
     (result?.editable?.primaryKeys || []).forEach((k) => s.add(String(k).toLowerCase()));
@@ -384,7 +397,17 @@ function DataWorkspacePage({ resource, onBack }) {
     setDraftRows((rows) => {
       const next = rows.map((r) => r.slice());
       if (!next[rowIndex]) return rows;
-      next[rowIndex][colIndex] = value === '' ? null : value;
+      // 保留空字符串，不自动变 NULL
+      next[rowIndex][colIndex] = value;
+      return next;
+    });
+  };
+
+  const setCellNull = (rowIndex, colIndex) => {
+    setDraftRows((rows) => {
+      const next = rows.map((r) => r.slice());
+      if (!next[rowIndex]) return rows;
+      next[rowIndex][colIndex] = null;
       return next;
     });
   };
@@ -417,30 +440,34 @@ function DataWorkspacePage({ resource, onBack }) {
         continue;
       }
       const set = {};
+      const old = {};
       let changed = false;
       cols.forEach((col, ci) => {
         if (pkSet.has(String(col).toLowerCase())) return;
-        if (cellIsBinary(orig[ri][ci]) || cellIsBinary(draftRows[ri]?.[ci])) return;
+        if (cellIsBinary(orig[ri][ci])) return;
         const before = orig[ri][ci];
-        const after = draftRows[ri]?.[ci];
-        const b = before == null ? null : String(before);
-        const a = after == null ? null : String(after);
-        if (b !== a) {
-          set[col] = after === '' ? null : after;
+        let after = draftRows[ri]?.[ci];
+        if (cellIsBinary(after)) return;
+        // 比较：null 与 '' 不同
+        const same = (before == null && after == null)
+          || (before != null && after != null && String(before) === String(after));
+        if (!same) {
+          set[col] = after;
+          old[col] = before == null ? null : before;
           changed = true;
         }
       });
-      if (changed) updates.push({ keys, set });
+      if (changed) updates.push({ keys, set, old });
     }
 
     if (!updates.length && !deletes.length) {
       toast('没有需要保存的变更', { tone: 'warn' });
       return;
     }
-    if (deletes.length) {
+    {
       const ok = await confirmDialog({
-        title: '确认删除行',
-        message: `将删除 ${deletes.length} 行，并更新 ${updates.length} 行。此操作直接写入数据库。`,
+        title: '确认保存就地编辑',
+        message: `将更新 ${updates.length} 行、删除 ${deletes.length} 行。此操作在自动提交模式下直接写入数据库，无法通过工作台回滚。`,
         confirmText: '保存',
         tone: 'danger',
       });
@@ -853,6 +880,9 @@ function DataWorkspacePage({ resource, onBack }) {
                 ) : null}
               </span>
               {busy ? <Spinner size={13} /> : null}
+              {canWrite && !autoCommit && result?.editable?.primaryKeys?.length ? (
+                <span style={{ fontSize: 11, color: 'var(--muted-fg)' }} title="关闭自动提交时不可就地编辑">就地编辑已禁用</span>
+              ) : null}
               {canGridEdit && !editMode ? (
                 <Btn size="sm" variant="outline" disabled={busy} onClick={beginEdit}>编辑结果</Btn>
               ) : null}
@@ -898,13 +928,19 @@ function DataWorkspacePage({ resource, onBack }) {
                             const isPK = pkSet.has(String(col).toLowerCase());
                             const binary = cellIsBinary(cell) || cellIsBinary(result.rows?.[rowIndex]?.[cellIndex]);
                             if (editMode && !markedDel && !isPK && !binary) {
+                              const isNull = cell == null;
                               return (
                                 <td key={cellIndex} style={{ fontSize: 12.5, padding: '2px 4px' }}>
-                                  <input
-                                    className="input dr-cell-input"
-                                    value={cellToEditString(cell)}
-                                    onChange={(e) => setCellValue(rowIndex, cellIndex, e.target.value)}
-                                  />
+                                  <div className="dr-cell-edit">
+                                    <input
+                                      className="input dr-cell-input"
+                                      value={isNull ? '' : cellToEditString(cell)}
+                                      placeholder={isNull ? 'NULL' : ''}
+                                      onChange={(e) => setCellValue(rowIndex, cellIndex, e.target.value)}
+                                    />
+                                    <button type="button" className="dr-cell-null-btn" title="设为 NULL"
+                                      onClick={() => setCellNull(rowIndex, cellIndex)}>N</button>
+                                  </div>
                                 </td>
                               );
                             }

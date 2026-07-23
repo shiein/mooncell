@@ -10,11 +10,16 @@ func TestDetectEditableSelect(t *testing.T) {
 		table  string
 	}{
 		{`SELECT * FROM users`, true, "", "users"},
-		{`SELECT id, name FROM public.users WHERE id=1`, true, "public", "users"},
+		{`SELECT * FROM public.users WHERE id=1`, true, "public", "users"},
 		{`SELECT * FROM "MySchema"."MyTable" ORDER BY id`, true, "MySchema", "MyTable"},
 		{`SELECT * FROM users u`, true, "", "users"},
 		{`SELECT * FROM users AS u`, true, "", "users"},
 		{`SELECT * FROM users;`, true, "", "users"},
+		// 显式列 / 聚合 / 表达式：不可编辑
+		{`SELECT id, name FROM public.users WHERE id=1`, false, "", ""},
+		{`SELECT count(*) FROM users`, false, "", ""},
+		{`SELECT id, price * 1.2 AS price FROM products`, false, "", ""},
+		{`SELECT name FROM users`, false, "", ""},
 		{`SELECT * FROM a JOIN b ON a.id=b.id`, false, "", ""},
 		{`SELECT * FROM a, b`, false, "", ""},
 		{`SELECT * FROM (SELECT 1) t`, false, "", ""},

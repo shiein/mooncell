@@ -23,7 +23,10 @@ type EditableTarget struct {
 }
 
 // DetectEditableSelect 判断 SQL 是否为可安全就地编辑的单表 SELECT。
-// 保守策略：出现 JOIN/UNION/逗号多表/子查询 FROM 等即判定不可编辑。
+// 最小可靠策略（避免投影映射错误）：
+//   - 必须是 SELECT * / table.* 从单表（允许 WHERE/ORDER/LIMIT）
+//   - 禁止 JOIN/UNION/CTE/子查询 FROM/显式列清单/聚合
+// 主键是否齐全在 attach 时结合结果列再校验。
 func DetectEditableSelect(sqlText string) (EditableTarget, bool) {
 	if ClassifySQL(sqlText) != StmtSelect {
 		return EditableTarget{}, false
@@ -34,14 +37,17 @@ func DetectEditableSelect(sqlText string) (EditableTarget, bool) {
 		s = strings.TrimSpace(s[:len(s)-1])
 	}
 	upperScan := stripSQLLiteralsForKeywordScan(s)
-	// 多表 / 集合操作 / CTE 修改类已在分类；此处再拦 JOIN 与逗号 FROM
+	// 多表 / 集合操作 / CTE
 	for _, kw := range []string{" JOIN ", " UNION ", " INTERSECT ", " EXCEPT ", " CROSS JOIN "} {
 		if strings.Contains(upperScan, kw) {
 			return EditableTarget{}, false
 		}
 	}
-	// WITH 开头的 CTE 不开放就地编辑（可能多源）
 	if strings.HasPrefix(strings.TrimLeftFunc(upperScan, unicode.IsSpace), "WITH ") {
+		return EditableTarget{}, false
+	}
+	// 仅允许 SELECT * 或 SELECT alias.*
+	if !isSelectStarProjection(upperScan) {
 		return EditableTarget{}, false
 	}
 
@@ -50,7 +56,7 @@ func DetectEditableSelect(sqlText string) (EditableTarget, bool) {
 		return EditableTarget{}, false
 	}
 	// FROM 之后到 WHERE/GROUP/ORDER/LIMIT/HAVING/WINDOW/OFFSET/FETCH 之前
-	rest := s[fromIdx+4:] // 原串切片，保留大小写与引号
+	rest := s[fromIdx+4:]
 	restUpper := upperScan[fromIdx+4:]
 	endRel := len(restUpper)
 	for _, kw := range []string{" WHERE ", " GROUP ", " HAVING ", " ORDER ", " LIMIT ", " OFFSET ", " FETCH ", " WINDOW ", " FOR "} {
@@ -60,12 +66,14 @@ func DetectEditableSelect(sqlText string) (EditableTarget, bool) {
 	}
 	fromClause := strings.TrimSpace(rest[:endRel])
 	fromUpper := strings.TrimSpace(restUpper[:endRel])
-	// 逗号分隔多表
 	if strings.Contains(fromUpper, ",") {
 		return EditableTarget{}, false
 	}
-	// 子查询 FROM ( ... )
 	if strings.HasPrefix(strings.TrimSpace(fromClause), "(") {
+		return EditableTarget{}, false
+	}
+	// 有 GROUP BY 的 * 仍是聚合场景，禁止
+	if strings.Contains(upperScan, " GROUP ") {
 		return EditableTarget{}, false
 	}
 	tablePart := firstTableRef(fromClause)
@@ -77,6 +85,32 @@ func DetectEditableSelect(sqlText string) (EditableTarget, bool) {
 		return EditableTarget{}, false
 	}
 	return EditableTarget{Schema: schema, Table: table}, true
+}
+
+// isSelectStarProjection 要求 SELECT 与 FROM 之间仅为 * 或 ident.*（可有 DISTINCT）。
+func isSelectStarProjection(upperScan string) bool {
+	fromIdx := indexKeyword(upperScan, "FROM")
+	if fromIdx < 0 {
+		return false
+	}
+	head := strings.TrimSpace(upperScan[:fromIdx])
+	if !strings.HasPrefix(head, "SELECT") {
+		return false
+	}
+	proj := strings.TrimSpace(head[len("SELECT"):])
+	if strings.HasPrefix(proj, "DISTINCT") {
+		proj = strings.TrimSpace(proj[len("DISTINCT"):])
+	} else if strings.HasPrefix(proj, "ALL") {
+		proj = strings.TrimSpace(proj[len("ALL"):])
+	}
+	if proj == "*" {
+		return true
+	}
+	// t.* / SCHEMA.T.*
+	if strings.HasSuffix(proj, ".*") && !strings.Contains(proj, ",") {
+		return true
+	}
+	return false
 }
 
 // stripSQLLiteralsForKeywordScan 将字符串/注释替换为空格，便于大写关键字扫描；保留长度对齐。

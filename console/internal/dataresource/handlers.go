@@ -211,11 +211,13 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
-	// 存在活动手工事务时禁止更新资源
-	if s.pools.HasActiveTx(id) {
-		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再更新资源")
+	// 与导入/手工事务互斥：同一锁下占用 exclusive，避免 TOCTOU
+	if !s.pools.TryBeginExclusive(id) {
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源存在活动事务或正在导入，请稍后再更新")
 		return
 	}
+	defer s.pools.EndExclusive(id)
+
 	var input DataResourceInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
@@ -272,11 +274,13 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
-	// 存在活动手工事务时禁止删除资源
-	if s.pools.HasActiveTx(id) {
-		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再删除资源")
+	// 与导入/手工事务互斥
+	if !s.pools.TryBeginExclusive(id) {
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源存在活动事务或正在导入，请稍后再删除")
 		return
 	}
+	defer s.pools.EndExclusive(id)
+
 	var body struct {
 		Name string `json:"name"`
 	}
@@ -328,6 +332,64 @@ func (s *Service) TestConnectionHandler(w http.ResponseWriter, r *http.Request) 
 		DatabaseName: input.DatabaseName, Username: input.Username, SSLMode: input.SSLMode,
 	}
 	result := TestConnection(res, input.Password)
+	if !result.OK {
+		writeOK(w, map[string]any{
+			"ok":        false,
+			"latencyMs": result.LatencyMs,
+			"errorCode": result.ErrorCode,
+			"error":     ErrorDescription(result.ErrorCode),
+		})
+		return
+	}
+	writeOK(w, result)
+}
+
+// TestResourceDraftHandler 处理 POST /api/data-resources/{id}/test-draft（仅 admin）。
+// 用请求体中的连接字段测试；密码可空，空则使用该资源已保存凭据。
+// 用于编辑对话框：改了主机/库等但未改密码时，必须测「新配置 + 旧密码」，不能测整条旧记录。
+// 不写 last_test_status（草稿测试不污染已保存资源的测试状态）。
+func (s *Service) TestResourceDraftHandler(w http.ResponseWriter, r *http.Request) {
+	_, role, ok := userFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
+		return
+	}
+	if role != "admin" {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "仅管理员可测试连接")
+		return
+	}
+	id := r.PathValue("id")
+	existing, found, err := GetDataResource(s.db, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源失败")
+		return
+	}
+	if !found {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
+		return
+	}
+	var input DataResourceInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	if err := ValidateInput(input); err != nil {
+		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	password := input.Password
+	if password == "" {
+		password, err = s.credKey.Decrypt(existing.CredentialCipher)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "DECRYPT_ERROR", "凭据解密失败")
+			return
+		}
+	}
+	res := DataResource{
+		DBType: input.DBType, Host: input.Host, Port: input.Port,
+		DatabaseName: input.DatabaseName, Username: input.Username, SSLMode: input.SSLMode,
+	}
+	result := TestConnection(res, password)
 	if !result.OK {
 		writeOK(w, map[string]any{
 			"ok":        false,

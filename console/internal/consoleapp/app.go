@@ -178,6 +178,7 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("DELETE /api/data-resources/{id}", drAuth(dataResSvc.DeleteResource))
 	mux.HandleFunc("POST /api/data-resources/test", drAuth(dataResSvc.TestConnectionHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/test", drAuth(dataResSvc.TestExistingConnection))
+	mux.HandleFunc("POST /api/data-resources/{id}/test-draft", drAuth(dataResSvc.TestResourceDraftHandler))
 
 	// 数据资源元数据:元数据树、表结构、DDL、SQL 模板。
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/children", drAuth(dataResSvc.MetadataChildren))

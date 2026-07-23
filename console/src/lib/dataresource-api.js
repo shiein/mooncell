@@ -59,6 +59,15 @@ export async function testDataResourceConfig(payload) {
   });
 }
 
+/** 编辑草稿测试：表单配置 + 可选密码（空则服务端用已存密码） */
+export async function testDataResourceDraft(id, payload) {
+  return jsonFetch(`/api/data-resources/${encodeURIComponent(id)}/test-draft`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function createWorkspace(resourceId) {
   return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/workspaces`, { method: 'POST' });
 }
