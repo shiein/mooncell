@@ -13,6 +13,14 @@ import (
 
 // fmtError import placeholder removed
 
+// 最近连接测试状态（写入 data_resources.last_test_status）。
+// 设计：只读事务认证未通过时不得向普通用户授予 read。
+const (
+	TestStatusOK     = "ok"       // 连通且只读事务可用
+	TestStatusOKNoRO = "ok_no_ro" // 连通但只读事务不可用
+	TestStatusFail   = "fail"     // 连接失败
+)
+
 // TestResult 是连接测试的返回结构。
 type TestResult struct {
 	OK                  bool   `json:"ok"`
@@ -21,6 +29,22 @@ type TestResult struct {
 	CurrentDatabase     string `json:"currentDatabase"`
 	ReadOnlyTxSupported bool   `json:"readOnlyTxSupported"`
 	ErrorCode           string `json:"errorCode,omitempty"`
+}
+
+// PersistStatus 返回应写入 last_test_status 的值。
+func (r TestResult) PersistStatus() string {
+	if !r.OK {
+		return TestStatusFail
+	}
+	if r.ReadOnlyTxSupported {
+		return TestStatusOK
+	}
+	return TestStatusOKNoRO
+}
+
+// SupportsReadGrant 是否允许对该资源授予普通用户 read（需最近测试通过只读事务）。
+func SupportsReadGrant(lastTestStatus string) bool {
+	return lastTestStatus == TestStatusOK
 }
 
 // testTimeout 连接测试超时时间。

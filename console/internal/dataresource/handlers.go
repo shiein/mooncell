@@ -72,10 +72,14 @@ func formatTestInfo(status string, at int64) string {
 		return ""
 	}
 	t := time.UnixMilli(at).Format("2006-01-02 15:04")
-	if status == "ok" {
+	switch status {
+	case TestStatusOK:
 		return "成功 · " + t
+	case TestStatusOKNoRO:
+		return "成功(只读事务不可用) · " + t
+	default:
+		return "失败 · " + t
 	}
-	return "失败 · " + t
 }
 
 // --- 资源 CRUD ---
@@ -350,9 +354,10 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	result := TestConnection(res, password)
-	UpdateTestStatus(s.db, id, boolToStatus(result.OK))
+	status := result.PersistStatus()
+	UpdateTestStatus(s.db, id, status)
 	user, _, _ := userFromCtx(r)
-	s.auditLog(user, "测试连接", res.Name, boolToStatus(result.OK))
+	s.auditLog(user, "测试连接", res.Name, status)
 	if !result.OK {
 		writeOK(w, map[string]any{
 			"ok":        false,
@@ -363,13 +368,6 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeOK(w, result)
-}
-
-func boolToStatus(ok bool) string {
-	if ok {
-		return "ok"
-	}
-	return "fail"
 }
 
 // isUniqueConstraint 检查是否为 SQLite UNIQUE 约束冲突。

@@ -241,6 +241,7 @@ type DataResourceGrant struct {
 
 // SetUserGrants 全量替换用户的数据资源授权（事务性，失败回滚不留半成品）。
 // grants 中 AccessMode 必须是 read 或 write。
+// 授予 read 时要求资源最近连接测试已通过只读事务认证（last_test_status=ok）。
 func SetUserGrants(db *sql.DB, username string, grants []DataResourceGrant, grantedBy string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -254,6 +255,19 @@ func SetUserGrants(db *sql.DB, username string, grants []DataResourceGrant, gran
 	for _, g := range grants {
 		if g.AccessMode != AccessRead && g.AccessMode != AccessWrite {
 			return fmt.Errorf("无效的 access_mode: %s", g.AccessMode)
+		}
+		if g.AccessMode == AccessRead {
+			var testStatus string
+			err := tx.QueryRow(`SELECT last_test_status FROM data_resources WHERE id = ?`, g.ResourceID).Scan(&testStatus)
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("资源不存在，无法授权: %s", g.ResourceID)
+			}
+			if err != nil {
+				return err
+			}
+			if !SupportsReadGrant(testStatus) {
+				return fmt.Errorf("资源未通过只读事务认证，不能授予只读权限（请先成功测试连接且 readOnlyTxSupported=true）: %s", g.ResourceID)
+			}
 		}
 		if _, err := tx.Exec(`INSERT INTO data_resource_grants (resource_id, username, access_mode, granted_by, granted_at)
 			VALUES (?, ?, ?, ?, ?)`,

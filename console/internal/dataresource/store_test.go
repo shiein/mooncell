@@ -65,6 +65,7 @@ func TestDeleteResourceCascades(t *testing.T) {
 	db := testDB(t)
 	r := DataResource{ID: "r1", Name: "R1", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}
 	CreateDataResource(db, r)
+	UpdateTestStatus(db, "r1", TestStatusOK)
 	SetUserGrants(db, "u1", []DataResourceGrant{{ResourceID: "r1", Username: "u1", AccessMode: AccessRead}}, "admin")
 	CreateSavedSQL(db, SavedSQL{ID: "s1", Username: "u1", ResourceID: "r1", Name: "q1", SQLText: "SELECT 1", CreatedAt: 1, UpdatedAt: 1})
 
@@ -85,6 +86,7 @@ func TestSetUserGrantsTransactional(t *testing.T) {
 	db := testDB(t)
 	r := DataResource{ID: "r1", Name: "R1", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}
 	CreateDataResource(db, r)
+	UpdateTestStatus(db, "r1", TestStatusOK)
 
 	// 正常写入
 	grants := []DataResourceGrant{
@@ -119,12 +121,23 @@ func TestSetUserGrantsTransactional(t *testing.T) {
 	if len(got3) != 1 || got3[0].AccessMode != AccessWrite {
 		t.Errorf("失败后授权应保持原值: %+v", got3)
 	}
+
+	// 未通过只读事务认证时禁止授予 read
+	UpdateTestStatus(db, "r1", TestStatusOKNoRO)
+	if err := SetUserGrants(db, "u1", []DataResourceGrant{{ResourceID: "r1", Username: "u1", AccessMode: AccessRead}}, "admin"); err == nil {
+		t.Fatal("ok_no_ro 状态应拒绝授予 read")
+	}
+	// write 仍可授
+	if err := SetUserGrants(db, "u1", []DataResourceGrant{{ResourceID: "r1", Username: "u1", AccessMode: AccessWrite}}, "admin"); err != nil {
+		t.Fatalf("write 授权不应依赖只读认证: %v", err)
+	}
 }
 
 func TestUserAccessMode(t *testing.T) {
 	db := testDB(t)
 	r := DataResource{ID: "r1", Name: "R1", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}
 	CreateDataResource(db, r)
+	UpdateTestStatus(db, "r1", TestStatusOK)
 	SetUserGrants(db, "u1", []DataResourceGrant{{ResourceID: "r1", Username: "u1", AccessMode: AccessRead}}, "admin")
 
 	// admin 隐式 admin
@@ -150,6 +163,7 @@ func TestVisibleResources(t *testing.T) {
 	r2 := DataResource{ID: "r2", Name: "R2", DBType: DriverMySQL, Host: "h", Port: 3306, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 2, UpdatedAt: 2}
 	CreateDataResource(db, r1)
 	CreateDataResource(db, r2)
+	UpdateTestStatus(db, "r1", TestStatusOK)
 	SetUserGrants(db, "u1", []DataResourceGrant{{ResourceID: "r1", Username: "u1", AccessMode: AccessRead}}, "admin")
 
 	// admin 看全部
