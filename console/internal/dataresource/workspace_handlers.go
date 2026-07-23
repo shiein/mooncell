@@ -13,6 +13,7 @@ package dataresource
 import (
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // canWriteAccess 返回当前 access mode 是否允许写操作（admin 隐式 write）。
@@ -206,10 +207,16 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
+	// 在 ws.mu 下快照 LastSQL/Adapter，避免与 Execute 数据竞争；流式写出在锁外进行
+	ws.mu.Lock()
 	sqlText := body.SQL
 	if sqlText == "" {
 		sqlText = ws.LastSQL
 	}
+	adapter := ws.Adapter
+	ws.LastActivity = time.Now()
+	ws.mu.Unlock()
+
 	if sqlText == "" {
 		writeErr(w, http.StatusBadRequest, "NO_QUERY", "无可导出的查询")
 		return
@@ -226,7 +233,7 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 
 	switch body.Format {
 	case "csv":
-		if err := ExportCSV(r.Context(), ws.Adapter, sqlText, w); err != nil {
+		if err := ExportCSV(r.Context(), adapter, sqlText, w); err != nil {
 			if _, ok := err.(*ErrExportLimit); ok {
 				// CSV 可能已在流中写入截断提示
 				return
@@ -235,7 +242,7 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "xlsx":
-		if err := ExportXLSX(r.Context(), ws.Adapter, sqlText, w); err != nil {
+		if err := ExportXLSX(r.Context(), adapter, sqlText, w); err != nil {
 			if lim, ok := err.(*ErrExportLimit); ok {
 				writeErr(w, http.StatusRequestEntityTooLarge, "EXPORT_LIMIT", lim.Reason)
 				return
