@@ -11,6 +11,7 @@
 package dataresource
 
 import (
+	"fmt"
 	"net/http"
 )
 
@@ -113,6 +114,14 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusBadRequest, "EXEC_ERROR", err.Error())
 		return
 	}
+	// 审计：只记录写操作（DML/DDL）和只读拦截，不记录普通 SELECT。
+	if stmtType.IsWrite() || stmtType.IsDDLorDCL() || stmtType == StmtTruncate || stmtType == StmtCall {
+		auditResult := "成功"
+		if result.AffectedRows >= 0 {
+			auditResult = fmt.Sprintf("成功·%d行", result.AffectedRows)
+		}
+		s.auditLog(user, "执行"+string(stmtType), id, auditResult)
+	}
 	writeOK(w, result)
 }
 
@@ -133,6 +142,7 @@ func (s *Service) CommitWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusConflict, "COMMIT_FAILED", err.Error())
 		return
 	}
+	s.auditLog(user, "提交事务", ws.ResourceID, "成功")
 	writeOK(w, map[string]any{
 		"txState":   string(ws.TxState),
 		"autoCommit": ws.AutoCommit,
@@ -156,6 +166,7 @@ func (s *Service) RollbackWorkspaceHandler(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusInternalServerError, "ROLLBACK_FAILED", err.Error())
 		return
 	}
+	s.auditLog(user, "回滚事务", ws.ResourceID, "成功")
 	writeOK(w, map[string]any{
 		"txState":   string(ws.TxState),
 		"autoCommit": ws.AutoCommit,

@@ -146,6 +146,7 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "创建资源失败")
 		return
 	}
+	s.auditLog(user, "创建数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
 
@@ -176,7 +177,7 @@ func (s *Service) GetResource(w http.ResponseWriter, r *http.Request) {
 
 // UpdateResource 处理 PUT /api/data-resources/{id}（仅 admin）。
 func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
-	_, role, ok := userFromCtx(r)
+	user, role, ok := userFromCtx(r)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
@@ -227,13 +228,14 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, _, _ := GetDataResource(s.db, id)
+	s.auditLog(user, "更新数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
 
 // DeleteResource 处理 DELETE /api/data-resources/{id}（仅 admin）。
 // 要求请求体中 name 与资源名称匹配（防误删）。
 func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
-	_, role, ok := userFromCtx(r)
+	user, role, ok := userFromCtx(r)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
@@ -274,6 +276,7 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 	}
 	// 关闭该资源的连接池
 	s.pools.CloseDB(id)
+	s.auditLog(user, "删除数据资源", res.Name, "成功")
 	writeOK(w, map[string]bool{"ok": true})
 }
 
@@ -346,6 +349,8 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 	}
 	result := TestConnection(res, password)
 	UpdateTestStatus(s.db, id, boolToStatus(result.OK))
+	user, _, _ := userFromCtx(r)
+	s.auditLog(user, "测试连接", res.Name, boolToStatus(result.OK))
 	if !result.OK {
 		writeOK(w, map[string]any{
 			"ok":        false,

@@ -77,6 +77,11 @@ func Run(distFS fs.FS, version string, args []string) {
 	dataResSvc := dataresource.NewService(store.db, store.credKey)
 	defer dataResSvc.Close()
 	a.dataResSvc = dataResSvc
+	dataResSvc.SetImportMaxMB(cfg.DataResource.ImportMaxMB)
+	// 注入审计回调：复用现有审计系统，数据资源操作也写入审计日志。
+	dataResSvc.SetAuditFunc(func(user, action, target, result string) {
+		a.store.appendAudit(user, action, "数据资源·"+target, result)
+	})
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
 	go func() {
@@ -105,6 +110,15 @@ func Run(distFS fs.FS, version string, args []string) {
 			if n := dataResSvc.CleanupIdle(); n > 0 {
 				log.Printf("[data-resource] 回滚超时手工事务 %d 个", n)
 			}
+		}
+	}()
+
+	// 数据资源:导入临时文件超时清理(每 10 分钟检查一次,30 分钟超时删除)。
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			dataResSvc.CleanupExpiredImports()
 		}
 	}()
 
@@ -182,6 +196,17 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/rollback", drAuth(dataResSvc.RollbackWorkspaceHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/export", drAuth(dataResSvc.ExportFromWorkspace))
 	mux.HandleFunc("DELETE /api/data-resources/{id}/workspaces/{workspaceId}", drAuth(dataResSvc.DeleteWorkspaceHandler))
+
+	// 数据资源保存 SQL(Phase 5:个人 SQL)。
+	mux.HandleFunc("GET /api/data-resources/{id}/saved-sql", drAuth(dataResSvc.ListSavedSQLHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/saved-sql", drAuth(dataResSvc.CreateSavedSQLHandler))
+	mux.HandleFunc("PUT /api/data-resources/{id}/saved-sql/{sqlId}", drAuth(dataResSvc.UpdateSavedSQLHandler))
+	mux.HandleFunc("DELETE /api/data-resources/{id}/saved-sql/{sqlId}", drAuth(dataResSvc.DeleteSavedSQLHandler))
+
+	// 数据资源导入(Phase 5:CSV/XLSX 导入)。
+	mux.HandleFunc("POST /api/data-resources/{id}/imports/preview", drAuth(dataResSvc.ImportPreviewHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/imports/{importId}/execute", drAuth(dataResSvc.ImportExecuteHandler))
+	mux.HandleFunc("DELETE /api/data-resources/{id}/imports/{importId}", drAuth(dataResSvc.ImportDeleteHandler))
 
 	// 多 Agent 管理:仅 admin
 	mux.HandleFunc("GET /api/agents", adminOnly(a.listAgents))
