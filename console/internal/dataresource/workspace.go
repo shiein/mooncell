@@ -33,12 +33,13 @@ type Workspace struct {
 	ResourceID   string
 	Username     string
 	AutoCommit   bool
+	ReadOnly     bool // 用户对该资源为 read 授权时为 true；手工事务必须以只读事务创建
 	TxState      TxState
-	Tx           Transaction   // 活动事务（nil 表示无）
+	Tx           Transaction // 活动事务（nil 表示无）
 	Adapter      DataSourceAdapter
-	LastSQL      string        // 最近一次成功的查询（供全量导出重放）
-	LastActivity time.Time     // 最近活动时间（用于超时回滚）
-	mu           sync.Mutex    // 串行化同一工作台的请求
+	LastSQL      string    // 最近一次成功的查询（供全量导出重放）
+	LastActivity time.Time // 最近活动时间（用于超时回滚）
+	mu           sync.Mutex // 串行化同一工作台的请求
 }
 
 // WorkspaceManager 管理所有工作台。
@@ -59,13 +60,15 @@ func NewWorkspaceManager(pool *PoolManager) *WorkspaceManager {
 	}
 }
 
-// CreateWorkspace 创建新工作台。
-func (wm *WorkspaceManager) CreateWorkspace(resourceID, username string, adapter DataSourceAdapter) *Workspace {
+// CreateWorkspace 创建新工作台。readOnly 表示用户对该资源仅有 read 授权，
+// 关闭自动提交后整段手工事务必须以数据库只读事务创建（设计第二层安全边界）。
+func (wm *WorkspaceManager) CreateWorkspace(resourceID, username string, adapter DataSourceAdapter, readOnly bool) *Workspace {
 	ws := &Workspace{
 		ID:           newID(),
 		ResourceID:   resourceID,
 		Username:     username,
 		AutoCommit:   true,
+		ReadOnly:     readOnly,
 		TxState:      TxNone,
 		Adapter:      adapter,
 		LastActivity: time.Now(),
@@ -274,8 +277,8 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 
 	// 手工事务：在当前事务中执行
 	if ws.Tx == nil {
-		// 第一条 SQL 创建事务
-		tx, err := ws.Adapter.Begin(ctx, false)
+		// 第一条 SQL 创建事务；只读用户必须 Begin(readOnly=true)
+		tx, err := ws.Adapter.Begin(ctx, ws.ReadOnly)
 		if err != nil {
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
@@ -305,6 +308,10 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 
 // executeWriteInWorkspace 执行写操作。
 func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, result *ExecutionResult) error {
+	if ws.ReadOnly {
+		// 第二层兜底：只读工作台不得执行写（handler 应已拦截）
+		return &APIError{Code: "DATA_RESOURCE_READ_ONLY", Message: "只读授权不允许执行写操作"}
+	}
 	if ws.AutoCommit {
 		// 自动提交：独立事务
 		tx, err := ws.Adapter.Begin(ctx, false)

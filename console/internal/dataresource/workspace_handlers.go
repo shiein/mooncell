@@ -54,13 +54,14 @@ func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Requ
 
 // CreateWorkspace 处理 POST /api/data-resources/{id}/workspaces
 func (s *Service) CreateWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
-	adapter, _, ok := s.getAdapterForRequest(w, r)
+	adapter, mode, ok := s.getAdapterForRequest(w, r)
 	if !ok {
 		return
 	}
 	user, _, _ := userFromCtx(r)
 	id := r.PathValue("id")
-	ws := s.workspaces.CreateWorkspace(id, user, adapter)
+	// 仅 AccessRead 标记为只读工作台；admin/write 可写
+	ws := s.workspaces.CreateWorkspace(id, user, adapter, mode == AccessRead)
 	writeOK(w, map[string]any{
 		"workspaceId": ws.ID,
 		"autoCommit":  ws.AutoCommit,
@@ -147,14 +148,10 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 }
 
 // CommitWorkspaceHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/commit
+// 只读用户的手工事务本身是 DB 只读事务，允许提交以正常结束事务。
 func (s *Service) CommitWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
-	ws, mode, ok := s.resolveWorkspaceForRequest(w, r)
+	ws, _, ok := s.resolveWorkspaceForRequest(w, r)
 	if !ok {
-		return
-	}
-	if !canWriteAccess(mode) {
-		// 只读用户不应持有可写事务；提交写事务需 write/admin
-		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许提交写事务")
 		return
 	}
 	user, _, _ := userFromCtx(r)
