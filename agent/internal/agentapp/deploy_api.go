@@ -1,0 +1,408 @@
+package agentapp
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"regexp"
+	"strings"
+)
+
+func cleanupMultipart(r *http.Request) {
+	if r.MultipartForm != nil {
+		r.MultipartForm.RemoveAll()
+	}
+}
+
+// prepareDeploy 解析部署请求公共部分:multipart(config + artifact)+ 安全边界校验 + 制品暂存。
+// 成功返回 cfg、暂存路径、清理函数与 ok=true;失败已写好响应,ok=false。
+func (a *agent) prepareDeploy(w http.ResponseWriter, r *http.Request) (DeployConfig, string, func(), bool) {
+	var zero DeployConfig
+	id := r.PathValue("id")
+	// 传输层硬上限(纵深防御):超大制品会先落临时盘撑爆磁盘。ParseMultipartForm 的参数只是内存阈值。
+	limit := int64(a.cfg.Deploy.MaxUploadMB) << 20
+	if limit <= 0 {
+		limit = 1024 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("制品超过上限 %d MB", limit>>20)})
+			return zero, "", nil, false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "表单解析失败"})
+		return zero, "", nil, false
+	}
+	defer cleanupMultipart(r)
+
+	var cfg DeployConfig
+	if err := json.Unmarshal([]byte(r.FormValue("config")), &cfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "config 解析失败"})
+		return zero, "", nil, false
+	}
+	cfg.ID = id // 以路径为准,避免 body 与路径不一致
+	if msg, ok := validIDAndRelease(cfg.ID, cfg.ReleaseID); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return zero, "", nil, false
+	}
+
+	// 安全边界:制品落盘路径必须在白名单根目录内(防穿越)。
+	if !withinRoots(cfg.BinPath, a.cfg.Paths.DeployRoots) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "制品路径不在白名单内: " + cfg.BinPath})
+		return zero, "", nil, false
+	}
+
+	// nohup runner 不支持启动用户:nohupSpec 无 user 字段,进程继承 Agent 用户(常为 root)。
+	// systemd 透传 User= 降权,nohup 不降权——若放行 cfg.User 会让用户以为降权了其实没有(行为不对称)。
+	// 本期明确拒绝并给清晰错误;后续增强再用受控方式降权启动(su/setuid + pidfile/日志权限处理)。
+	if cfg.Runner == "nohup" && strings.TrimSpace(cfg.User) != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nohup runner 暂不支持启动用户(进程继承 Agent 用户,不会降权);请改用 systemd 或清空启动用户字段"})
+		return zero, "", nil, false
+	}
+
+	file, _, err := r.FormFile("artifact")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 artifact 制品"})
+		return zero, "", nil, false
+	}
+	defer file.Close()
+
+	tmp, err := os.CreateTemp("", "mc-artifact-*")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建暂存失败"})
+		return zero, "", nil, false
+	}
+	tmpPath := tmp.Name()
+	if _, err := io.Copy(tmp, file); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "接收制品失败"})
+		return zero, "", nil, false
+	}
+	tmp.Close()
+	return cfg, tmpPath, func() { os.Remove(tmpPath) }, true
+}
+
+// deploy 处理 POST /api/apps/{id}/deploy(同步):执行流水线后一次性返回逐步结果与日志。
+func (a *agent) deploy(w http.ResponseWriter, r *http.Request) {
+	cfg, tmpPath, cleanup, ok := a.prepareDeploy(w, r)
+	if !ok {
+		return
+	}
+	defer cleanup()
+	res := a.runDeployIdempotent("deploy", cfg, tmpPath, nil)
+	writeJSON(w, http.StatusOK, res)
+}
+
+// deployStream 处理 POST /api/apps/{id}/deploy/stream(SSE):
+// 每完成一步推送 `event: step`,结束推送 `event: done`(含整体结果),供前端实时呈现日志。
+func (a *agent) deployStream(w http.ResponseWriter, r *http.Request) {
+	cfg, tmpPath, cleanup, ok := a.prepareDeploy(w, r)
+	if !ok {
+		return
+	}
+	defer cleanup()
+	runSSE(w, func(emit func(Step)) DeployResult { return a.runDeployIdempotent("deploy", cfg, tmpPath, emit) })
+}
+
+// sseHeader 写好 SSE 响应头并返回一个推送闭包 sse(event, payload);不支持 Flusher 时返回 ok=false。
+// 部署/还原(有限流,末尾推 done)与日志(无限流)共用此骨架。
+func sseHeader(w http.ResponseWriter) (func(event string, payload any), bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "服务端不支持流式响应"})
+		return nil, false
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // 反代/nginx 前不缓冲
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	return func(event string, payload any) {
+		b, _ := json.Marshal(payload)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+		flusher.Flush()
+	}, true
+}
+
+// runSSE 建立 SSE 响应头,执行 run(emit) 流水线:每步完成推 `event: step`,结束推 `event: done`。
+// 部署与还原共用同一套流式骨架,差异只在传入的 run 闭包(制品来源不同)。
+func runSSE(w http.ResponseWriter, run func(emit func(Step)) DeployResult) {
+	sse, ok := sseHeader(w)
+	if !ok {
+		return
+	}
+	res := run(func(s Step) { sse("step", s) })
+	sse("done", res)
+}
+
+// pm2NameReq 解析请求要操作的 pm2 进程名:Console 接管模式会透传 pm2Name(用户已有进程名),
+// 否则用 Mooncell 托管名 deploy-<id>。供 status/lifecycle/logs 等无状态端点统一定位进程。
+// 透传值须为合法名(与部署/容器名同一校验);非法则回退托管名,不把越界值喂给 pm2 argv。
+// 额外 denylist:拒 all(会打到全部 pm2 进程)/纯数字(pm2 进程索引)/- 开头(参数形态)——
+// 这些值虽能过 containerNameRe,但喂给 `pm2 stop/delete` 会越界,命中即回退托管名。
+func pm2NameReq(r *http.Request, id string) string {
+	n := strings.TrimSpace(r.URL.Query().Get("pm2Name"))
+	if n == "" || !containerNameRe.MatchString(n) {
+		return unitName(id)
+	}
+	if isUnsafePm2Name(n) {
+		return unitName(id)
+	}
+	return n
+}
+
+// isUnsafePm2Name 判定 pm2Name 是否虽合法但危险:all/纯数字/- 开头。
+func isUnsafePm2Name(n string) bool {
+	if strings.EqualFold(n, "all") {
+		return true
+	}
+	if pm2NumericRe.MatchString(n) {
+		return true
+	}
+	if strings.HasPrefix(n, "-") {
+		return true
+	}
+	return false
+}
+
+// pm2NumericRe 匹配纯数字(pm2 进程索引,可定位任意进程)。
+var pm2NumericRe = regexp.MustCompile(`^[0-9]+$`)
+
+// nohupBinPathReq 取并校验 nohup 启停/状态请求的 binPath:必须在 deploy_roots 白名单内
+// (binPath 决定 pidfile/spec 位置,不校验则越界 query 可让 Agent kill 任意 pid / 读任意 spec)。
+func (a *agent) nohupBinPathReq(w http.ResponseWriter, r *http.Request) (string, bool) {
+	bp := strings.TrimSpace(r.URL.Query().Get("binPath"))
+	if bp == "" || !withinRoots(bp, a.cfg.Paths.DeployRoots) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nohup 操作缺少合法 binPath(须在 deploy_roots 内): " + bp})
+		return "", false
+	}
+	return bp, true
+}
+
+// nohupStatusJSON 据 binPath 读 pidfile 返回 nohup 进程状态(与 pm2/systemd 同形;含 PID 复用身份校验)。
+func nohupStatusJSON(w http.ResponseWriter, id, binPath string) {
+	st, ok := readNohupState(DeployConfig{BinPath: binPath})
+	alive := ok && stateAlive(st)
+	pid, state := "", "stopped"
+	if alive {
+		pid, state = fmt.Sprint(st.Pid), "online"
+	}
+	cpu, mem := procStats(pid)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": alive, "state": state, "pid": pid, "cpu": cpu, "mem": mem})
+}
+
+// appStatus 处理 GET /api/apps/{id}/status?runner=<systemd|pm2|nohup>:返回进程托管状态。
+func (a *agent) appStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
+	if r.URL.Query().Get("runner") == "nohup" {
+		bp, ok := a.nohupBinPathReq(w, r)
+		if !ok {
+			return
+		}
+		nohupStatusJSON(w, id, bp)
+		return
+	}
+	if r.URL.Query().Get("runner") == "pm2" {
+		name := pm2NameReq(r, id)
+		online := pm2Online(name)
+		pid, _ := pm2("pid", name)
+		pid = strings.TrimSpace(pid)
+		state := "stopped"
+		if online {
+			state = "online"
+		}
+		cpu, mem := procStats(pid)
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": pid, "cpu": cpu, "mem": mem})
+		return
+	}
+	state, _ := sysctl("is-active", unitName(id))
+	pid := mainPID(id)
+	cpu, mem := procStats(pid)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":     id,
+		"active": isActive(id),
+		"state":  state,
+		"pid":    pid,
+		"cpu":    cpu,
+		"mem":    mem,
+	})
+}
+
+// appLifecycle 处理 POST /api/apps/{id}/lifecycle?action=start|stop&runner=<systemd|pm2>:
+// 真机启停已托管的进程(不重新部署),返回启停后的真实状态。前端不再前端伪造启停/pid。
+func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
+	if !a.beginOp() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Agent 正在自更新,已暂停启停,请稍后重试"})
+		return
+	}
+	defer a.endOp()
+	defer a.lockApp(id)() // 与部署/还原同锁:同应用启停与部署串行,防并发改同一 unit/pm2/nohup spec
+	action := r.URL.Query().Get("action")
+	if action != "start" && action != "stop" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action 仅支持 start|stop"})
+		return
+	}
+	if r.URL.Query().Get("runner") == "nohup" {
+		bp, ok := a.nohupBinPathReq(w, r)
+		if !ok {
+			return
+		}
+		if action == "stop" {
+			nohupStop(DeployConfig{BinPath: bp})
+		} else if nohupAlive(DeployConfig{BinPath: bp}) {
+			// 幂等:已在运行(身份匹配)则直接返回现状,不重复 launch 出第二份进程
+		} else if _, err := nohupStartFromSpec(bp); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "start 失败: " + err.Error()})
+			return
+		}
+		nohupStatusJSON(w, id, bp)
+		return
+	}
+	pm := r.URL.Query().Get("runner") == "pm2"
+	pmName := pm2NameReq(r, id) // 接管模式=用户进程名,否则 deploy-<id>
+	var out string
+	var err error
+	if pm {
+		out, err = pm2(action, pmName)
+	} else {
+		out, err = sysctl(action, unitName(id))
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": action + " 失败: " + strings.TrimSpace(out+" "+err.Error())})
+		return
+	}
+	// 返回启停后的真实托管状态(与 appStatus 同形),供前端权威刷新。
+	if pm {
+		online := pm2Online(pmName)
+		pid, _ := pm2("pid", pmName)
+		pid = strings.TrimSpace(pid)
+		state := "stopped"
+		if online {
+			state = "online"
+		}
+		cpu, mem := procStats(pid)
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": online, "state": state, "pid": pid, "cpu": cpu, "mem": mem})
+		return
+	}
+	state, _ := sysctl("is-active", unitName(id))
+	pid := mainPID(id)
+	cpu, mem := procStats(pid)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": isActive(id), "state": state, "pid": pid, "cpu": cpu, "mem": mem})
+}
+
+// undeploy 处理 DELETE /api/apps/{id}:停止并移除 unit/pm2/nohup spec/软链(保留制品与备份)。
+//
+// 曾经无差别跑完所有清理路径后固定返回 200 {"ok":true}——stop 真失败(权限/D 态/SIGKILL 免疫)
+// 或"stop 返 0 但进程仍在"的伪成功都被吞掉,Console 收到成功即删元数据,留下失管进程。
+// 现在:停后按权威 runner 复验目标确不存活,只有复验通过才回 2xx;仍存活则回 500 + 结构化 steps,
+// Console 的 status>=300 判定会据此中止删元数据(见 console/appDelete)。
+//
+// 权威 runner 由 Console 透传的 query 判定(与 addRunnerQuery 对齐):runner=pm2/nohup、
+// 或仅 binPath(static-nginx 软链)、或都无(systemd 托管 deploy-<id>)。跨切面的 systemd/pm2
+// 清理对非该 runner 的应用是无害 no-op,保持 best-effort、不计入关键结果。
+func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !requireValidID(w, id) {
+		return
+	}
+	if !a.beginOp() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Agent 正在自更新,已暂停下线,请稍后重试"})
+		return
+	}
+	defer a.endOp()
+	defer a.lockApp(id)() // 与部署/还原同锁:下线删 unit/pm2/nohup spec 与部署串行,防并发竞争
+
+	runner := strings.TrimSpace(r.URL.Query().Get("runner"))
+	pm2Name := strings.TrimSpace(r.URL.Query().Get("pm2Name"))
+	binPath := strings.TrimSpace(r.URL.Query().Get("binPath"))
+
+	var steps []Step
+	add := func(name string, ok bool, logs ...string) { steps = append(steps, Step{Name: name, OK: ok, Logs: logs}) }
+
+	// systemd 托管清理:managed(deploy-<id>)是真实动作;pm2/nohup/软链接管时此 unit 本不存在,
+	// stop/disable 失败是无害 no-op——故仅在纯 systemd 托管(无 runner/pm2Name/binPath)时记为关键 step。
+	sout, serr := sysctl("stop", unitName(id))
+	sysctl("disable", unitName(id))
+	os.Remove(unitPath(id))
+	sysctl("daemon-reload")
+	sysctl("reset-failed", unitName(id))
+	if runner == "" && pm2Name == "" && binPath == "" {
+		add("systemctl stop", serr == nil, strings.TrimSpace(sout))
+	}
+	pm2("delete", unitName(id)) // 托管模式:清理 deploy-<id>(无 pm2/无此进程则忽略)
+
+	// pm2 接管模式:Console 传真实进程名,否则只删 deploy-<id>、用户接管的进程会残留。
+	// 与 pm2NameReq 同一把尺:须过 containerNameRe 且非危险名(all/纯数字/- 开头)——
+	// 否则 DELETE ?pm2Name=all 会让 undeploy 执行 `pm2 delete all` 删光所有 pm2 进程。
+	if pm2Name != "" && containerNameRe.MatchString(pm2Name) && !isUnsafePm2Name(pm2Name) {
+		pout, perr := pm2("delete", pm2Name)
+		if runner == "pm2" {
+			add("pm2 delete "+pm2Name, perr == nil, strings.TrimSpace(pout))
+		}
+	}
+	// nohup 托管:Console 传 binPath 时停掉进程并清理 pidfile/spec(无监管,不停会留孤儿进程)。
+	// static-nginx(软链托管):Console 传 binPath 时删除对外软链下线 web root(release 目录保留,与制品/备份保留一致)。
+	if binPath != "" && withinRoots(binPath, a.cfg.Paths.DeployRoots) {
+		if fi, err := os.Lstat(binPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			os.Remove(binPath) // 软链→删除即下线;Lstat 不跟随,不会误删 release 内容
+		}
+		nohupStop(DeployConfig{BinPath: binPath})
+		os.Remove(nohupSpecPath(binPath))
+	}
+
+	// 停后复验:按权威 runner 查目标是否仍存活。这是唯一权威闸——伪成功(stop 返 0 但进程仍在)
+	// 与 stop 真失败都在此暴露。复验不通过则回 500,Console 据此中止删元数据。
+	if alive, detail := a.undeployStillAlive(id, runner, pm2Name, binPath); alive {
+		add("verify-stopped", false, detail)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "下线未生效: " + detail, "steps": steps})
+		return
+	}
+	add("verify-stopped", true)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "steps": steps})
+}
+
+// undeployStillAlive 按权威 runner 复验下线目标是否仍存活(下线成功时须为 false):
+// pm2→查真实/托管进程名在线;nohup→据 pidfile 查进程(含 PID 复用身份校验);
+// static-nginx 软链(runner 空但有 binPath)→查对外软链是否还在;其余→systemd is-active。
+func (a *agent) undeployStillAlive(id, runner, pm2Name, binPath string) (bool, string) {
+	switch {
+	case runner == "pm2":
+		name := unitName(id)
+		if pm2Name != "" && containerNameRe.MatchString(pm2Name) && !isUnsafePm2Name(pm2Name) {
+			name = pm2Name
+		}
+		if pm2Online(name) {
+			return true, "pm2 进程仍在线: " + name
+		}
+	case runner == "nohup":
+		if nohupAlive(DeployConfig{BinPath: binPath}) {
+			return true, "nohup 进程仍存活: " + binPath
+		}
+	case binPath != "": // static-nginx 软链托管:runner 空但透传了 binPath
+		// 与清理同一把尺:只对 deploy_roots 内(我们确实尝试删过)的软链判活。
+		// 越界 binPath 清理块本就跳过、Agent 不该触碰,不能反过来让应用永远删不掉。
+		if withinRoots(binPath, a.cfg.Paths.DeployRoots) {
+			if fi, err := os.Lstat(binPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return true, "对外软链未移除: " + binPath
+			}
+		}
+	default: // systemd 托管
+		if isActive(id) {
+			return true, "systemd 单元仍 active: " + unitName(id)
+		}
+	}
+	return false, ""
+}

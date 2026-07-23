@@ -29,6 +29,22 @@ systemd / pm2 / Tomcat 容器 / nginx 目录
 
 单机可同机部署;架构上一台 Console 天然支持管多台 Agent。设计细节见 [docs/deploy-platform-design-v1.md](docs/deploy-platform-design-v1.md)。
 
+### 源码结构
+
+```text
+agent/
+├── main.go                 # Agent 可执行入口与版本注入点
+└── internal/agentapp/      # Agent 现有应用实现及同包测试
+console/
+├── main.go                 # Console 可执行入口、前端嵌入与版本注入点
+├── internal/consoleapp/    # Console 现有应用实现及同包测试
+└── src/                    # React 前端（pages/components/lib）
+docs/                       # 设计与开发文档
+deploy/                     # 构建、安装与升级脚本
+```
+
+根目录只保留稳定入口和构建文件。后续新增具备独立模型、权限或外部依赖的领域功能时放入对应的 `internal/<domain>` 包，由入口应用组装；不为文件数量而提前拆分现有调用链。
+
 ## 🚀 快速开始
 
 ### 离线安装(推荐,生产)
