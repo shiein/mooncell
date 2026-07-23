@@ -217,19 +217,17 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
-	// 在 ws.mu 下快照 LastSQL/Adapter，避免与 Execute 数据竞争；流式写出在锁外进行
-	ws.mu.Lock()
-	sqlText := body.SQL
-	if sqlText == "" {
-		sqlText = ws.LastSQL
-	}
-	adapter := ws.Adapter
-	ws.LastActivity = time.Now()
-	ws.mu.Unlock()
-
 	if body.Format == "" {
 		body.Format = "csv"
 	}
+	_ = mode // 授权已在 resolve 校验；SQL 已限制为只读
+
+	// 同一工作台单飞：导出全程持 ws.mu，与 Execute/Commit/Rollback 互斥。
+	// 全量导出在适配器上独立执行只读查询，不读取手工事务未提交数据。
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.LastActivity = time.Now()
+
 	if body.Scope == "current" {
 		var err error
 		switch body.Format {
@@ -246,16 +244,20 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	sqlText := body.SQL
+	if sqlText == "" {
+		sqlText = ws.LastSQL
+	}
+	adapter := ws.Adapter
 	if sqlText == "" {
 		writeErr(w, http.StatusBadRequest, "NO_QUERY", "无可导出的查询")
 		return
 	}
-
 	if err := prepareExportSQL(sqlText); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_SQL", err.Error())
 		return
 	}
-	_ = mode // 授权已在 resolve 校验；SQL 已限制为只读
 
 	switch body.Format {
 	case "csv":
