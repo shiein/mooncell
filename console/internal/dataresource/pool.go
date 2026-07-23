@@ -112,12 +112,3 @@ func (pm *PoolManager) CloseAll() {
 	}
 	pm.pools = map[string]*sql.DB{}
 }
-
-// RollbackAllTx 回滚所有活动事务（撤权/退出/重启时）。
-func (pm *PoolManager) RollbackAllTx(resourceID string) {
-	// 实际的事务回滚由 workspace 层在 Phase 4 实现。
-	// 这里只清除计数。
-	pm.mu.Lock()
-	pm.activeTx[resourceID] = 0
-	pm.mu.Unlock()
-}
