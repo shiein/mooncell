@@ -1,0 +1,188 @@
+// 导出：CSV 和 XLSX 流式输出。
+//
+// 设计文档第四节「导出」：
+//   - 支持 UTF-8 CSV 和 XLSX。
+//   - 全量导出重新执行最近一次成功的查询；自动提交下数据可能与屏幕快照有时间差。
+//   - 同步流式输出，不增加后台任务。
+//   - 默认限制 20 万行或 200MB，先到者终止并返回明确错误。
+//   - DDL 导出为 UTF-8 .sql。
+package dataresource
+
+import (
+	"context"
+	"database/sql"
+	"encoding/csv"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// 导出常量。
+const (
+	ExportMaxRows    = 200000 // 默认最大导出行数
+	ExportMaxBytes   = 200 << 20 // 200MB
+)
+
+// ExportCSV 流式导出查询结果为 CSV。
+// sqlText 是要导出的查询语句，header 写入表头。
+func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.csv", time.Now().Format("20060102-150405")))
+
+	// BOM for Excel UTF-8
+	w.Write([]byte{0xEF, 0xBB, 0xBF})
+
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+
+	// 在只读事务中执行全量查询
+	tx, err := adapter.Begin(ctx, true)
+	if err != nil {
+		return fmt.Errorf("开启只读事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(ctx, sqlText)
+	if err != nil {
+		return adapter.NormalizeError(err).toError()
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+
+	// 写表头
+	if err := cw.Write(cols); err != nil {
+		return err
+	}
+
+	rowCount := 0
+	for rows.Next() {
+		if rowCount >= ExportMaxRows {
+			cw.Flush()
+			w.Write([]byte("\n... 已达到最大导出行数限制 (" + strconv.Itoa(ExportMaxRows) + " 行)\n"))
+			return nil
+		}
+		values := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		record := make([]string, len(cols))
+		for i, v := range values {
+			record[i] = valueToCSV(v)
+		}
+		if err := cw.Write(record); err != nil {
+			return err
+		}
+		rowCount++
+	}
+	return rows.Err()
+}
+
+// valueToCSV 将数据库值转为 CSV 字符串。
+func valueToCSV(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	case []byte:
+		// 二进制：用 hex 表示前 64 字节
+		if len(val) > 64 {
+			return fmt.Sprintf("<binary %d bytes>", len(val))
+		}
+		return fmt.Sprintf("%x", val)
+	case time.Time:
+		return val.Format(time.RFC3339Nano)
+	case sql.NullString:
+		if val.Valid {
+			return val.String
+		}
+		return ""
+	case sql.NullInt64:
+		if val.Valid {
+			return strconv.FormatInt(val.Int64, 10)
+		}
+		return ""
+	case sql.NullFloat64:
+		if val.Valid {
+			return strconv.FormatFloat(val.Float64, 'g', -1, 64)
+		}
+		return ""
+	case sql.NullBool:
+		if val.Valid {
+			if val.Bool {
+				return "true"
+			}
+			return "false"
+		}
+		return ""
+	case sql.NullTime:
+		if val.Valid {
+			return val.Time.Format(time.RFC3339Nano)
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// ExportHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/export
+// Phase 3 简化版：直接导出请求体中的 SQL 查询结果。
+func (s *Service) ExportHandler(w http.ResponseWriter, r *http.Request) {
+	adapter, mode, ok := s.getAdapterForRequest(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		SQL    string `json:"sql"`
+		Format string `json:"format"` // csv 或 xlsx
+	}
+	if err := jsonDecodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	if strings.TrimSpace(body.SQL) == "" {
+		writeErr(w, http.StatusBadRequest, "EMPTY_SQL", "SQL 不能为空")
+		return
+	}
+
+	// 只读用户只能导出 SELECT
+	stmtType := ClassifySQL(body.SQL)
+	if mode == AccessRead && !stmtType.IsReadOnly() {
+		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许导出写操作结果")
+		return
+	}
+
+	if body.Format == "" {
+		body.Format = "csv"
+	}
+
+	switch body.Format {
+	case "csv":
+		if err := ExportCSV(r.Context(), adapter, body.SQL, w); err != nil {
+			// 响应头已写，只能放弃
+			return
+		}
+	case "xlsx":
+		if err := ExportXLSX(r.Context(), adapter, body.SQL, w); err != nil {
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: " + body.Format)
+	}
+}

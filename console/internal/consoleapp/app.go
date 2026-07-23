@@ -151,6 +151,16 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("POST /api/data-resources/test", drAuth(dataResSvc.TestConnectionHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/test", drAuth(dataResSvc.TestExistingConnection))
 
+	// 数据资源元数据:元数据树、表结构、DDL、SQL 模板。
+	mux.HandleFunc("GET /api/data-resources/{id}/metadata/children", drAuth(dataResSvc.MetadataChildren))
+	mux.HandleFunc("GET /api/data-resources/{id}/metadata/structure", drAuth(dataResSvc.MetadataStructure))
+	mux.HandleFunc("GET /api/data-resources/{id}/metadata/ddl", drAuth(dataResSvc.MetadataDDL))
+	mux.HandleFunc("POST /api/data-resources/{id}/metadata/sql-template", drAuth(dataResSvc.MetadataSQLTemplate))
+
+	// 数据资源 SQL 执行和导出(Phase 3:自动提交模式)。
+	mux.HandleFunc("POST /api/data-resources/{id}/execute", drAuth(dataResSvc.ExecuteHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/export", drAuth(dataResSvc.ExportHandler))
+
 	// 多 Agent 管理:仅 admin
 	mux.HandleFunc("GET /api/agents", adminOnly(a.listAgents))
 	mux.HandleFunc("POST /api/agents", adminOnly(a.addAgent))

@@ -24,17 +24,20 @@ import (
 	"time"
 )
 
-// APIError 是统一的错误响应结构。
+// APIError 是统一的错误响应结构。同时实现 error 接口供内部传递。
 type APIError struct {
-	Error   string `json:"error"`
+	Message string `json:"error"`
 	Code    string `json:"code,omitempty"`
 	TxState string `json:"txState,omitempty"`
 }
 
+// Error 实现 error 接口。
+func (e *APIError) Error() string { return e.Message }
+
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(APIError{Error: msg, Code: code, TxState: "none"})
+	json.NewEncoder(w).Encode(APIError{Message: msg, Code: code, TxState: "none"})
 }
 
 func writeOK(w http.ResponseWriter, v any) {
