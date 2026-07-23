@@ -13,6 +13,7 @@ package dataresource
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -416,6 +417,7 @@ func (wm *WorkspaceManager) SetAutoCommit(ws *Workspace, autoCommit bool) error 
 }
 
 // fillResult 从 rows 填充 ExecutionResult。
+// 优先使用 *sql.Rows 的 ColumnTypes 区分 TEXT 与 BLOB。
 func fillResult(rows interface {
 	Columns() ([]string, error)
 	Next() bool
@@ -427,6 +429,10 @@ func fillResult(rows interface {
 		return err
 	}
 	result.Columns = cols
+	typeNames := make([]string, len(cols))
+	if sr, ok := rows.(*sql.Rows); ok {
+		typeNames = columnTypeNames(sr, len(cols))
+	}
 	for rows.Next() {
 		values := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -438,7 +444,7 @@ func fillResult(rows interface {
 		}
 		out := make([]any, len(cols))
 		for i, v := range values {
-			out[i] = normalizeValue(v)
+			out[i] = normalizeValue(v, typeNames[i])
 		}
 		result.Rows = append(result.Rows, out)
 	}

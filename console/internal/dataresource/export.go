@@ -85,6 +85,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	for _, c := range cols {
 		approxBytes += len(c) + 1
 	}
+	typeNames := columnTypeNames(rows, len(cols))
 
 	rowCount := 0
 	for rows.Next() {
@@ -105,7 +106,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 		record := make([]string, len(cols))
 		rowBytes := 0
 		for i, v := range values {
-			record[i] = valueToCSV(v)
+			record[i] = valueToCSV(v, typeNames[i])
 			rowBytes += len(record[i]) + 1
 		}
 		if approxBytes+rowBytes > ExportMaxBytes {
@@ -124,7 +125,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 }
 
 // valueToCSV 将数据库值转为 CSV 字符串。
-func valueToCSV(v any) string {
+func valueToCSV(v any, dbTypeName string) string {
 	if v == nil {
 		return ""
 	}
@@ -137,6 +138,10 @@ func valueToCSV(v any) string {
 		}
 		return "false"
 	case []byte:
+		// 文本列（含 MySQL TEXT 以 []byte 返回）按字符串导出
+		if isTextualDBType(dbTypeName) || (!isBinaryDBType(dbTypeName) && isLikelyUTF8Text(val)) {
+			return string(val)
+		}
 		// 二进制：用 hex 表示前 64 字节
 		if len(val) > 64 {
 			return fmt.Sprintf("<binary %d bytes>", len(val))

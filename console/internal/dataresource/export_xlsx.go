@@ -52,6 +52,7 @@ func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, 
 	if err := sw.SetRow("A1", headerRow); err != nil {
 		return err
 	}
+	typeNames := columnTypeNames(rows, len(cols))
 
 	rowCount := 0
 	for rows.Next() {
@@ -71,7 +72,7 @@ func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, 
 		record := make([]interface{}, len(cols))
 		rowBytes := 0
 		for i, v := range values {
-			cell := valueToXLSX(v)
+			cell := valueToXLSX(v, typeNames[i])
 			record[i] = cell
 			switch t := cell.(type) {
 			case string:
@@ -103,7 +104,7 @@ func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, 
 }
 
 // valueToXLSX 将数据库值转为 XLSX 单元格值。
-func valueToXLSX(v any) interface{} {
+func valueToXLSX(v any, dbTypeName string) interface{} {
 	if v == nil {
 		return ""
 	}
@@ -113,10 +114,13 @@ func valueToXLSX(v any) interface{} {
 	case bool:
 		return val
 	case []byte:
+		if isTextualDBType(dbTypeName) || (!isBinaryDBType(dbTypeName) && isLikelyUTF8Text(val)) {
+			return string(val)
+		}
 		if len(val) > 256 {
 			return fmt.Sprintf("<binary %d bytes>", len(val))
 		}
-		return string(val)
+		return fmt.Sprintf("%x", val)
 	case time.Time:
 		return val.Format(time.RFC3339Nano)
 	default:

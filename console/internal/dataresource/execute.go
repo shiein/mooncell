@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // 执行常量。
@@ -185,6 +186,56 @@ func executeWrite(ctx context.Context, adapter DataSourceAdapter, sqlText string
 	return nil
 }
 
+// columnTypeNames 从 *sql.Rows 取 DatabaseTypeName 列表（失败则返回等长空串）。
+func columnTypeNames(rows *sql.Rows, n int) []string {
+	names := make([]string, n)
+	cts, err := rows.ColumnTypes()
+	if err != nil || len(cts) != n {
+		return names
+	}
+	for i, ct := range cts {
+		if ct != nil {
+			names[i] = ct.DatabaseTypeName()
+		}
+	}
+	return names
+}
+
+// isBinaryDBType 判断驱动报告的列类型是否应作为二进制处理。
+func isBinaryDBType(dbTypeName string) bool {
+	t := strings.ToUpper(strings.TrimSpace(dbTypeName))
+	if t == "" {
+		return false
+	}
+	if strings.Contains(t, "BLOB") || strings.Contains(t, "BINARY") ||
+		t == "BYTEA" || t == "RAW" || t == "LONG RAW" || t == "IMAGE" ||
+		t == "VARBINARY" || t == "LONGBLOB" || t == "MEDIUMBLOB" || t == "TINYBLOB" {
+		return true
+	}
+	return false
+}
+
+// isTextualDBType 判断 []byte 是否应按文本解码（MySQL TEXT/VARCHAR 常以 []byte 返回）。
+func isTextualDBType(dbTypeName string) bool {
+	t := strings.ToUpper(strings.TrimSpace(dbTypeName))
+	if t == "" || isBinaryDBType(t) {
+		return false
+	}
+	// CHAR/VARCHAR/TEXT/JSON/ENUM/SET/XML/UUID 及常见别名
+	if strings.Contains(t, "CHAR") || strings.Contains(t, "TEXT") ||
+		strings.Contains(t, "JSON") || strings.Contains(t, "XML") ||
+		t == "ENUM" || t == "SET" || t == "UUID" || t == "NAME" ||
+		t == "CITEXT" || strings.Contains(t, "CLOB") {
+		return true
+	}
+	// DECIMAL/NUMERIC 等以 []byte 返回时也应当字符串
+	if strings.Contains(t, "DECIMAL") || strings.Contains(t, "NUMERIC") ||
+		t == "MONEY" || t == "NUMBER" {
+		return true
+	}
+	return false
+}
+
 // scanRow 扫描一行数据，将特殊类型（大整数、DECIMAL、二进制）转换为 JSON 安全格式。
 func scanRow(rows *sql.Rows, cols []string) ([]any, error) {
 	values := make([]any, len(cols))
@@ -195,17 +246,18 @@ func scanRow(rows *sql.Rows, cols []string) ([]any, error) {
 	if err := rows.Scan(ptrs...); err != nil {
 		return nil, err
 	}
+	typeNames := columnTypeNames(rows, len(cols))
 	out := make([]any, len(cols))
 	for i, v := range values {
-		out[i] = normalizeValue(v)
+		out[i] = normalizeValue(v, typeNames[i])
 	}
 	return out, nil
 }
 
 // normalizeValue 将数据库值转换为 JSON 安全格式。
 // 大整数、DECIMAL 使用字符串传输，避免 JavaScript 精度丢失。
-// 二进制字段以 base64 截断预览返回。
-func normalizeValue(v any) any {
+// 二进制字段以 base64 截断预览返回；文本列即使驱动以 []byte 返回也按字符串处理。
+func normalizeValue(v any, dbTypeName string) any {
 	if v == nil {
 		return nil
 	}
@@ -232,11 +284,15 @@ func normalizeValue(v any) any {
 	case float32, float64:
 		return val
 	case []byte:
+		// MySQL 等驱动常以 []byte 返回 TEXT/VARCHAR/DECIMAL
+		if isTextualDBType(dbTypeName) || (!isBinaryDBType(dbTypeName) && isLikelyUTF8Text(val)) {
+			return string(val)
+		}
 		// 二进制：base64 截断预览（最多 256 字节）
 		if len(val) > 256 {
 			return map[string]any{
-				"type":  "binary",
-				"size":  len(val),
+				"type":    "binary",
+				"size":    len(val),
 				"preview": base64.StdEncoding.EncodeToString(val[:256]),
 			}
 		}
@@ -280,6 +336,23 @@ func normalizeValue(v any) any {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// isLikelyUTF8Text：类型未知时，若为合法 UTF-8 且无可打印控制字符则按文本处理。
+func isLikelyUTF8Text(b []byte) bool {
+	if len(b) == 0 {
+		return true
+	}
+	if !utf8.Valid(b) {
+		return false
+	}
+	// 含过多 NUL 则更像二进制
+	for _, c := range b {
+		if c == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // toError 将 DatabaseError 转为 error。
