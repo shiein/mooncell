@@ -178,8 +178,12 @@ func ValidateSingleStatement(sql string) error {
 			i = skipLineComment(rune, i)
 		case c == '/' && i+1 < len(rune) && rune[i+1] == '*': // 块注释
 			i = skipBlockComment(rune, i)
-		case c == '$' && i+1 < len(rune) && rune[i+1] == '$': // PG dollar quote
-			i = skipDollarQuote(rune, i)
+		case c == '$': // PG dollar quote：$tag$...$tag$（含 $$）
+			if ni, ok := trySkipDollarQuote(rune, i); ok {
+				i = ni
+				continue
+			}
+			// 非 dollar quote（如 $1 参数）正常前进
 		case c == ';': // 语句外分号
 			// 检查分号后是否还有非空白内容
 			rest := strings.TrimSpace(string(rune[i+1:]))
@@ -281,13 +285,45 @@ func skipBlockComment(r []rune, i int) int {
 	return i
 }
 
-func skipDollarQuote(r []rune, i int) int {
-	i += 2 // 跳过 $$
-	for i < len(r) {
-		if r[i] == '$' && i+1 < len(r) && r[i+1] == '$' {
-			return i + 1
-		}
-		i++
+// trySkipDollarQuote 识别 PostgreSQL dollar-quoted string：
+//   $$...$$ 或 $tag$...$tag$
+// tag 为可选标识符（字母/数字/下划线）。成功时返回闭合标签最后一个 rune 的下标。
+// $1 等参数占位符返回 ok=false。
+func trySkipDollarQuote(r []rune, i int) (int, bool) {
+	if i >= len(r) || r[i] != '$' {
+		return i, false
 	}
-	return i
+	// 解析开标签：$[tag]$
+	j := i + 1
+	for j < len(r) && r[j] != '$' {
+		c := r[j]
+		if !(unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_') {
+			return i, false
+		}
+		j++
+	}
+	if j >= len(r) {
+		// 无闭合的开标签（如 $1）
+		return i, false
+	}
+	// r[j] 是开标签的结束 $
+	tag := string(r[i : j+1])
+	// 在正文中查找相同闭合标签
+	k := j + 1
+	tagRunes := []rune(tag)
+	for k <= len(r)-len(tagRunes) {
+		match := true
+		for t := 0; t < len(tagRunes); t++ {
+			if r[k+t] != tagRunes[t] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return k + len(tagRunes) - 1, true
+		}
+		k++
+	}
+	// 未闭合：吞到末尾，避免后续误判
+	return len(r) - 1, true
 }

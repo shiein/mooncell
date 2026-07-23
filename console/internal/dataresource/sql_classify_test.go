@@ -115,6 +115,20 @@ func TestDollarQuote(t *testing.T) {
 	if err := ValidateSingleStatement(sql2); err == nil {
 		t.Error("dollar quote 后的分号应触发多语句错误")
 	}
+	// 带标签的 $tag$...$tag$
+	sql3 := `SELECT $body$hello; world$body$ AS msg`
+	if err := ValidateSingleStatement(sql3); err != nil {
+		t.Errorf("带标签 dollar quote 内分号不应触发多语句错误: %v", err)
+	}
+	sql4 := `SELECT $tag$; not end $tag$; SELECT 1`
+	if err := ValidateSingleStatement(sql4); err == nil {
+		t.Error("带标签 dollar quote 后的分号应触发多语句错误")
+	}
+	// $1 参数不应被当作 dollar quote 吞掉整句
+	sql5 := `SELECT $1`
+	if err := ValidateSingleStatement(sql5); err != nil {
+		t.Errorf("$1 参数应作为单语句通过: %v", err)
+	}
 }
 
 func TestDangerousWrite(t *testing.T) {
