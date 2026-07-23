@@ -117,6 +117,13 @@ func (s *Service) InvalidateAllForUser(username string) {
 	}
 }
 
+// InvalidateResource 回滚并删除某资源上的全部工作台（资源更新/删除时调用）。
+func (s *Service) InvalidateResource(resourceID string) {
+	if s.workspaces != nil {
+		s.workspaces.InvalidateResource(resourceID)
+	}
+}
+
 // CleanupExpiredImports 清理超时的导入会话和临时文件。
 func (s *Service) CleanupExpiredImports() {
 	s.cleanupExpiredImports()

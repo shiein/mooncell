@@ -231,7 +231,8 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新资源失败")
 		return
 	}
-	// 配置变更后关闭旧连接池，下次 GetDB 按新 DSN/凭据懒加载
+	// 配置变更后关闭旧连接池并失效工作台，下次 GetDB 按新 DSN/凭据懒加载
+	s.workspaces.InvalidateResource(id)
 	s.pools.CloseDB(id)
 	res, _, _ := GetDataResource(s.db, id)
 	s.auditLog(user, "更新数据资源", res.Name, "成功")
@@ -280,7 +281,8 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "删除资源失败")
 		return
 	}
-	// 关闭该资源的连接池
+	// 失效工作台并关闭连接池
+	s.workspaces.InvalidateResource(id)
 	s.pools.CloseDB(id)
 	s.auditLog(user, "删除数据资源", res.Name, "成功")
 	writeOK(w, map[string]bool{"ok": true})
