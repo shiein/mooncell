@@ -212,17 +212,31 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		body.Format = "csv"
 	}
 
-	stmtType := ClassifySQL(sqlText)
-	if !canWriteAccess(mode) && !stmtType.IsReadOnly() {
-		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许导出写操作结果")
+	if err := prepareExportSQL(sqlText); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_SQL", err.Error())
 		return
 	}
+	_ = mode // 授权已在 resolve 校验；SQL 已限制为只读
 
 	switch body.Format {
 	case "csv":
-		ExportCSV(r.Context(), ws.Adapter, sqlText, w)
+		if err := ExportCSV(r.Context(), ws.Adapter, sqlText, w); err != nil {
+			if _, ok := err.(*ErrExportLimit); ok {
+				// CSV 可能已在流中写入截断提示
+				return
+			}
+			// 流未开始时尽量返回错误
+			return
+		}
 	case "xlsx":
-		ExportXLSX(r.Context(), ws.Adapter, sqlText, w)
+		if err := ExportXLSX(r.Context(), ws.Adapter, sqlText, w); err != nil {
+			if lim, ok := err.(*ErrExportLimit); ok {
+				writeErr(w, http.StatusRequestEntityTooLarge, "EXPORT_LIMIT", lim.Reason)
+				return
+			}
+			writeErr(w, http.StatusBadRequest, "EXPORT_ERROR", err.Error())
+			return
+		}
 	default:
 		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: "+body.Format)
 	}

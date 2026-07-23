@@ -11,9 +11,11 @@ import (
 )
 
 // ExportXLSX 流式导出查询结果为 XLSX。
+// 在写入 HTTP 响应前在内存流式构建；超限时返回明确错误且不写出半截文件。
 func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.xlsx", time.Now().Format("20060102-150405")))
+	if err := prepareExportSQL(sqlText); err != nil {
+		return err
+	}
 
 	tx, err := adapter.Begin(ctx, true)
 	if err != nil {
@@ -39,12 +41,13 @@ func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, 
 	if err != nil {
 		return err
 	}
-	defer sw.Flush()
 
 	// 写表头
 	headerRow := make([]interface{}, len(cols))
+	approxBytes := 0
 	for i, col := range cols {
 		headerRow[i] = col
+		approxBytes += len(col)
 	}
 	if err := sw.SetRow("A1", headerRow); err != nil {
 		return err
@@ -54,7 +57,8 @@ func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, 
 	for rows.Next() {
 		rowCount++
 		if rowCount > ExportMaxRows {
-			break
+			_ = sw.Flush()
+			return &ErrExportLimit{Reason: fmt.Sprintf("已达到最大导出行数限制 (%d 行)", ExportMaxRows)}
 		}
 		values := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -65,18 +69,36 @@ func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, 
 			return err
 		}
 		record := make([]interface{}, len(cols))
+		rowBytes := 0
 		for i, v := range values {
-			record[i] = valueToXLSX(v)
+			cell := valueToXLSX(v)
+			record[i] = cell
+			switch t := cell.(type) {
+			case string:
+				rowBytes += len(t)
+			default:
+				rowBytes += 16
+			}
+		}
+		if approxBytes+rowBytes > ExportMaxBytes {
+			_ = sw.Flush()
+			return &ErrExportLimit{Reason: fmt.Sprintf("已达到最大导出体积限制 (%d MB)", ExportMaxBytes>>20)}
 		}
 		cell, _ := excelize.CoordinatesToCellName(1, rowCount+1)
 		if err := sw.SetRow(cell, record); err != nil {
 			return err
 		}
+		approxBytes += rowBytes
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if err := sw.Flush(); err != nil {
+		return err
+	}
 
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.xlsx", time.Now().Format("20060102-150405")))
 	return f.Write(w)
 }
 

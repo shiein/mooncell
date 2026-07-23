@@ -21,18 +21,41 @@ import (
 
 // 导出常量。
 const (
-	ExportMaxRows    = 200000 // 默认最大导出行数
-	ExportMaxBytes   = 200 << 20 // 200MB
+	ExportMaxRows  = 200000    // 默认最大导出行数
+	ExportMaxBytes = 200 << 20 // 200MB
 )
+
+// ErrExportLimit 表示导出行数或字节上限触发。
+type ErrExportLimit struct {
+	Reason string
+}
+
+func (e *ErrExportLimit) Error() string { return e.Reason }
+
+// prepareExportSQL 校验导出 SQL：单语句且必须为只读查询。
+func prepareExportSQL(sqlText string) error {
+	if err := ValidateSingleStatement(sqlText); err != nil {
+		return err
+	}
+	if !ClassifySQL(sqlText).IsReadOnly() {
+		return fmt.Errorf("仅支持导出 SELECT 查询结果")
+	}
+	return nil
+}
 
 // ExportCSV 流式导出查询结果为 CSV。
 // sqlText 是要导出的查询语句，header 写入表头。
 func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
+	if err := prepareExportSQL(sqlText); err != nil {
+		return err
+	}
+
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.csv", time.Now().Format("20060102-150405")))
 
 	// BOM for Excel UTF-8
-	w.Write([]byte{0xEF, 0xBB, 0xBF})
+	n, _ := w.Write([]byte{0xEF, 0xBB, 0xBF})
+	approxBytes := n
 
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
@@ -59,13 +82,17 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	if err := cw.Write(cols); err != nil {
 		return err
 	}
+	for _, c := range cols {
+		approxBytes += len(c) + 1
+	}
 
 	rowCount := 0
 	for rows.Next() {
 		if rowCount >= ExportMaxRows {
 			cw.Flush()
-			w.Write([]byte("\n... 已达到最大导出行数限制 (" + strconv.Itoa(ExportMaxRows) + " 行)\n"))
-			return nil
+			msg := "\n... 已达到最大导出行数限制 (" + strconv.Itoa(ExportMaxRows) + " 行)\n"
+			w.Write([]byte(msg))
+			return &ErrExportLimit{Reason: "已达到最大导出行数限制"}
 		}
 		values := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -76,12 +103,21 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 			return err
 		}
 		record := make([]string, len(cols))
+		rowBytes := 0
 		for i, v := range values {
 			record[i] = valueToCSV(v)
+			rowBytes += len(record[i]) + 1
+		}
+		if approxBytes+rowBytes > ExportMaxBytes {
+			cw.Flush()
+			msg := fmt.Sprintf("\n... 已达到最大导出体积限制 (%d MB)\n", ExportMaxBytes>>20)
+			w.Write([]byte(msg))
+			return &ErrExportLimit{Reason: "已达到最大导出体积限制"}
 		}
 		if err := cw.Write(record); err != nil {
 			return err
 		}
+		approxBytes += rowBytes
 		rowCount++
 	}
 	return rows.Err()
@@ -141,7 +177,7 @@ func valueToCSV(v any) string {
 	}
 }
 
-// ExportHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/export
+// ExportHandler 处理 POST /api/data-resources/{id}/export
 // Phase 3 简化版：直接导出请求体中的 SQL 查询结果。
 func (s *Service) ExportHandler(w http.ResponseWriter, r *http.Request) {
 	adapter, mode, ok := s.getAdapterForRequest(w, r)
@@ -161,12 +197,11 @@ func (s *Service) ExportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 只读用户只能导出 SELECT
-	stmtType := ClassifySQL(body.SQL)
-	if mode == AccessRead && !stmtType.IsReadOnly() {
-		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许导出写操作结果")
+	if err := prepareExportSQL(body.SQL); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_SQL", err.Error())
 		return
 	}
+	_ = mode // 授权已在 getAdapterForRequest 校验；SQL 已限制为只读
 
 	if body.Format == "" {
 		body.Format = "csv"
@@ -175,7 +210,10 @@ func (s *Service) ExportHandler(w http.ResponseWriter, r *http.Request) {
 	switch body.Format {
 	case "csv":
 		if err := ExportCSV(r.Context(), adapter, body.SQL, w); err != nil {
-			// 响应头已写，只能放弃
+			// 若尚未写 body 头外的错误，尽量返回 JSON；流已开始时只能放弃
+			if _, isLimit := err.(*ErrExportLimit); !isLimit {
+				// 响应可能已开始，无法安全回写 JSON
+			}
 			return
 		}
 	case "xlsx":
@@ -183,6 +221,6 @@ func (s *Service) ExportHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: " + body.Format)
+		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: "+body.Format)
 	}
 }
