@@ -75,6 +75,8 @@ func Run(distFS fs.FS, version string, args []string) {
 
 	// 数据资源模块服务：持有 SQLite 句柄和凭据密钥。
 	dataResSvc := dataresource.NewService(store.db, store.credKey)
+	defer dataResSvc.Close()
+	a.dataResSvc = dataResSvc
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
 	go func() {
@@ -94,6 +96,17 @@ func Run(distFS fs.FS, version string, args []string) {
 
 	// 持续健康巡检 + Agent 指标采集(独立周期,默认 30s)。interval<=0 关闭。
 	go a.runMonitor(cfg.Monitor.IntervalSeconds, cfg.Monitor.MetricsKeepHours)
+
+	// 数据资源:手工事务超时清理(每 5 分钟检查一次,15 分钟空闲自动回滚)。
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if n := dataResSvc.CleanupIdle(); n > 0 {
+				log.Printf("[data-resource] 回滚超时手工事务 %d 个", n)
+			}
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
@@ -160,6 +173,15 @@ func Run(distFS fs.FS, version string, args []string) {
 	// 数据资源 SQL 执行和导出(Phase 3:自动提交模式)。
 	mux.HandleFunc("POST /api/data-resources/{id}/execute", drAuth(dataResSvc.ExecuteHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/export", drAuth(dataResSvc.ExportHandler))
+
+	// 数据资源工作台(Phase 4:事务支持)。
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces", drAuth(dataResSvc.CreateWorkspaceHandler))
+	mux.HandleFunc("PATCH /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit", drAuth(dataResSvc.PatchAutoCommit))
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/execute", drAuth(dataResSvc.ExecuteInWorkspaceHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/commit", drAuth(dataResSvc.CommitWorkspaceHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/rollback", drAuth(dataResSvc.RollbackWorkspaceHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/export", drAuth(dataResSvc.ExportFromWorkspace))
+	mux.HandleFunc("DELETE /api/data-resources/{id}/workspaces/{workspaceId}", drAuth(dataResSvc.DeleteWorkspaceHandler))
 
 	// 多 Agent 管理:仅 admin
 	mux.HandleFunc("GET /api/agents", adminOnly(a.listAgents))

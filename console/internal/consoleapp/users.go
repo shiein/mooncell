@@ -107,6 +107,9 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新数据资源授权失败"})
 			return
 		}
+		// 撤销或降级授权后，回滚该用户在对应资源上的活动事务。
+		// 比较新旧授权，对不再有 write/read 权限的资源回滚其工作台事务。
+		a.rollbackRevokedDataResourceTx(target, grants)
 	}
 	a.store.appendAudit(a.sessionUser(r), "更新用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -151,4 +154,27 @@ func normalizeAppIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// rollbackRevokedDataResourceTx 在用户授权更新后，回滚其不再有权限的资源上的活动事务。
+// 设计文档：撤销或降级授权后，立即回滚该用户在对应资源上的活动事务并使工作台失效。
+func (a *api) rollbackRevokedDataResourceTx(username string, newGrants []dataresource.DataResourceGrant) {
+	if a.dataResSvc == nil {
+		return
+	}
+	// 构建新授权的资源集合
+	newSet := map[string]bool{}
+	for _, g := range newGrants {
+		newSet[g.ResourceID] = true
+	}
+	// 查询旧授权，对不再授权的资源回滚事务
+	oldGrants, err := dataresource.UserGrants(a.store.db, username)
+	if err != nil {
+		return
+	}
+	for _, old := range oldGrants {
+		if !newSet[old.ResourceID] {
+			a.dataResSvc.RollbackUserTx(username, old.ResourceID)
+		}
+	}
 }

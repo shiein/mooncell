@@ -69,6 +69,53 @@ func (st StatementType) IsAutoCommitOnly() bool {
 	return st == StmtDDL || st == StmtDCL || st == StmtTruncate || st == StmtCall
 }
 
+// IsDangerousWrite 返回是否为危险写操作（需要二次确认）。
+// 设计文档：TRUNCATE、DROP、无 WHERE 的 DELETE/UPDATE 在读写模式也要求二次确认。
+func (st StatementType) IsDangerousWrite(sqlText string) bool {
+	switch st {
+	case StmtTruncate:
+		return true
+	case StmtDDL:
+		upper := strings.ToUpper(stripLeadingCommentsAndWhitespace(sqlText))
+		return strings.HasPrefix(upper, "DROP")
+	case StmtDelete, StmtUpdate:
+		return !hasWhereClause(sqlText)
+	}
+	return false
+}
+
+// hasWhereClause 检查 SQL 是否包含 WHERE 子句（粗略检查，不解析 SQL）。
+func hasWhereClause(sqlText string) bool {
+	upper := strings.ToUpper(sqlText)
+	// 去除字符串和注释中的 WHERE
+	cleaned := stripStringLiteralsAndComments(upper)
+	return strings.Contains(cleaned, " WHERE ")
+}
+
+// stripStringLiteralsAndComments 移除 SQL 中的字符串字面量和注释，避免误判 WHERE。
+func stripStringLiteralsAndComments(sql string) string {
+	var sb strings.Builder
+	r := []rune(sql)
+	i := 0
+	for i < len(r) {
+		c := r[i]
+		switch {
+		case c == '\'':
+			i = skipSingleQuote(r, i)
+		case c == '"':
+			i = skipDoubleQuote(r, i)
+		case c == '-' && i+1 < len(r) && r[i+1] == '-':
+			i = skipLineComment(r, i)
+		case c == '/' && i+1 < len(r) && r[i+1] == '*':
+			i = skipBlockComment(r, i)
+		default:
+			sb.WriteRune(c)
+		}
+		i++
+	}
+	return sb.String()
+}
+
 // ClassifySQL 分析 SQL 文本，返回语句类型。
 // 先去除前导注释和空白，再取首个关键字。
 func ClassifySQL(sql string) StatementType {

@@ -195,6 +195,11 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
+	// 存在活动手工事务时禁止更新资源
+	if s.pools.HasActiveTx(id) {
+		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再更新资源")
+		return
+	}
 	var input DataResourceInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
@@ -247,6 +252,11 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
+	// 存在活动手工事务时禁止删除资源
+	if s.pools.HasActiveTx(id) {
+		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再删除资源")
+		return
+	}
 	var body struct {
 		Name string `json:"name"`
 	}
@@ -262,6 +272,8 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "删除资源失败")
 		return
 	}
+	// 关闭该资源的连接池
+	s.pools.CloseDB(id)
 	writeOK(w, map[string]bool{"ok": true})
 }
 

@@ -116,3 +116,28 @@ func TestDollarQuote(t *testing.T) {
 		t.Error("dollar quote 后的分号应触发多语句错误")
 	}
 }
+
+func TestDangerousWrite(t *testing.T) {
+	cases := []struct {
+		sql     string
+		danger  bool
+	}{
+		{"TRUNCATE TABLE t", true},
+		{"DROP TABLE t", true},
+		{"DELETE FROM t", true},           // 无 WHERE
+		{"DELETE FROM t WHERE id = 1", false},
+		{"UPDATE t SET a = 1", true},      // 无 WHERE
+		{"UPDATE t SET a = 1 WHERE id = 1", false},
+		{"INSERT INTO t VALUES (1)", false},
+		{"SELECT * FROM t", false},
+		// WHERE 在字符串中不应误判
+		{"DELETE FROM t WHERE name = 'hello WHERE world'", false},
+	}
+	for _, c := range cases {
+		stmtType := ClassifySQL(c.sql)
+		got := stmtType.IsDangerousWrite(c.sql)
+		if got != c.danger {
+			t.Errorf("IsDangerousWrite(%q) = %v, 期望 %v", c.sql, got, c.danger)
+		}
+	}
+}

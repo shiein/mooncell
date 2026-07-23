@@ -36,6 +36,7 @@ type api struct {
 	draining        bool              // 自更新 draining:置位后 tryBeginOp 拒绝新操作,等在飞清零再 self-exec 重启。busyMu 保护
 	requireTLSAgents bool             // 开启后拒绝注册非 loopback 明文 Agent(security.require_tls_agents)
 	selfUpdateMu    sync.Mutex // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
+	dataResSvc      *dataresource.Service // 数据资源模块服务（工作台事务回滚等）
 }
 
 func randomToken() string {
