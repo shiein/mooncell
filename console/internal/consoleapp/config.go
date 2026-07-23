@@ -26,6 +26,7 @@ type Config struct {
 	Audit          AuditConfig          `toml:"audit"`
 	Monitor        MonitorConfig        `toml:"monitor"`
 	Security       SecurityConfig       `toml:"security"`
+	DataResource   DataResourceConfig   `toml:"data_resource"`
 }
 
 // LegacyArtifactConfig 兼容读取旧版 [artifact].dir，供一次性移除旧表与落盘字节。
@@ -39,6 +40,13 @@ type LegacyArtifactConfig struct {
 // 切到 https(见 agent 侧 security.tls_cert/tls_key)或反代 TLS 终端。
 type SecurityConfig struct {
 	RequireTLSAgents bool `toml:"require_tls_agents"`
+}
+
+// DataResourceConfig:数据资源模块配置。CredentialKeyFile 是凭据加密密钥文件路径,
+// 默认 mooncell-data.key,须与 mooncell.db 分开备份。ImportMaxMB 是 CSV/XLSX 导入上限。
+type DataResourceConfig struct {
+	CredentialKeyFile string `toml:"credential_key_file"`
+	ImportMaxMB       int    `toml:"import_max_mb"`
 }
 
 // MonitorConfig:部署后持续健康巡检 + Agent 资源指标留存。
@@ -120,6 +128,7 @@ func loadConfig(path string) *Config {
 		Deploy:         DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 		Audit:          AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
 		Monitor:        MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
+		DataResource:   DataResourceConfig{CredentialKeyFile: "mooncell-data.key", ImportMaxMB: 100},
 	}
 	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败(语法错误/权限等)→ 直接退出。
 	// 显式对外监听时若仍使用周知默认密码/token,同样拒绝启动。

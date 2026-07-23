@@ -18,6 +18,9 @@ dist/
 *.db-shm
 *.db-wal
 
+# 数据资源凭据密钥(运行期生成,必须与 db 分开备份,不入库)
+*.key
+
 # Agent 本地状态
 /agent/data/
 

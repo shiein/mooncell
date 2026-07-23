@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"mooncell/console/internal/dataresource"
 )
 
 // listUsers 处理 GET /api/users(admin):列出全部用户(不含口令,含授权应用)。
@@ -20,9 +22,10 @@ func (a *api) listUsers(w http.ResponseWriter, r *http.Request) {
 // 角色固定为 user;管理员仅由 config 种入或库内既有 admin,不经此接口再造。
 func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username string   `json:"username"`
-		Password string   `json:"password"`
-		AppIDs   []string `json:"appIds"`
+		Username           string                             `json:"username"`
+		Password           string                             `json:"password"`
+		AppIDs             []string                           `json:"appIds"`
+		DataResourceGrants []dataresource.DataResourceGrant   `json:"dataResourceGrants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -48,6 +51,16 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入应用授权失败"})
 		return
 	}
+	// 数据资源授权:与应用授权一起事务性写入。
+	for i := range body.DataResourceGrants {
+		body.DataResourceGrants[i].Username = body.Username
+	}
+	if err := dataresource.SetUserGrants(a.store.db, body.Username, body.DataResourceGrants, a.sessionUser(r)); err != nil {
+		// 授权失败:回滚用户和应用授权,避免半成品。
+		a.store.deleteUser(body.Username)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入数据资源授权失败"})
+		return
+	}
 	a.store.appendAudit(a.sessionUser(r), "创建用户", body.Username, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -65,8 +78,9 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Password string    `json:"password"` // 非空则改密
-		AppIDs   *[]string `json:"appIds"`   // 非 nil 则全量替换授权
+		Password           string                           `json:"password"`           // 非空则改密
+		AppIDs             *[]string                        `json:"appIds"`             // 非 nil 则全量替换授权
+		DataResourceGrants *[]dataresource.DataResourceGrant `json:"dataResourceGrants"` // 非 nil 则全量替换数据资源授权
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -81,6 +95,16 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 	if body.AppIDs != nil {
 		if err := a.store.setUserApps(target, normalizeAppIDs(*body.AppIDs)); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新应用授权失败"})
+			return
+		}
+	}
+	if body.DataResourceGrants != nil {
+		grants := *body.DataResourceGrants
+		for i := range grants {
+			grants[i].Username = target
+		}
+		if err := dataresource.SetUserGrants(a.store.db, target, grants, a.sessionUser(r)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新数据资源授权失败"})
 			return
 		}
 	}

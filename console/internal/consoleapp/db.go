@@ -8,11 +8,15 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite" // 纯 Go sqlite 驱动,无 CGO,利于单二进制
+
+	"mooncell/console/internal/dataresource"
 )
 
 type Store struct {
 	db  *sql.DB
 	ttl time.Duration
+	// credKey 数据资源凭据加密密钥;无数据资源模块时为 nil。
+	credKey *dataresource.CredentialKey
 }
 
 func openDB(cfg *Config) *Store {
@@ -96,7 +100,31 @@ func openDB(cfg *Config) *Store {
 		log.Fatalf("[db] 建表失败: %v", err)
 	}
 
-	return &Store{db: db, ttl: time.Duration(cfg.Session.TTLHours) * time.Hour}
+	store := &Store{db: db, ttl: time.Duration(cfg.Session.TTLHours) * time.Hour}
+
+	// 数据资源模块:迁移三张表 + 加载/生成凭据密钥。
+	// 密钥文件丢失但已有资源时拒绝启动(不生成新密钥伪装成功)。
+	if err := dataresource.MigrateDataResources(db); err != nil {
+		log.Fatalf("[db] 数据资源迁移失败: %v", err)
+	}
+	keyFile := cfg.DataResource.CredentialKeyFile
+	if keyFile == "" {
+		keyFile = "mooncell-data.key"
+	}
+	hasRes, err := dataresource.HasExistingResources(db)
+	if err != nil {
+		log.Fatalf("[db] 检查数据资源失败: %v", err)
+	}
+	credKey, err := dataresource.LoadOrCreateCredentialKey(keyFile, hasRes)
+	if err != nil {
+		log.Fatalf("[db] 凭据密钥初始化失败: %v", err)
+	}
+	store.credKey = credKey
+	if !hasRes {
+		log.Printf("[db] 数据资源凭据密钥就绪: %s", keyFile)
+	}
+
+	return store
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -235,10 +263,11 @@ func (s *Store) seedAdmin(username, password string) {
 
 // UserInfo 是用户列表对外形态(不含口令哈希)。
 type UserInfo struct {
-	Username  string   `json:"username"`
-	Role      string   `json:"role"`
-	CreatedAt int64    `json:"createdAt"`
-	AppIDs    []string `json:"appIds"` // 授权访问的应用;admin 忽略(全量)
+	Username           string                       `json:"username"`
+	Role               string                       `json:"role"`
+	CreatedAt          int64                        `json:"createdAt"`
+	AppIDs             []string                     `json:"appIds"`             // 授权访问的应用;admin 忽略(全量)
+	DataResourceGrants []dataresource.DataResourceGrant `json:"dataResourceGrants"` // 数据资源授权;admin 忽略(隐式全量)
 }
 
 func (s *Store) userRole(username string) string {
@@ -264,6 +293,7 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 			return nil, err
 		}
 		u.AppIDs = []string{}
+		u.DataResourceGrants = []dataresource.DataResourceGrant{}
 		out = append(out, u)
 	}
 	if err := rows.Err(); err != nil {
@@ -272,7 +302,7 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 	}
 	rows.Close()
 
-	// 批量拉授权,再按用户填入(一次查询,无嵌套)。
+	// 批量拉应用授权,再按用户填入(一次查询,无嵌套)。
 	appRows, err := s.db.Query("SELECT username, app_id FROM user_apps ORDER BY username, app_id")
 	if err != nil {
 		return nil, err
@@ -289,9 +319,17 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 	if err := appRows.Err(); err != nil {
 		return nil, err
 	}
+	// 批量拉数据资源授权。
+	grantsByUser, err := dataresource.AllGrantsByUser(s.db)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
 		if apps, ok := byUser[out[i].Username]; ok {
 			out[i].AppIDs = apps
+		}
+		if gs, ok := grantsByUser[out[i].Username]; ok {
+			out[i].DataResourceGrants = gs
 		}
 	}
 	return out, nil
@@ -399,6 +437,7 @@ func (s *Store) deleteUser(username string) (bool, error) {
 	if n > 0 {
 		s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
 		s.db.Exec("DELETE FROM user_apps WHERE username = ?", username)
+		s.db.Exec("DELETE FROM data_resource_grants WHERE username = ?", username)
 	}
 	return n > 0, nil
 }
