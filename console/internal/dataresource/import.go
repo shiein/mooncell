@@ -230,16 +230,23 @@ func parseXLSXPreview(session *ImportSession) (*ImportPreviewResult, error) {
 	if !found {
 		return nil, fmt.Errorf("工作表不存在: %s", session.Sheet)
 	}
-	rows, err := f.GetRows(session.Sheet)
+	// 流式只读前 N+1 行（含表头），避免 GetRows 整表入内存
+	iter, err := f.Rows(session.Sheet)
 	if err != nil {
 		return nil, fmt.Errorf("读取 XLSX 失败: %w", err)
 	}
+	defer iter.Close()
 	var preview [][]string
-	for i, row := range rows {
-		if i > ImportPreviewRows {
-			break
+	for len(preview) <= ImportPreviewRows && iter.Next() {
+		row, err := iter.Columns()
+		if err != nil {
+			return nil, fmt.Errorf("读取 XLSX 行失败: %w", err)
 		}
-		preview = append(preview, row)
+		// Columns 返回底层缓冲复用风险：拷贝一份
+		preview = append(preview, append([]string(nil), row...))
+	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("读取 XLSX 失败: %w", err)
 	}
 	if len(preview) == 0 {
 		return nil, fmt.Errorf("XLSX 文件为空")
@@ -578,22 +585,13 @@ func validateImportTarget(ctx context.Context, adapter DataSourceAdapter, schema
 	return resolved, nil
 }
 
-// streamImportRows 逐行回调文件内容；CSV 流式读取，XLSX 受 excelize 限制整表读入后逐行回调。
+// streamImportRows 逐行回调文件内容；CSV 与 XLSX 均流式读取，避免整表入内存。
 func streamImportRows(session *ImportSession, fn func(row []string, isHeader bool) error) error {
 	switch session.Format {
 	case "csv":
 		return streamCSVRows(session.FilePath, fn)
 	case "xlsx":
-		rows, err := readAllXLSX(session.FilePath, session.Sheet)
-		if err != nil {
-			return err
-		}
-		for i, row := range rows {
-			if err := fn(row, i == 0); err != nil {
-				return err
-			}
-		}
-		return nil
+		return streamXLSXRows(session.FilePath, session.Sheet, fn)
 	}
 	return fmt.Errorf("不支持的格式")
 }
@@ -628,13 +626,32 @@ func streamCSVRows(path string, fn func(row []string, isHeader bool) error) erro
 	}
 }
 
-func readAllXLSX(path, sheet string) ([][]string, error) {
+// streamXLSXRows 用 excelize Rows 迭代器逐行读取，不整表装入 [][]string。
+func streamXLSXRows(path, sheet string, fn func(row []string, isHeader bool) error) error {
 	f, err := excelize.OpenFile(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
-	return f.GetRows(sheet)
+	iter, err := f.Rows(sheet)
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	first := true
+	for iter.Next() {
+		row, err := iter.Columns()
+		if err != nil {
+			return err
+		}
+		// 拷贝行，避免迭代器复用缓冲被回调侧持有时脏读
+		cp := append([]string(nil), row...)
+		if err := fn(cp, first); err != nil {
+			return err
+		}
+		first = false
+	}
+	return iter.Error()
 }
 
 // ImportDeleteHandler 处理 DELETE /api/data-resources/{id}/imports/{importId}
