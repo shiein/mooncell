@@ -10,6 +10,8 @@ package dataresource
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"strings"
 )
 
 // MetadataNodeKind 元数据节点类型。
@@ -34,36 +36,40 @@ type MetadataNode struct {
 	Schema string           `json:"schema,omitempty"` // 所属 schema/owner
 	Name   string           `json:"name"`             // 对象名
 	// ID 是编码后的节点标识，供前端引用（如 parentId/nodeId）。
-	// 格式：kind:schema:name，服务端解码后重新校验。
+	// ID 为不透明编码（base64url），服务端解码后重新校验。
 	ID string `json:"id,omitempty"`
 }
 
 // EncodeID 将节点三要素编码为不透明 ID。
+// 使用 base64url(kind\0schema\0name)，避免 schema/name 含 ":" 时拆分错误。
 func (n MetadataNode) EncodeID() string {
-	return string(n.Kind) + ":" + n.Schema + ":" + n.Name
+	raw := string(n.Kind) + "\x00" + n.Schema + "\x00" + n.Name
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 // DecodeID 从编码 ID 解析节点。服务端解码后仍须重新校验对象存在性。
+// 兼容旧版 "kind:schema:name" 冒号格式（仅当恰好 3 段时）。
 func DecodeID(id string) (MetadataNode, bool) {
-	parts := splitNodeID(id)
+	if id == "" {
+		return MetadataNode{}, false
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(id); err == nil {
+		parts := strings.SplitN(string(b), "\x00", 3)
+		if len(parts) == 3 {
+			return MetadataNode{
+				Kind:   MetadataNodeKind(parts[0]),
+				Schema: parts[1],
+				Name:   parts[2],
+				ID:     id,
+			}, true
+		}
+	}
+	// 兼容旧格式（无 base64 或解码后非三元组）
+	parts := strings.SplitN(id, ":", 3)
 	if len(parts) != 3 {
 		return MetadataNode{}, false
 	}
 	return MetadataNode{Kind: MetadataNodeKind(parts[0]), Schema: parts[1], Name: parts[2], ID: id}, true
-}
-
-// splitNodeID 按 ":" 分割 ID，处理 schema 可能为空的情况。
-func splitNodeID(id string) []string {
-	var parts []string
-	start := 0
-	for i := 0; i < len(id); i++ {
-		if id[i] == ':' {
-			parts = append(parts, id[start:i])
-			start = i + 1
-		}
-	}
-	parts = append(parts, id[start:])
-	return parts
 }
 
 // ColumnInfo 描述表字段。
