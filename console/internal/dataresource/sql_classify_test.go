@@ -61,6 +61,10 @@ func TestValidateSingleStatement(t *testing.T) {
 		{"SELECT $$hello; world$$", true},
 		{"SELECT 1; -- comment\nSELECT 2", false},
 		{"", false},
+		// MySQL 反引号标识符内的分号不应判多语句
+		{"SELECT `a;b` FROM t", true},
+		{"SELECT `a``;b` FROM t", true}, // 转义反引号
+		{"SELECT `a;b` FROM t; SELECT 2", false},
 	}
 	for _, c := range cases {
 		err := ValidateSingleStatement(c.sql)

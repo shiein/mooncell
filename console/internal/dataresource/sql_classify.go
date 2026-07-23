@@ -263,12 +263,13 @@ func ClassifySQL(sql string) StatementType {
 
 // ValidateSingleStatement 校验 SQL 是否为单条语句（不含分号分隔的多语句）。
 // 设计文档：一次请求只允许一条 SQL；服务端独立识别引号、注释和 PostgreSQL dollar quote。
+// 另识别 MySQL 反引号标识符（`col` / `` `a;b` ``），避免合法标识符被误判为多语句。
 func ValidateSingleStatement(sql string) error {
 	sql = strings.TrimSpace(sql)
 	if sql == "" {
 		return errors.New("SQL 不能为空")
 	}
-	// 扫描：跳过字符串字面量、注释、dollar quote，检测语句外的分号。
+	// 扫描：跳过字符串字面量、注释、dollar quote、反引号，检测语句外的分号。
 	rune := []rune(sql)
 	i := 0
 	for i < len(rune) {
@@ -278,6 +279,8 @@ func ValidateSingleStatement(sql string) error {
 			i = skipSingleQuote(rune, i)
 		case c == '"': // 双引号标识符
 			i = skipDoubleQuote(rune, i)
+		case c == '`': // MySQL 反引号标识符
+			i = skipBacktick(rune, i)
 		case c == '-' && i+1 < len(rune) && rune[i+1] == '-': // 行注释
 			i = skipLineComment(rune, i)
 		case c == '/' && i+1 < len(rune) && rune[i+1] == '*': // 块注释
@@ -357,6 +360,22 @@ func skipDoubleQuote(r []rune, i int) int {
 	for i < len(r) {
 		if r[i] == '"' {
 			if i+1 < len(r) && r[i+1] == '"' {
+				i += 2
+				continue
+			}
+			return i
+		}
+		i++
+	}
+	return i
+}
+
+// skipBacktick 跳过 MySQL 反引号标识符：`name`；内部 `` 为转义反引号。
+func skipBacktick(r []rune, i int) int {
+	i++ // 跳过开头 `
+	for i < len(r) {
+		if r[i] == '`' {
+			if i+1 < len(r) && r[i+1] == '`' {
 				i += 2
 				continue
 			}
