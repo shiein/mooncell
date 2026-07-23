@@ -133,6 +133,43 @@ func TestSetUserGrantsTransactional(t *testing.T) {
 	}
 }
 
+func TestUpdateTestStatusAndRevokeRead(t *testing.T) {
+	db := testDB(t)
+	r := DataResource{ID: "r1", Name: "R1", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}
+	if err := CreateDataResource(db, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateTestStatus(db, "r1", TestStatusOK); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetUserGrants(db, "reader", []DataResourceGrant{{ResourceID: "r1", Username: "reader", AccessMode: AccessRead}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetUserGrants(db, "writer", []DataResourceGrant{{ResourceID: "r1", Username: "writer", AccessMode: AccessWrite}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked, err := UpdateTestStatusAndRevokeRead(db, "r1", TestStatusOKNoRO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revoked) != 1 || revoked[0] != "reader" {
+		t.Fatalf("被撤销用户不符: %v", revoked)
+	}
+	readerGrants, err := UserGrants(db, "reader")
+	if err != nil || len(readerGrants) != 0 {
+		t.Fatalf("只读授权未撤销: grants=%v err=%v", readerGrants, err)
+	}
+	writerGrants, err := UserGrants(db, "writer")
+	if err != nil || len(writerGrants) != 1 || writerGrants[0].AccessMode != AccessWrite {
+		t.Fatalf("写授权不应被撤销: grants=%v err=%v", writerGrants, err)
+	}
+	got, ok, err := GetDataResource(db, "r1")
+	if err != nil || !ok || got.LastTestStatus != TestStatusOKNoRO {
+		t.Fatalf("测试状态未原子更新: resource=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestUserAccessMode(t *testing.T) {
 	db := testDB(t)
 	r := DataResource{ID: "r1", Name: "R1", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}

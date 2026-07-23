@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,8 @@ type ErrExportLimit struct {
 
 func (e *ErrExportLimit) Error() string { return e.Reason }
 
+const ExportSnapshotMaxRows = MaxLimit
+
 // prepareExportSQL 校验导出 SQL：单语句且必须为只读查询。
 func prepareExportSQL(sqlText string) error {
 	if err := ValidateSingleStatement(sqlText); err != nil {
@@ -40,6 +43,65 @@ func prepareExportSQL(sqlText string) error {
 		return fmt.Errorf("仅支持导出 SELECT 查询结果")
 	}
 	return nil
+}
+
+// ExportSnapshotCSV 导出结果区当前快照，不重新执行 SQL。
+func ExportSnapshotCSV(columns []string, rows [][]any, w http.ResponseWriter) error {
+	if err := validateSnapshot(columns, rows); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-current-%s.csv", time.Now().Format("20060102-150405")))
+	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	if err := cw.Write(columns); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		record := make([]string, len(columns))
+		for i := range columns {
+			if i < len(row) {
+				record[i] = snapshotCellString(row[i])
+			}
+		}
+		if err := cw.Write(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSnapshot(columns []string, rows [][]any) error {
+	if len(columns) == 0 {
+		return fmt.Errorf("当前结果没有可导出的列")
+	}
+	if len(columns) > MaxLimit || len(rows) > ExportSnapshotMaxRows {
+		return fmt.Errorf("当前结果快照超过导出上限")
+	}
+	return nil
+}
+
+func snapshotCellString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if binary, ok := v.(map[string]any); ok && binary["type"] == "binary" {
+		if size, exists := binary["size"]; exists {
+			return fmt.Sprintf("<binary %v bytes>", size)
+		}
+		return "<binary>"
+	}
+	switch value := v.(type) {
+	case string:
+		return value
+	case bool:
+		return strconv.FormatBool(value)
+	case float64:
+		return strconv.FormatFloat(value, 'g', -1, 64)
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", value))
+	}
 }
 
 // ExportCSV 流式导出查询结果为 CSV。
@@ -180,5 +242,3 @@ func valueToCSV(v any, dbTypeName string) string {
 		return fmt.Sprintf("%v", v)
 	}
 }
-
-

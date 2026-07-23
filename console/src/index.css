@@ -525,6 +525,136 @@ input[type="file"].input::file-selector-button:hover { background: var(--primary
 .app-row { cursor: pointer; }
 .code-chip { font-family: var(--font-mono); font-size: 12px; background: var(--muted); border-radius: 5px; padding: 2px 7px; color: var(--fg-secondary); }
 
+/* ---------- data resource workspace ---------- */
+.dr-workspace {
+  height: calc(100vh - 102px); min-height: 520px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.dr-workspace .page-head { flex: none; }
+.dr-workspace-grid { flex: 1; min-height: 0; display: flex; align-items: stretch; }
+.dr-tree-pane {
+  flex: none; min-width: 210px; max-width: 520px; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden; padding: 0;
+}
+.dr-pane-head {
+  height: 40px; flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 8px 0 12px; border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--fg-secondary);
+}
+.dr-tree-scroll { flex: 1; min-height: 0; overflow: auto; padding: 6px; }
+.dr-tree-node {
+  min-width: 0; height: 30px; display: flex; align-items: center; gap: 5px;
+  padding-right: 7px; border-radius: 6px; color: var(--fg-secondary);
+  font-size: 12.5px; cursor: default; user-select: none;
+}
+.dr-tree-node:hover { background: var(--muted); color: var(--fg); }
+.dr-tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-tree-kind {
+  margin-left: auto; color: var(--muted-fg); font-size: 10px;
+  text-transform: lowercase; white-space: nowrap;
+}
+.dr-tree-expand { align-self: flex-start; margin-right: 4px; }
+.dr-main-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.dr-toolbar {
+  min-height: 42px; flex: none; display: flex; align-items: center; flex-wrap: wrap;
+  gap: 3px; padding: 5px 7px; border-radius: 10px 10px 0 0;
+}
+.dr-toolbar-sep { width: 1px; height: 20px; margin: 0 3px; background: var(--border); }
+.dr-editor-card {
+  flex: 0 0 auto; min-height: 120px; overflow: hidden;
+  border-radius: 0; border-top: 0; border-bottom: 0;
+}
+.dr-editor-card .cm-editor { height: 100%; font-size: 12.5px; }
+.dr-editor-card .cm-scroller { overflow: auto; }
+.dr-result-card {
+  flex: 1; min-height: 150px; display: flex; flex-direction: column;
+  overflow: hidden; padding: 0; border-radius: 0 0 10px 10px;
+}
+.dr-result-status {
+  height: 34px; flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 11px; border-bottom: 1px solid var(--border);
+  color: var(--muted-fg); font-size: 11.5px;
+}
+.dr-table-scroll { min-width: 0; overflow: auto; }
+.dr-result-card > .dr-table-scroll { flex: 1; min-height: 0; }
+.dr-result-card .table { width: max-content; min-width: 100%; }
+.dr-result-card th { position: sticky; top: 0; z-index: 1; background: var(--card); }
+.dr-result-card td { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-resizer { flex: none; position: relative; touch-action: none; }
+.dr-resizer::after {
+  content: ""; position: absolute; border-radius: 99px; background: transparent;
+  transition: background .12s;
+}
+.dr-resizer:hover::after { background: var(--primary); }
+.dr-resizer-x { width: 7px; cursor: col-resize; }
+.dr-resizer-x::after { width: 2px; top: 6px; bottom: 6px; left: 2px; }
+.dr-resizer-y { height: 7px; cursor: row-resize; }
+.dr-resizer-y::after { height: 2px; left: 6px; right: 6px; top: 2px; }
+.dr-inline-status {
+  min-height: 44px; display: flex; align-items: center; justify-content: center;
+  gap: 7px; color: var(--muted-fg); font-size: 12px;
+}
+.dr-context-menu {
+  position: fixed; z-index: 220; min-width: 190px; max-width: 280px;
+  padding: 5px; box-shadow: var(--shadow-lg);
+}
+.dr-context-title {
+  padding: 6px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted-fg); font-size: 11px; border-bottom: 1px solid var(--border);
+}
+.dr-context-menu button {
+  display: block; width: 100%; padding: 7px 9px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--fg-secondary); text-align: left; font-size: 12.5px; cursor: pointer;
+}
+.dr-context-menu button:hover { background: var(--muted); color: var(--fg); }
+.dr-dialog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.dr-saved-list { display: flex; flex-direction: column; gap: 6px; }
+.dr-saved-row {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px;
+}
+.dr-saved-main {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  padding: 5px 7px; border: 0; background: transparent; color: var(--fg); text-align: left; cursor: pointer;
+}
+.dr-saved-main span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted-fg); font-family: var(--font-mono); font-size: 11px;
+}
+.dr-structure { display: flex; flex-direction: column; gap: 9px; }
+.dr-structure h4 { margin: 8px 0 0; font-size: 12px; color: var(--fg-secondary); }
+.dr-structure-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.dr-meta-row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; font-size: 12px;
+}
+.dr-ddl {
+  max-height: 260px; overflow: auto; margin: 0; padding: 12px; border-radius: 8px;
+  background: var(--console-bg); color: var(--console-fg);
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55; white-space: pre;
+}
+.dr-import { display: flex; flex-direction: column; gap: 14px; }
+.dr-mapping-grid {
+  max-height: 330px; overflow: auto; border: 1px solid var(--border); border-radius: 8px;
+}
+.dr-mapping-row {
+  display: grid; grid-template-columns: minmax(120px, 1fr) 24px minmax(160px, 1fr);
+  align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--border);
+}
+.dr-mapping-row:last-child { border-bottom: 0; }
+
+@media (max-width: 820px) {
+  .dr-workspace { height: auto; min-height: calc(100vh - 100px); }
+  .dr-workspace-grid { min-height: 620px; position: relative; }
+  .dr-tree-pane {
+    position: absolute; inset: 0 auto 0 0; z-index: 20;
+    width: min(82vw, 320px) !important; box-shadow: var(--shadow-lg);
+  }
+  .dr-resizer-x { display: none; }
+  .dr-toolbar { border-radius: 10px 10px 0 0; }
+  .dr-dialog-grid, .dr-structure-split { grid-template-columns: 1fr; }
+}
+
 /* ---------- motion ----------
    轻量、克制、可达性优先:仅做短促的入场/切换与按压反馈,时长 ≤ .3s。
    一律包在 prefers-reduced-motion: no-preference 下,系统开启「减弱动态」即全部静止。 */

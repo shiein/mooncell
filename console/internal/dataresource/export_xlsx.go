@@ -10,6 +10,44 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// ExportSnapshotXLSX 导出结果区当前快照，不重新执行 SQL。
+func ExportSnapshotXLSX(columns []string, rows [][]any, w http.ResponseWriter) error {
+	if err := validateSnapshot(columns, rows); err != nil {
+		return err
+	}
+	f := excelize.NewFile()
+	defer f.Close()
+	sw, err := f.NewStreamWriter("Sheet1")
+	if err != nil {
+		return err
+	}
+	header := make([]interface{}, len(columns))
+	for i, column := range columns {
+		header[i] = column
+	}
+	if err := sw.SetRow("A1", header); err != nil {
+		return err
+	}
+	for rowIndex, row := range rows {
+		record := make([]interface{}, len(columns))
+		for i := range columns {
+			if i < len(row) {
+				record[i] = snapshotCellString(row[i])
+			}
+		}
+		cell, _ := excelize.CoordinatesToCellName(1, rowIndex+2)
+		if err := sw.SetRow(cell, record); err != nil {
+			return err
+		}
+	}
+	if err := sw.Flush(); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-current-%s.xlsx", time.Now().Format("20060102-150405")))
+	return f.Write(w)
+}
+
 // ExportXLSX 流式导出查询结果为 XLSX。
 // 在写入 HTTP 响应前在内存流式构建；超限时返回明确错误且不写出半截文件。
 func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {

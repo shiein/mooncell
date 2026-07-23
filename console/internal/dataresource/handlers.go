@@ -1,16 +1,18 @@
 // HTTP handlers：数据资源管理 API。
 //
 // 设计文档第三节「公共 API」：
-//   GET    /api/data-resources
-//   POST   /api/data-resources
-//   GET    /api/data-resources/{id}
-//   PUT    /api/data-resources/{id}
-//   DELETE /api/data-resources/{id}
-//   POST   /api/data-resources/test
-//   POST   /api/data-resources/{id}/test
+//
+//	GET    /api/data-resources
+//	POST   /api/data-resources
+//	GET    /api/data-resources/{id}
+//	PUT    /api/data-resources/{id}
+//	DELETE /api/data-resources/{id}
+//	POST   /api/data-resources/test
+//	POST   /api/data-resources/{id}/test
 //
 // 统一错误结构：
-//   {"error": "用户可读错误", "code": "STABLE_ERROR_CODE", "txState": "none|active|failed"}
+//
+//	{"error": "用户可读错误", "code": "STABLE_ERROR_CODE", "txState": "none|active|failed"}
 package dataresource
 
 import (
@@ -60,10 +62,10 @@ func newID() string {
 // toOut 将内部 DataResource 转为对外形态（不含密码，含 hasPassword 和 accessMode）。
 func toOut(r DataResource, accessMode string) DataResourceOut {
 	return DataResourceOut{
-		DataResource:  r,
-		HasPassword:   r.CredentialCipher != "",
-		AccessMode:    accessMode,
-		LastTestInfo:  formatTestInfo(r.LastTestStatus, r.LastTestAt),
+		DataResource: r,
+		HasPassword:  r.CredentialCipher != "",
+		AccessMode:   accessMode,
+		LastTestInfo: formatTestInfo(r.LastTestStatus, r.LastTestAt),
 	}
 }
 
@@ -366,7 +368,14 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 	}
 	result := TestConnection(res, password)
 	status := result.PersistStatus()
-	UpdateTestStatus(s.db, id, status)
+	revoked, err := UpdateTestStatusAndRevokeRead(s.db, id, status)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "保存连接测试结果失败")
+		return
+	}
+	for _, username := range revoked {
+		s.InvalidateUserResource(username, id)
+	}
 	user, _, _ := userFromCtx(r)
 	s.auditLog(user, "测试连接", res.Name, status)
 	if !result.OK {

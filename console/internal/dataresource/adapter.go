@@ -18,15 +18,15 @@ import (
 type MetadataNodeKind string
 
 const (
-	NodeRoot         MetadataNodeKind = "root"         // 根：代表数据库本身
-	NodeSchema       MetadataNodeKind = "schema"       // schema/owner
-	NodeTable        MetadataNodeKind = "table"        // 表
-	NodeView         MetadataNodeKind = "view"         // 视图
-	NodeMatView      MetadataNodeKind = "matview"      // 物化视图
-	NodeFunction     MetadataNodeKind = "function"     // 函数
-	NodeProcedure    MetadataNodeKind = "procedure"    // 存储过程
-	NodeSequence     MetadataNodeKind = "sequence"     // 序列
-	NodeTrigger      MetadataNodeKind = "trigger"      // 触发器
+	NodeRoot      MetadataNodeKind = "root"      // 根：代表数据库本身
+	NodeSchema    MetadataNodeKind = "schema"    // schema/owner
+	NodeTable     MetadataNodeKind = "table"     // 表
+	NodeView      MetadataNodeKind = "view"      // 视图
+	NodeMatView   MetadataNodeKind = "matview"   // 物化视图
+	NodeFunction  MetadataNodeKind = "function"  // 函数
+	NodeProcedure MetadataNodeKind = "procedure" // 存储过程
+	NodeSequence  MetadataNodeKind = "sequence"  // 序列
+	NodeTrigger   MetadataNodeKind = "trigger"   // 触发器
 )
 
 // MetadataNode 是元数据树中的一个节点。
@@ -74,11 +74,11 @@ func DecodeID(id string) (MetadataNode, bool) {
 
 // ColumnInfo 描述表字段。
 type ColumnInfo struct {
-	Name        string `json:"name"`
-	DataType    string `json:"dataType"`    // 完整类型（含长度、精度）
-	IsNullable  bool   `json:"isNullable"`
+	Name         string `json:"name"`
+	DataType     string `json:"dataType"` // 完整类型（含长度、精度）
+	IsNullable   bool   `json:"isNullable"`
 	DefaultValue string `json:"defaultValue,omitempty"`
-	Comment     string `json:"comment,omitempty"`
+	Comment      string `json:"comment,omitempty"`
 }
 
 // ConstraintInfo 描述约束。
@@ -87,16 +87,17 @@ type ConstraintInfo struct {
 	Type    string   `json:"type"` // primary/unique/foreign/check
 	Columns []string `json:"columns"`
 	// 外键专用
-	RefTable   string `json:"refTable,omitempty"`
+	RefTable   string   `json:"refTable,omitempty"`
 	RefColumns []string `json:"refColumns,omitempty"`
 	Definition string   `json:"definition,omitempty"` // 检查约束条件等
 }
 
 // IndexInfo 描述索引。
 type IndexInfo struct {
-	Name    string   `json:"name"`
-	Columns []string `json:"columns"`
-	Unique  bool     `json:"unique"`
+	Name       string   `json:"name"`
+	Columns    []string `json:"columns"`
+	Unique     bool     `json:"unique"`
+	Definition string   `json:"definition,omitempty"`
 }
 
 // ObjectStructure 是表/视图的完整结构。
@@ -108,14 +109,14 @@ type ObjectStructure struct {
 
 // ServerInfo 是 Ping 返回的服务器信息。
 type ServerInfo struct {
-	Version    string `json:"version"`
-	Database   string `json:"database"`
+	Version  string `json:"version"`
+	Database string `json:"database"`
 }
 
 // DatabaseError 是归一化后的数据库错误。
 type DatabaseError struct {
-	Code    string `json:"code"`    // 稳定错误码
-	Message string `json:"message"` // 用户可读消息（脱敏）
+	Code     string `json:"code"`               // 稳定错误码
+	Message  string `json:"message"`            // 用户可读消息（脱敏）
 	SQLState string `json:"sqlState,omitempty"` // SQLSTATE（已脱敏）
 }
 

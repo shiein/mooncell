@@ -23,8 +23,6 @@ func BuildDSN(r DataResource, password string) string {
 		return dmDSN(r, password)
 	case DriverKingbase:
 		return pgDSN(r, password) // Kingbase gokb 兼容 PostgreSQL DSN 格式
-	case DriverVastbase:
-		return pgDSN(r, password) // Vastbase openGauss 兼容 PostgreSQL DSN 格式
 	default:
 		return ""
 	}

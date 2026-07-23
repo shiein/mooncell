@@ -38,8 +38,8 @@ type Workspace struct {
 	TxState      TxState
 	Tx           Transaction // 活动事务（nil 表示无）
 	Adapter      DataSourceAdapter
-	LastSQL      string    // 最近一次成功的查询（供全量导出重放）
-	LastActivity time.Time // 最近活动时间（用于超时回滚）
+	LastSQL      string     // 最近一次成功的查询（供全量导出重放）
+	LastActivity time.Time  // 最近活动时间（用于超时回滚）
 	mu           sync.Mutex // 串行化同一工作台的请求
 }
 
@@ -114,7 +114,7 @@ func (wm *WorkspaceManager) RollbackUserTx(username, resourceID string) {
 	wm.mu.Lock()
 	var toRollback []*Workspace
 	for _, ws := range wm.workspaces {
-		if ws.Username == username && ws.ResourceID == resourceID && ws.Tx != nil {
+		if ws.Username == username && ws.ResourceID == resourceID {
 			toRollback = append(toRollback, ws)
 		}
 	}
@@ -181,25 +181,26 @@ func (wm *WorkspaceManager) InvalidateResource(resourceID string) {
 // CleanupIdle 回滚超时的手工事务。由后台定期调用。
 func (wm *WorkspaceManager) CleanupIdle() int {
 	wm.mu.Lock()
-	var toRollback []*Workspace
-	now := time.Now()
+	candidates := make([]*Workspace, 0, len(wm.workspaces))
 	for _, ws := range wm.workspaces {
-		if ws.Tx != nil && now.Sub(ws.LastActivity) > txIdleTimeout {
-			toRollback = append(toRollback, ws)
-		}
+		candidates = append(candidates, ws)
 	}
 	wm.mu.Unlock()
-	for _, ws := range toRollback {
+
+	now := time.Now()
+	rolledBack := 0
+	for _, ws := range candidates {
 		ws.mu.Lock()
-		if ws.Tx != nil {
+		if ws.Tx != nil && now.Sub(ws.LastActivity) > txIdleTimeout {
 			ws.Tx.Rollback()
 			ws.Tx = nil
 			ws.TxState = TxNone
 			wm.pool.EndTx(ws.ResourceID)
+			rolledBack++
 		}
 		ws.mu.Unlock()
 	}
-	return len(toRollback)
+	return rolledBack
 }
 
 // CloseAll 关闭所有工作台（Console 退出时）。

@@ -14,7 +14,7 @@ const DB_TYPE_LABEL = {
   mysql: 'MySQL',
   dm: '达梦 DM8',
   kingbase: 'KingbaseES',
-  opengauss: 'Vastbase G100',
+  opengauss: 'Vastbase G100（当前构建不可用）',
 };
 
 function modeLabel(m) {
@@ -80,7 +80,7 @@ function DataResourcesPage({ onOpenWorkspace }) {
                 <td>
                   <span className="code-chip" style={{ fontSize: 11 }}>
                     {DB_TYPE_LABEL[r.dbType] || r.dbType}
-                    {r.dbType === 'opengauss' ? ' · 实验' : ''}
+                    {r.dbType === 'opengauss' ? ' · 已停用' : ''}
                   </span>
                 </td>
                 <td className="mono" style={{ fontSize: 12.5 }}>{r.host}:{r.port}</td>
@@ -194,7 +194,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
 
   const opts = drivers.length
     ? drivers
-    : Object.keys(DB_TYPE_LABEL).map((id) => ({ id, label: DB_TYPE_LABEL[id], experimental: id === 'opengauss' }));
+    : ['pgx', 'mysql', 'dm', 'kingbase'].map((id) => ({ id, label: DB_TYPE_LABEL[id] }));
 
   return (
     <Dialog open={open} onClose={onClose} width={520}

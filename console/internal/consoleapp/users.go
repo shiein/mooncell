@@ -22,10 +22,10 @@ func (a *api) listUsers(w http.ResponseWriter, r *http.Request) {
 // 角色固定为 user;管理员仅由 config 种入或库内既有 admin,不经此接口再造。
 func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username           string                             `json:"username"`
-		Password           string                             `json:"password"`
-		AppIDs             []string                           `json:"appIds"`
-		DataResourceGrants []dataresource.DataResourceGrant   `json:"dataResourceGrants"`
+		Username           string                           `json:"username"`
+		Password           string                           `json:"password"`
+		AppIDs             []string                         `json:"appIds"`
+		DataResourceGrants []dataresource.DataResourceGrant `json:"dataResourceGrants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -36,29 +36,18 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "用户名或密码不能为空"})
 		return
 	}
-	if err := a.store.createUser(body.Username, body.Password, "user"); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "创建失败:用户名可能已存在"})
-		return
-	}
-	if err := a.store.setUserApps(body.Username, normalizeAppIDs(body.AppIDs)); err != nil {
-		// 用户已建但授权失败:回滚用户,避免半成品账号。
-		if deleted, derr := a.store.deleteUser(body.Username); !deleted || derr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "写入应用授权失败,且回滚用户未完成,请管理员清理账号: " + body.Username,
-			})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入应用授权失败"})
-		return
-	}
-	// 数据资源授权:与应用授权一起事务性写入。
 	for i := range body.DataResourceGrants {
 		body.DataResourceGrants[i].Username = body.Username
 	}
-	if err := dataresource.SetUserGrants(a.store.db, body.Username, body.DataResourceGrants, a.sessionUser(r)); err != nil {
-		// 授权失败:回滚用户和应用授权,避免半成品。
-		a.store.deleteUser(body.Username)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入数据资源授权失败"})
+	if err := a.store.createUserBundle(
+		body.Username,
+		body.Password,
+		"user",
+		normalizeAppIDs(body.AppIDs),
+		body.DataResourceGrants,
+		a.sessionUser(r),
+	); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "创建失败:用户名可能已存在或授权无效"})
 		return
 	}
 	a.store.appendAudit(a.sessionUser(r), "创建用户", body.Username, "成功")
@@ -78,8 +67,8 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Password           string                           `json:"password"`           // 非空则改密
-		AppIDs             *[]string                        `json:"appIds"`             // 非 nil 则全量替换授权
+		Password           string                            `json:"password"`           // 非空则改密
+		AppIDs             *[]string                         `json:"appIds"`             // 非 nil 则全量替换授权
 		DataResourceGrants *[]dataresource.DataResourceGrant `json:"dataResourceGrants"` // 非 nil 则全量替换数据资源授权
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

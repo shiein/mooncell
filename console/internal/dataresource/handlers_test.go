@@ -37,8 +37,8 @@ func TestDSNBuilders(t *testing.T) {
 
 	r.DBType = DriverVastbase
 	vb := BuildDSN(r, "secret")
-	if !strings.Contains(vb, "host='h'") {
-		t.Errorf("vastbase DSN 应兼容 PG 格式: %s", vb)
+	if vb != "" {
+		t.Errorf("官方 Vastbase pq 未随构建提供时必须拒绝生成 DSN: %s", vb)
 	}
 }
 
@@ -218,7 +218,9 @@ func TestUpdateResourceKeepPassword(t *testing.T) {
 	}
 }
 
-func jsonDecode(r interface{ Read(p []byte) (n int, err error) }, v any) {
+func jsonDecode(r interface {
+	Read(p []byte) (n int, err error)
+}, v any) {
 	defer func() { /* ignore close error */ }()
 	dec := json.NewDecoder(r.(interface{ Read([]byte) (int, error) }))
 	dec.Decode(v)

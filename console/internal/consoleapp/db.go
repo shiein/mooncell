@@ -263,10 +263,10 @@ func (s *Store) seedAdmin(username, password string) {
 
 // UserInfo 是用户列表对外形态(不含口令哈希)。
 type UserInfo struct {
-	Username           string                       `json:"username"`
-	Role               string                       `json:"role"`
-	CreatedAt          int64                        `json:"createdAt"`
-	AppIDs             []string                     `json:"appIds"`             // 授权访问的应用;admin 忽略(全量)
+	Username           string                           `json:"username"`
+	Role               string                           `json:"role"`
+	CreatedAt          int64                            `json:"createdAt"`
+	AppIDs             []string                         `json:"appIds"`             // 授权访问的应用;admin 忽略(全量)
 	DataResourceGrants []dataresource.DataResourceGrant `json:"dataResourceGrants"` // 数据资源授权;admin 忽略(隐式全量)
 }
 
@@ -347,6 +347,43 @@ func (s *Store) createUser(username, password, role string) error {
 	return err // UNIQUE 冲突 → 用户名已存在
 }
 
+// createUserBundle 在一个 SQLite 事务中创建用户、应用授权和数据资源授权。
+func (s *Store) createUserBundle(
+	username, password, role string,
+	appIDs []string,
+	grants []dataresource.DataResourceGrant,
+	grantedBy string,
+) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		"INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+		username, string(hash), role, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	for _, id := range appIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO user_apps (username, app_id) VALUES (?, ?)", username, id); err != nil {
+			return err
+		}
+	}
+	if err := dataresource.SetUserGrantsTx(tx, username, grants, grantedBy); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // setUserApps 全量替换用户的应用授权列表(事务:失败回滚,不留半成品 ACL)。
 func (s *Store) setUserApps(username string, appIDs []string) error {
 	tx, err := s.db.Begin()
@@ -425,7 +462,12 @@ func (s *Store) updateUserPassword(username, password string) error {
 // admin 仅在「删除后仍至少剩 1 个 admin」时才删。
 // 返回是否实际删除(false 且 err==nil = 被守卫拦下或用户不存在)。
 func (s *Store) deleteUser(username string) (bool, error) {
-	res, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`DELETE FROM users
 		 WHERE username = ?
 		   AND (role != 'admin' OR (SELECT COUNT(*) FROM users WHERE role = 'admin') > 1)`,
@@ -435,10 +477,19 @@ func (s *Store) deleteUser(username string) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
-		s.db.Exec("DELETE FROM user_apps WHERE username = ?", username)
-		s.db.Exec("DELETE FROM data_resource_grants WHERE username = ?", username)
-		s.db.Exec("DELETE FROM saved_sql WHERE username = ?", username)
+		for _, stmt := range []string{
+			"DELETE FROM sessions WHERE username = ?",
+			"DELETE FROM user_apps WHERE username = ?",
+			"DELETE FROM data_resource_grants WHERE username = ?",
+			"DELETE FROM saved_sql WHERE username = ?",
+		} {
+			if _, err := tx.Exec(stmt, username); err != nil {
+				return false, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
 	}
 	return n > 0, nil
 }

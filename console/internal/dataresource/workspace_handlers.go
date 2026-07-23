@@ -1,13 +1,14 @@
 // 工作台 API handlers：创建工作台、执行 SQL、提交/回滚、自动提交开关。
 //
 // 设计文档第三节「工作台」：
-//   POST   /api/data-resources/{id}/workspaces
-//   PATCH  /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit
-//   POST   /api/data-resources/{id}/workspaces/{workspaceId}/execute
-//   POST   /api/data-resources/{id}/workspaces/{workspaceId}/commit
-//   POST   /api/data-resources/{id}/workspaces/{workspaceId}/rollback
-//   POST   /api/data-resources/{id}/workspaces/{workspaceId}/export
-//   DELETE /api/data-resources/{id}/workspaces/{workspaceId}
+//
+//	POST   /api/data-resources/{id}/workspaces
+//	PATCH  /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit
+//	POST   /api/data-resources/{id}/workspaces/{workspaceId}/execute
+//	POST   /api/data-resources/{id}/workspaces/{workspaceId}/commit
+//	POST   /api/data-resources/{id}/workspaces/{workspaceId}/rollback
+//	POST   /api/data-resources/{id}/workspaces/{workspaceId}/export
+//	DELETE /api/data-resources/{id}/workspaces/{workspaceId}
 package dataresource
 
 import (
@@ -200,8 +201,11 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		SQL    string `json:"sql"`    // 指定导出 SQL；空则用最近一次成功查询
-		Format string `json:"format"` // csv 或 xlsx
+		SQL     string   `json:"sql"`     // 指定导出 SQL；空则用最近一次成功查询
+		Format  string   `json:"format"`  // csv 或 xlsx
+		Scope   string   `json:"scope"`   // all 或 current
+		Columns []string `json:"columns"` // current 快照
+		Rows    [][]any  `json:"rows"`    // current 快照，最多 MaxLimit 行
 	}
 	if err := jsonDecodeBody(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
@@ -217,12 +221,28 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws.LastActivity = time.Now()
 	ws.mu.Unlock()
 
+	if body.Format == "" {
+		body.Format = "csv"
+	}
+	if body.Scope == "current" {
+		var err error
+		switch body.Format {
+		case "csv":
+			err = ExportSnapshotCSV(body.Columns, body.Rows, w)
+		case "xlsx":
+			err = ExportSnapshotXLSX(body.Columns, body.Rows, w)
+		default:
+			writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: "+body.Format)
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "EXPORT_ERROR", err.Error())
+		}
+		return
+	}
 	if sqlText == "" {
 		writeErr(w, http.StatusBadRequest, "NO_QUERY", "无可导出的查询")
 		return
-	}
-	if body.Format == "" {
-		body.Format = "csv"
 	}
 
 	if err := prepareExportSQL(sqlText); err != nil {

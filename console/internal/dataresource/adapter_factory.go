@@ -10,7 +10,7 @@ import (
 // db 是已打开的外部数据库连接池，defaultSchema 来自资源配置。
 func NewAdapter(db *sql.DB, dbType, defaultSchema string) (DataSourceAdapter, error) {
 	switch dbType {
-	case DriverPostgreSQL, DriverKingbase, DriverVastbase:
+	case DriverPostgreSQL, DriverKingbase:
 		return newPGAdapter(db, defaultSchema), nil
 	case DriverMySQL:
 		return newMySQLAdapter(db, defaultSchema), nil

@@ -25,9 +25,9 @@ import (
 
 // 导入常量。
 const (
-	ImportPreviewRows    = 20           // 预览行数
-	ImportBatchSize      = 500          // 每批行数
-	ImportTempTimeout    = 30 * time.Minute // 临时文件超时
+	ImportPreviewRows = 20               // 预览行数
+	ImportBatchSize   = 500              // 每批行数
+	ImportTempTimeout = 30 * time.Minute // 临时文件超时
 )
 
 // ImportSession 是一个导入会话的内存状态。
@@ -52,6 +52,7 @@ type ImportPreviewResult struct {
 	ImportID string     `json:"importId"`
 	Format   string     `json:"format"`
 	Sheets   []string   `json:"sheets,omitempty"` // XLSX 的工作表列表
+	Sheet    string     `json:"sheet,omitempty"`  // 当前预览工作表
 	Columns  []string   `json:"columns"`          // 表头列名
 	Preview  [][]string `json:"preview"`          // 预览行（含表头）
 }
@@ -216,7 +217,19 @@ func parseXLSXPreview(session *ImportSession) (*ImportPreviewResult, error) {
 	if len(sheets) == 0 {
 		return nil, fmt.Errorf("XLSX 无工作表")
 	}
-	session.Sheet = sheets[0]
+	if session.Sheet == "" {
+		session.Sheet = sheets[0]
+	}
+	found := false
+	for _, sheet := range sheets {
+		if sheet == session.Sheet {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("工作表不存在: %s", session.Sheet)
+	}
 	rows, err := f.GetRows(session.Sheet)
 	if err != nil {
 		return nil, fmt.Errorf("读取 XLSX 失败: %w", err)
@@ -237,9 +250,69 @@ func parseXLSXPreview(session *ImportSession) (*ImportPreviewResult, error) {
 		ImportID: session.ID,
 		Format:   "xlsx",
 		Sheets:   sheets,
+		Sheet:    session.Sheet,
 		Columns:  preview[0],
 		Preview:  preview,
 	}, nil
+}
+
+// ImportSelectSheetHandler 切换 XLSX 工作表并重新生成预览。
+func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Request) {
+	user, role, ok := userFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
+		return
+	}
+	id := r.PathValue("id")
+	mode, _ := UserAccessMode(s.db, user, role, id)
+	if mode != "admin" && mode != AccessWrite {
+		writeErr(w, http.StatusForbidden, "READ_ONLY", "只读授权不允许导入")
+		return
+	}
+	importID := r.PathValue("importId")
+	var body struct {
+		Sheet string `json:"sheet"`
+	}
+	if err := jsonDecodeBody(r, &body); err != nil || strings.TrimSpace(body.Sheet) == "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "工作表不能为空")
+		return
+	}
+
+	s.importMu.Lock()
+	session, exists := s.importSessions[importID]
+	if !exists || session.ResourceID != id || session.Username != user {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "导入会话不存在")
+		return
+	}
+	if session.Format != "xlsx" {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "CSV 不支持切换工作表")
+		return
+	}
+	if session.inUse {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusConflict, "IMPORT_IN_PROGRESS", "该导入会话正在执行中")
+		return
+	}
+	session.inUse = true
+	s.importMu.Unlock()
+
+	oldSheet := session.Sheet
+	session.Sheet = strings.TrimSpace(body.Sheet)
+	result, err := parseXLSXPreview(session)
+	if err != nil {
+		session.Sheet = oldSheet
+	}
+
+	s.importMu.Lock()
+	session.inUse = false
+	s.importMu.Unlock()
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "PARSE_ERROR", err.Error())
+		return
+	}
+	writeOK(w, result)
 }
 
 // ImportExecuteHandler 处理 POST /api/data-resources/{id}/imports/{importId}/execute
@@ -353,11 +426,24 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 	start := time.Now()
 	result := &ImportExecuteResult{}
 
+	if len(mapping) != len(session.Columns) {
+		result.Error = "列映射数量与导入文件不一致"
+		return result, nil
+	}
+
 	// 构建目标列名（过滤空映射）
 	var targetCols []string
+	seenTargetCols := make(map[string]struct{})
 	for _, col := range mapping {
-		if strings.TrimSpace(col) != "" {
-			targetCols = append(targetCols, strings.TrimSpace(col))
+		col = strings.TrimSpace(col)
+		if col != "" {
+			key := strings.ToLower(col)
+			if _, exists := seenTargetCols[key]; exists {
+				result.Error = "同一目标列不能重复映射"
+				return result, nil
+			}
+			seenTargetCols[key] = struct{}{}
+			targetCols = append(targetCols, col)
 		}
 	}
 	if len(targetCols) == 0 {
@@ -472,7 +558,7 @@ func validateImportTarget(ctx context.Context, adapter DataSourceAdapter, schema
 	if len(structure.Columns) == 0 {
 		return nil, fmt.Errorf("目标表不存在或无字段: %s", tableName)
 	}
-	exact := map[string]string{}  // lower -> actual
+	exact := map[string]string{} // lower -> actual
 	for _, c := range structure.Columns {
 		exact[c.Name] = c.Name
 		exact[strings.ToLower(c.Name)] = c.Name
@@ -563,12 +649,19 @@ func (s *Service) ImportDeleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	s.importMu.Lock()
 	session, exists := s.importSessions[importID]
-	s.importMu.Unlock()
 	if !exists || session.ResourceID != id || session.Username != user {
+		s.importMu.Unlock()
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "导入会话不存在")
 		return
 	}
-	s.removeImportSession(importID)
+	if session.inUse {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusConflict, "IMPORT_IN_PROGRESS", "该导入会话正在执行中")
+		return
+	}
+	delete(s.importSessions, importID)
+	s.importMu.Unlock()
+	os.Remove(session.FilePath)
 	writeOK(w, map[string]bool{"ok": true})
 }
 
@@ -597,15 +690,16 @@ func joinIdentifiers(adapter DataSourceAdapter, names []string) string {
 // cleanupExpiredImports 清理超时的导入会话和临时文件。
 func (s *Service) cleanupExpiredImports() {
 	s.importMu.Lock()
-	var expired []string
+	var expiredPaths []string
 	now := time.Now()
 	for id, session := range s.importSessions {
-		if now.Sub(session.CreatedAt) > ImportTempTimeout {
-			expired = append(expired, id)
+		if !session.inUse && now.Sub(session.CreatedAt) > ImportTempTimeout {
+			delete(s.importSessions, id)
+			expiredPaths = append(expiredPaths, session.FilePath)
 		}
 	}
 	s.importMu.Unlock()
-	for _, id := range expired {
-		s.removeImportSession(id)
+	for _, path := range expiredPaths {
+		os.Remove(path)
 	}
 }

@@ -61,28 +61,28 @@ func MigrateDataResources(db *sql.DB) error {
 
 // DataResource 是数据资源记录的完整内部形态（含加密后的凭据）。
 type DataResource struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	DBType            string `json:"dbType"`
-	Host              string `json:"host"`
-	Port              int    `json:"port"`
-	DatabaseName      string `json:"databaseName"`
-	DefaultSchema     string `json:"defaultSchema"`
-	Username          string `json:"username"`
-	CredentialCipher  string `json:"-"` // 永不返回前端
-	SSLMode           string `json:"sslMode"`
-	CreatedBy         string `json:"createdBy"`
-	CreatedAt         int64  `json:"createdAt"`
-	UpdatedAt         int64  `json:"updatedAt"`
-	LastTestStatus    string `json:"lastTestStatus"`
-	LastTestAt        int64  `json:"lastTestAt"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	DBType           string `json:"dbType"`
+	Host             string `json:"host"`
+	Port             int    `json:"port"`
+	DatabaseName     string `json:"databaseName"`
+	DefaultSchema    string `json:"defaultSchema"`
+	Username         string `json:"username"`
+	CredentialCipher string `json:"-"` // 永不返回前端
+	SSLMode          string `json:"sslMode"`
+	CreatedBy        string `json:"createdBy"`
+	CreatedAt        int64  `json:"createdAt"`
+	UpdatedAt        int64  `json:"updatedAt"`
+	LastTestStatus   string `json:"lastTestStatus"`
+	LastTestAt       int64  `json:"lastTestAt"`
 }
 
 // DataResourceOut 是对外 API 形态：不含密码，只有 hasPassword 标记。
 type DataResourceOut struct {
 	DataResource
 	HasPassword  bool   `json:"hasPassword"`
-	AccessMode   string `json:"accessMode"`  // 当前用户对该资源的权限：read/write/admin
+	AccessMode   string `json:"accessMode"`   // 当前用户对该资源的权限：read/write/admin
 	LastTestInfo string `json:"lastTestInfo"` // 可读的最近测试结果摘要
 }
 
@@ -105,10 +105,11 @@ const (
 	AccessWrite = "write"
 )
 
-// validDBType 校验 dbType 是否为支持的驱动。
+// validDBType 校验 dbType 是否为当前构建中可用的驱动。
+// Vastbase 官方本地 pq 未随仓库提供，按设计 fail-closed，不允许新建未认证资源。
 func validDBType(dbType string) bool {
 	switch dbType {
-	case DriverPostgreSQL, DriverMySQL, DriverDM, DriverKingbase, DriverVastbase:
+	case DriverPostgreSQL, DriverMySQL, DriverDM, DriverKingbase:
 		return true
 	}
 	return false
@@ -239,6 +240,53 @@ func UpdateTestStatus(db *sql.DB, id, status string) error {
 	_, err := db.Exec("UPDATE data_resources SET last_test_status=?, last_test_at=? WHERE id=?",
 		status, time.Now().UnixMilli(), id)
 	return err
+}
+
+// UpdateTestStatusAndRevokeRead 更新连接测试状态；认证降级时在同一事务内撤销既有 read 授权。
+// 返回被撤销的用户名，供调用方立即失效其内存工作台。
+func UpdateTestStatusAndRevokeRead(db *sql.DB, id, status string) ([]string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var revoked []string
+	if status != TestStatusOK {
+		rows, err := tx.Query(
+			"SELECT username FROM data_resource_grants WHERE resource_id = ? AND access_mode = ? ORDER BY username",
+			id, AccessRead)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var username string
+			if err := rows.Scan(&username); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			revoked = append(revoked, username)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		if _, err := tx.Exec(
+			"DELETE FROM data_resource_grants WHERE resource_id = ? AND access_mode = ?",
+			id, AccessRead); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(
+		"UPDATE data_resources SET last_test_status=?, last_test_at=? WHERE id=?",
+		status, time.Now().UnixMilli(), id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return revoked, nil
 }
 
 // --- 授权 ---

@@ -1,7 +1,8 @@
 // 连接测试：验证外部数据库可达性、版本、只读事务支持。
 //
 // 设计文档第三节：连接测试超时 10 秒，返回
-//   ok, latencyMs, serverVersion, currentDatabase, readOnlyTxSupported, errorCode
+//
+//	ok, latencyMs, serverVersion, currentDatabase, readOnlyTxSupported, errorCode
 package dataresource
 
 import (
@@ -83,7 +84,7 @@ func TestConnection(r DataResource, password string) TestResult {
 	// 查询版本和当前数据库
 	version, currentDB := queryServerInfo(ctx, db, r.DBType)
 
-	// 测试只读事务支持
+	// 测试只读事务支持：只查询当前事务/会话状态，不执行任何可能落库的写探针。
 	roSupported := testReadOnlyTx(ctx, db, r.DBType)
 
 	return TestResult{
@@ -116,7 +117,7 @@ func queryServerInfo(ctx context.Context, db *sql.DB, dbType string) (version, c
 // serverInfoSQL 返回各数据库的版本查询和当前数据库查询 SQL。
 func serverInfoSQL(dbType string) (versionSQL, currentDBSQL string) {
 	switch dbType {
-	case DriverPostgreSQL, DriverKingbase, DriverVastbase:
+	case DriverPostgreSQL, DriverKingbase:
 		return "SELECT version()", "SELECT current_database()"
 	case DriverMySQL:
 		return "SELECT VERSION()", "SELECT DATABASE()"
@@ -126,9 +127,8 @@ func serverInfoSQL(dbType string) (versionSQL, currentDBSQL string) {
 	return "", ""
 }
 
-// testReadOnlyTx 测试数据库是否真正执行只读事务约束。
-// 仅 BeginTx(ReadOnly)+SELECT 不足以证明：部分驱动会接受 ReadOnly 但忽略写保护。
-// 必须再尝试一条无害写操作，并期望其失败。
+// testReadOnlyTx 测试数据库是否真正进入只读事务/会话。
+// 不使用 DDL/DML 探针：权限错误、语法错误不能证明只读生效，且部分数据库 DDL 可能隐式提交。
 func testReadOnlyTx(ctx context.Context, db *sql.DB, dbType string) bool {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -136,35 +136,55 @@ func testReadOnlyTx(ctx context.Context, db *sql.DB, dbType string) bool {
 	}
 	defer tx.Rollback()
 
-	var v interface{}
-	if err := tx.QueryRowContext(ctx, "SELECT 1").Scan(&v); err != nil {
+	switch dbType {
+	case DriverPostgreSQL, DriverKingbase:
+		var state string
+		if err := tx.QueryRowContext(ctx, "SHOW transaction_read_only").Scan(&state); err != nil {
+			return false
+		}
+		return isReadOnlyState(state)
+	case DriverMySQL:
+		var state any
+		err := tx.QueryRowContext(ctx, "SELECT @@transaction_read_only").Scan(&state)
+		if err != nil {
+			// MySQL 5.7/部分兼容实现使用旧变量名。
+			err = tx.QueryRowContext(ctx, "SELECT @@tx_read_only").Scan(&state)
+		}
+		return err == nil && isReadOnlyState(state)
+	case DriverDM:
+		// DM 官方 V$SESSIONS.RDONLY 表示当前会话是否只读；SESSID() 返回当前连接 ID。
+		var state string
+		if err := tx.QueryRowContext(ctx,
+			"SELECT RDONLY FROM V$SESSIONS WHERE SESS_ID = SESSID()").Scan(&state); err != nil {
+			return false
+		}
+		return isReadOnlyState(state)
+	default:
 		return false
 	}
-
-	// 写探针：若成功说明驱动未强制只读
-	probeSQL := readOnlyProbeSQL(dbType)
-	if probeSQL == "" {
-		return false
-	}
-	if _, err := tx.ExecContext(ctx, probeSQL); err == nil {
-		return false
-	}
-	return true
 }
 
-// readOnlyProbeSQL 返回应在只读事务中失败的写语句（临时对象，即使误执行也易清理）。
-func readOnlyProbeSQL(dbType string) string {
-	switch dbType {
-	case DriverPostgreSQL, DriverKingbase, DriverVastbase:
-		return "CREATE TEMP TABLE mooncell_ro_probe (id int)"
-	case DriverMySQL:
-		return "CREATE TEMPORARY TABLE mooncell_ro_probe (id int)"
-	case DriverDM:
-		// 达梦：临时表语法因版本而异，用无副作用的 DML 探针
-		return "CREATE TABLE mooncell_ro_probe_should_fail (id int)"
-	default:
-		return "CREATE TABLE mooncell_ro_probe_should_fail (id int)"
+func isReadOnlyState(v any) bool {
+	switch value := v.(type) {
+	case bool:
+		return value
+	case int64:
+		return value == 1
+	case int:
+		return value == 1
+	case uint64:
+		return value == 1
+	case uint:
+		return value == 1
+	case []byte:
+		return isReadOnlyState(string(value))
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "on", "true", "yes", "y":
+			return true
+		}
 	}
+	return false
 }
 
 // classifyConnError 将底层连接错误归类为稳定的错误码（不含敏感信息）。

@@ -67,6 +67,11 @@ function App() {
       localStorage.setItem("mc_route", JSON.stringify(persist));
     } catch (e) {}
   };
+  const resetSessionRoute = React.useCallback(() => {
+    const next = { page: "apps" };
+    setRoute(next);
+    try { localStorage.setItem("mc_route", JSON.stringify(next)); } catch (e) {}
+  }, []);
 
   React.useEffect(() => {
     let alive = true;
@@ -91,13 +96,14 @@ function App() {
           setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
           setBackupRevision({});
           setRole("viewer");
+          resetSessionRoute();
           setView("login");
           toast("会话已过期,请重新登录", { tone: "warn", icon: "alert" });
         }
         return null;
       });
     });
-  }, []);
+  }, [resetSessionRoute]);
 
   // 会话/角色就绪后同步钳制(含 localStorage 里的 admin-only 旧路由)。
   React.useEffect(() => {
@@ -386,7 +392,7 @@ function App() {
     setBackupRevision({});
     setSession(res.user);
     setRole(r);
-    setRoute((cur) => clampRoute(cur, r)); // 同步钳制,避免先闪 admin-only 页
+    resetSessionRoute(); // 认证边界不继承上一账号的数据资源/应用详情对象
     setView("console");
     toast(`欢迎回来,${res.user}`);
   };
@@ -394,6 +400,7 @@ function App() {
     await apiLogout();
     setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
     setBackupRevision({});
+    resetSessionRoute();
     setSession(null); setRole("viewer"); setView("login");
   };
 
@@ -403,6 +410,8 @@ function App() {
     route.page === "overview" ? [{ label: "总览" }] :
     route.page === "apps" ? [{ label: "应用" }] :
     route.page === "app-detail" ? [{ label: "应用", onClick: () => nav("apps") }, { label: detailApp ? detailApp.name : "详情" }] :
+    route.page === "data-resources" ? [{ label: "数据资源" }] :
+    route.page === "data-workspace" ? [{ label: "数据资源", onClick: () => nav("data-resources") }, { label: route.resource?.name || "工作台" }] :
     route.page === "cabinet" ? [{ label: "文件柜" }] :
     route.page === "users" ? [{ label: "用户管理" }] :
     route.page === "agents" ? [{ label: "Agent 管理" }] :

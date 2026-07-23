@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-// TestDriversRegistered 验证五种驱动在同一二进制中全部注册成功。
-// 这是设计文档第一节要求的「最小验证程序」：pgx 与 Vastbase(openGauss) 必须共存。
+// TestDriversRegistered 验证当前发布构建启用的四种驱动全部注册成功。
+// Vastbase 官方本地 pq 未提供时不得用其它驱动伪装注册。
 func TestDriversRegistered(t *testing.T) {
 	all := sql.Drivers()
 	sort.Strings(all)
 	t.Logf("已注册驱动: %v", all)
 
-	want := []string{DriverPostgreSQL, DriverMySQL, DriverDM, DriverKingbase, DriverVastbase}
+	want := []string{DriverPostgreSQL, DriverMySQL, DriverDM, DriverKingbase}
 	for _, name := range want {
 		found := false
 		for _, d := range all {
@@ -26,12 +26,19 @@ func TestDriversRegistered(t *testing.T) {
 			t.Errorf("驱动 %q 未注册", name)
 		}
 	}
+	for _, name := range []string{DriverVastbase, "openGauss"} {
+		for _, d := range all {
+			if d == name {
+				t.Errorf("未认证的 Vastbase/openGauss 驱动 %q 不应注册", name)
+			}
+		}
+	}
 }
 
-// TestSupportedDrivers 验证 SupportedDrivers 返回全部五种且排序稳定。
+// TestSupportedDrivers 验证 SupportedDrivers 返回当前四种且排序稳定。
 func TestSupportedDrivers(t *testing.T) {
 	got := SupportedDrivers()
-	want := []string{DriverDM, DriverKingbase, DriverMySQL, DriverVastbase, DriverPostgreSQL} // 排序后: dm, kingbase, mysql, opengauss, pgx
+	want := []string{DriverDM, DriverKingbase, DriverMySQL, DriverPostgreSQL}
 	if len(got) != len(want) {
 		t.Fatalf("SupportedDrivers 返回 %d 项,期望 %d 项: %v", len(got), len(want), got)
 	}

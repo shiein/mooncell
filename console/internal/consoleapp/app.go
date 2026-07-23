@@ -203,6 +203,7 @@ func Run(distFS fs.FS, version string, args []string) {
 
 	// 数据资源导入(Phase 5:CSV/XLSX 导入)。
 	mux.HandleFunc("POST /api/data-resources/{id}/imports/preview", drAuth(dataResSvc.ImportPreviewHandler))
+	mux.HandleFunc("PATCH /api/data-resources/{id}/imports/{importId}", drAuth(dataResSvc.ImportSelectSheetHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/imports/{importId}/execute", drAuth(dataResSvc.ImportExecuteHandler))
 	mux.HandleFunc("DELETE /api/data-resources/{id}/imports/{importId}", drAuth(dataResSvc.ImportDeleteHandler))
 

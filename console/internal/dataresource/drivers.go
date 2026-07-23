@@ -16,9 +16,8 @@ const (
 	DriverMySQL      = "mysql"    // github.com/go-sql-driver/mysql
 	DriverDM         = "dm"       // gitee.com/chunanyong/dm
 	DriverKingbase   = "kingbase" // gitea.com/kingbase/gokb
-	// Vastbase：设计要求官方本地 pq（驱动名 openGauss）+ 真机认证。
-	// 当前仓库无 third_party/vastbase/pq；使用 openGauss connector 仅保证可编译，标为实验性。
-	DriverVastbase = "opengauss" // gitcode.com/opengauss/openGauss-connector-go-pq（非官方本地 pq）
+	// 仅用于识别旧配置；官方本地 pq 未提供前不会出现在 DriverCatalog。
+	DriverVastbase = "opengauss"
 )
 
 // DriverMeta 描述驱动对产品可见的元信息。
@@ -28,7 +27,7 @@ type DriverMeta struct {
 	Experimental bool   `json:"experimental"` // true=不可在发布说明中宣称已认证支持
 }
 
-// DriverCatalog 返回产品可选驱动（含实验性标记）。
+// DriverCatalog 返回当前二进制中可创建的数据资源驱动。
 func DriverCatalog() []DriverMeta {
 	registered := map[string]bool{}
 	for _, d := range sql.Drivers() {
@@ -39,7 +38,6 @@ func DriverCatalog() []DriverMeta {
 		{ID: DriverMySQL, Label: "MySQL"},
 		{ID: DriverDM, Label: "达梦 DM8"},
 		{ID: DriverKingbase, Label: "KingbaseES"},
-		{ID: DriverVastbase, Label: "Vastbase G100（实验性）", Experimental: true},
 	}
 	out := make([]DriverMeta, 0, len(all))
 	for _, m := range all {

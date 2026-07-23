@@ -74,13 +74,14 @@ export async function patchAutoCommit(resourceId, workspaceId, autoCommit) {
   );
 }
 
-export async function executeSQL(resourceId, workspaceId, { sql, limit, confirmed }) {
+export async function executeSQL(resourceId, workspaceId, { sql, limit, confirmed, signal }) {
   return jsonFetch(
     `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/execute`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sql, limit, confirmed }),
+      signal,
     },
   );
 }
@@ -145,6 +146,17 @@ export async function createSavedSQL(resourceId, { name, sqlText }) {
   });
 }
 
+export async function updateSavedSQL(resourceId, sqlId, { name, sqlText }) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/saved-sql/${encodeURIComponent(sqlId)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, sqlText }),
+    },
+  );
+}
+
 export async function deleteSavedSQL(resourceId, sqlId) {
   return jsonFetch(
     `/api/data-resources/${encodeURIComponent(resourceId)}/saved-sql/${encodeURIComponent(sqlId)}`,
@@ -153,14 +165,18 @@ export async function deleteSavedSQL(resourceId, sqlId) {
 }
 
 /** 导出：返回 blob（流式响应可能非 JSON） */
-export async function exportWorkspace(resourceId, workspaceId, { sql, format }) {
+export async function exportWorkspace(resourceId, workspaceId, {
+  sql, format, scope = 'all', columns, rows,
+}) {
   const r = await fetch(
     `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/export`,
     {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sql, format: format || 'csv' }),
+      body: JSON.stringify({
+        sql, format: format || 'csv', scope, columns: columns || [], rows: rows || [],
+      }),
     },
   );
   if (!r.ok) {
@@ -168,4 +184,42 @@ export async function exportWorkspace(resourceId, workspaceId, { sql, format }) 
     throw new Error(d.error || `导出失败 HTTP ${r.status}`);
   }
   return r.blob();
+}
+
+export async function previewImport(resourceId, file) {
+  const form = new FormData();
+  form.append('file', file);
+  return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/imports/preview`, {
+    method: 'POST',
+    body: form,
+  });
+}
+
+export async function selectImportSheet(resourceId, importId, sheet) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/imports/${encodeURIComponent(importId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheet }),
+    },
+  );
+}
+
+export async function executeImport(resourceId, importId, payload) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/imports/${encodeURIComponent(importId)}/execute`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function deleteImport(resourceId, importId) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/imports/${encodeURIComponent(importId)}`,
+    { method: 'DELETE' },
+  );
 }

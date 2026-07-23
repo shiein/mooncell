@@ -186,127 +186,186 @@ func (a *pgAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 
 	// 字段
 	colRows, err := a.db.QueryContext(ctx, `
-		SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale,
-			is_nullable, column_default
-		FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = $2
-		ORDER BY ordinal_position`, obj.Schema, obj.Name)
+		SELECT cols.column_name, pg_catalog.format_type(attr.atttypid, attr.atttypmod),
+			cols.is_nullable, cols.column_default,
+			COALESCE(pg_catalog.col_description(cls.oid, attr.attnum), '')
+		FROM information_schema.columns cols
+		JOIN pg_catalog.pg_namespace ns ON ns.nspname = cols.table_schema
+		JOIN pg_catalog.pg_class cls ON cls.relnamespace = ns.oid AND cls.relname = cols.table_name
+		JOIN pg_catalog.pg_attribute attr ON attr.attrelid = cls.oid
+			AND attr.attname = cols.column_name AND attr.attnum > 0 AND NOT attr.attisdropped
+		WHERE cols.table_schema = $1 AND cols.table_name = $2
+		ORDER BY cols.ordinal_position`, obj.Schema, obj.Name)
 	if err != nil {
 		return structure, fmt.Errorf("查询字段失败: %w", err)
 	}
 	defer colRows.Close()
 	for colRows.Next() {
-		var name, dataType string
-		var charLen, numPrec, numScale sql.NullInt64
+		var name, fullType string
 		var isNullable string
-		var defVal sql.NullString
-		if err := colRows.Scan(&name, &dataType, &charLen, &numPrec, &numScale, &isNullable, &defVal); err != nil {
+		var defVal, comment sql.NullString
+		if err := colRows.Scan(&name, &fullType, &isNullable, &defVal, &comment); err != nil {
 			return structure, err
-		}
-		fullType := dataType
-		if charLen.Valid && charLen.Int64 > 0 {
-			fullType = fmt.Sprintf("%s(%d)", dataType, charLen.Int64)
-		} else if numPrec.Valid && numScale.Valid {
-			if numScale.Int64 > 0 {
-				fullType = fmt.Sprintf("%s(%d,%d)", dataType, numPrec.Int64, numScale.Int64)
-			} else {
-				fullType = fmt.Sprintf("%s(%d)", dataType, numPrec.Int64)
-			}
 		}
 		structure.Columns = append(structure.Columns, ColumnInfo{
 			Name:         name,
 			DataType:     fullType,
 			IsNullable:   isNullable == "YES",
 			DefaultValue: defVal.String,
+			Comment:      comment.String,
 		})
 	}
+	if err := colRows.Err(); err != nil {
+		return structure, err
+	}
+	colRows.Close()
 
-	// 约束
+	// 约束：先取 pg_constraint 的权威定义，再按 conkey/confkey 的 ordinality 获取列序。
+	// 避免 information_schema 两组列视图连接造成组合约束 N×N 行。
 	conRows, err := a.db.QueryContext(ctx, `
-		SELECT tc.constraint_name, tc.constraint_type, kcu.column_name,
-			ccu.table_name AS ref_table, ccu.column_name AS ref_column,
-			cc.check_clause
-		FROM information_schema.table_constraints tc
-		LEFT JOIN information_schema.key_column_usage kcu
-			ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-		LEFT JOIN information_schema.constraint_column_usage ccu
-			ON tc.constraint_name = ccu.constraint_name AND tc.constraint_schema = ccu.constraint_schema
-		LEFT JOIN information_schema.check_constraints cc
-			ON tc.constraint_name = cc.constraint_name AND tc.constraint_schema = cc.constraint_schema
-		WHERE tc.table_schema = $1 AND tc.table_name = $2
-		ORDER BY tc.constraint_type, tc.constraint_name`, obj.Schema, obj.Name)
-	if err == nil {
-		conMap := map[string]*ConstraintInfo{}
-		for conRows.Next() {
-			var conName, conType, colName sql.NullString
-			var refTable, refCol, checkClause sql.NullString
-			if err := conRows.Scan(&conName, &conType, &colName, &refTable, &refCol, &checkClause); err != nil {
-				continue
-			}
-			if !conName.Valid {
-				continue
-			}
-			ci, ok := conMap[conName.String]
-			if !ok {
-				ci = &ConstraintInfo{Name: conName.String, Type: normalizeConstraintType(conType.String)}
-				conMap[conName.String] = ci
-			}
-			if colName.Valid {
-				ci.Columns = append(ci.Columns, colName.String)
-			}
-			if refTable.Valid {
-				ci.RefTable = refTable.String
-			}
-			if refCol.Valid {
-				ci.RefColumns = append(ci.RefColumns, refCol.String)
-			}
-			if checkClause.Valid {
-				ci.Definition = checkClause.String
-			}
+		SELECT con.oid, con.conname, con.contype::text,
+			pg_catalog.pg_get_constraintdef(con.oid, true),
+			COALESCE(ref_ns.nspname, ''), COALESCE(ref_rel.relname, '')
+		FROM pg_catalog.pg_constraint con
+		JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+		JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+		LEFT JOIN pg_catalog.pg_class ref_rel ON ref_rel.oid = con.confrelid
+		LEFT JOIN pg_catalog.pg_namespace ref_ns ON ref_ns.oid = ref_rel.relnamespace
+		WHERE ns.nspname = $1 AND rel.relname = $2
+		ORDER BY con.conname`, obj.Schema, obj.Name)
+	if err != nil {
+		return structure, fmt.Errorf("查询约束失败: %w", err)
+	}
+	type pgConstraintRow struct {
+		oid                    int64
+		name, kind, definition string
+		refSchema, refTable    string
+	}
+	var constraints []pgConstraintRow
+	for conRows.Next() {
+		var row pgConstraintRow
+		if err := conRows.Scan(&row.oid, &row.name, &row.kind, &row.definition, &row.refSchema, &row.refTable); err != nil {
+			conRows.Close()
+			return structure, err
 		}
+		constraints = append(constraints, row)
+	}
+	if err := conRows.Err(); err != nil {
 		conRows.Close()
-		for _, ci := range conMap {
-			structure.Constraints = append(structure.Constraints, *ci)
+		return structure, err
+	}
+	conRows.Close()
+	for _, row := range constraints {
+		ci := ConstraintInfo{
+			Name:       row.name,
+			Type:       normalizeConstraintType(row.kind),
+			Definition: row.definition,
 		}
+		ci.Columns, err = a.pgConstraintColumns(ctx, row.oid, false)
+		if err != nil {
+			return structure, fmt.Errorf("查询约束列失败: %w", err)
+		}
+		if row.refTable != "" {
+			ci.RefTable = row.refTable
+			if row.refSchema != "" {
+				ci.RefTable = row.refSchema + "." + row.refTable
+			}
+			ci.RefColumns, err = a.pgConstraintColumns(ctx, row.oid, true)
+			if err != nil {
+				return structure, fmt.Errorf("查询外键列失败: %w", err)
+			}
+		}
+		structure.Constraints = append(structure.Constraints, ci)
 	}
 
-	// 索引：用 unnest+ordinality 保证列序，且无未分组裸列
+	// 索引：排除约束所属索引，避免 DDL 同时输出 UNIQUE/PK 约束和同名索引。
 	idxRows, err := a.db.QueryContext(ctx, `
 		SELECT i.relname AS index_name, ix.indisunique,
 			(SELECT array_agg(a.attname ORDER BY u.ord)
 			 FROM unnest(ix.indkey) WITH ORDINALITY AS u(attnum, ord)
 			 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = u.attnum
-			) AS columns
+			) AS columns,
+			pg_catalog.pg_get_indexdef(ix.indexrelid)
 		FROM pg_index ix
 		JOIN pg_class c ON c.oid = ix.indrelid
 		JOIN pg_class i ON i.oid = ix.indexrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2 AND NOT ix.indisprimary
+		WHERE n.nspname = $1 AND c.relname = $2
+			AND NOT EXISTS (
+				SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid
+			)
 		ORDER BY i.relname`, obj.Schema, obj.Name)
-	if err == nil {
-		for idxRows.Next() {
-			var idxName string
-			var unique bool
-			var columns []string
-			// pgx 可能将 text[] 扫为 []uint8 或专用类型；用 interface 再解析
-			var colsAny interface{}
-			if err := idxRows.Scan(&idxName, &unique, &colsAny); err != nil {
-				continue
-			}
-			columns = parsePGTextArray(colsAny)
-			structure.Indexes = append(structure.Indexes, IndexInfo{
-				Name: idxName, Columns: columns, Unique: unique,
-			})
-		}
-		idxRows.Close()
+	if err != nil {
+		return structure, fmt.Errorf("查询索引失败: %w", err)
 	}
+	for idxRows.Next() {
+		var idxName string
+		var unique bool
+		var definition string
+		var columns []string
+		// pgx 可能将 text[] 扫为 []uint8 或专用类型；用 interface 再解析
+		var colsAny interface{}
+		if err := idxRows.Scan(&idxName, &unique, &colsAny, &definition); err != nil {
+			idxRows.Close()
+			return structure, err
+		}
+		columns = parsePGTextArray(colsAny)
+		structure.Indexes = append(structure.Indexes, IndexInfo{
+			Name: idxName, Columns: columns, Unique: unique, Definition: definition,
+		})
+	}
+	if err := idxRows.Err(); err != nil {
+		idxRows.Close()
+		return structure, err
+	}
+	idxRows.Close()
 
 	return structure, nil
+}
+
+func (a *pgAdapter) pgConstraintColumns(ctx context.Context, oid int64, referenced bool) ([]string, error) {
+	key := "con.conkey"
+	rel := "con.conrelid"
+	if referenced {
+		key = "con.confkey"
+		rel = "con.confrelid"
+	}
+	query := fmt.Sprintf(`
+		SELECT attr.attname
+		FROM pg_catalog.pg_constraint con
+		JOIN LATERAL unnest(%s) WITH ORDINALITY AS keys(attnum, ord) ON true
+		JOIN pg_catalog.pg_attribute attr ON attr.attrelid = %s AND attr.attnum = keys.attnum
+		WHERE con.oid = $1
+		ORDER BY keys.ord`, key, rel)
+	rows, err := a.db.QueryContext(ctx, query, oid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 // normalizeConstraintType 将 information_schema 的 "PRIMARY KEY" 等规范为 primary/foreign/unique/check。
 func normalizeConstraintType(t string) string {
 	s := strings.ToLower(strings.TrimSpace(t))
+	switch s {
+	case "p":
+		return "primary"
+	case "f":
+		return "foreign"
+	case "u":
+		return "unique"
+	case "c":
+		return "check"
+	}
 	s = strings.ReplaceAll(s, " ", "")
 	s = strings.ReplaceAll(s, "_", "")
 	switch s {
@@ -364,11 +423,23 @@ func parsePGArrayLiteral(s string) []string {
 
 // DDL 生成表的 CREATE TABLE 语句（v1 只保证字段、默认值、主外键、唯一约束、检查约束、索引和注释）。
 func (a *pgAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
+	qualifiedName := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
+	if obj.Kind == NodeView || obj.Kind == NodeMatView {
+		var definition string
+		if err := a.db.QueryRowContext(ctx,
+			"SELECT pg_catalog.pg_get_viewdef($1::regclass, true)", qualifiedName).Scan(&definition); err != nil {
+			return "", err
+		}
+		kind := "VIEW"
+		if obj.Kind == NodeMatView {
+			kind = "MATERIALIZED VIEW"
+		}
+		return fmt.Sprintf("CREATE %s %s AS\n%s;", kind, qualifiedName, strings.TrimSuffix(definition, ";")), nil
+	}
 	structure, err := a.Describe(ctx, obj)
 	if err != nil {
 		return "", err
 	}
-	qualifiedName := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
 	var lines []string
 	lines = append(lines, fmt.Sprintf("CREATE TABLE %s (", qualifiedName))
 	for _, col := range structure.Columns {
@@ -383,17 +454,21 @@ func (a *pgAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
 	}
 	for _, con := range structure.Constraints {
 		var line string
-		switch con.Type {
-		case "primary":
-			line = fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)", a.QuoteIdentifier(con.Name), joinQuoted(a, con.Columns))
-		case "unique":
-			line = fmt.Sprintf("    CONSTRAINT %s UNIQUE (%s)", a.QuoteIdentifier(con.Name), joinQuoted(a, con.Columns))
-		case "foreign":
-			line = fmt.Sprintf("    CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
-				a.QuoteIdentifier(con.Name), joinQuoted(a, con.Columns),
-				a.QuoteIdentifier(con.RefTable), joinQuoted(a, con.RefColumns))
-		case "check":
-			line = fmt.Sprintf("    CONSTRAINT %s CHECK (%s)", a.QuoteIdentifier(con.Name), con.Definition)
+		if con.Definition != "" {
+			line = fmt.Sprintf("    CONSTRAINT %s %s", a.QuoteIdentifier(con.Name), con.Definition)
+		} else {
+			switch con.Type {
+			case "primary":
+				line = fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)", a.QuoteIdentifier(con.Name), joinQuoted(a, con.Columns))
+			case "unique":
+				line = fmt.Sprintf("    CONSTRAINT %s UNIQUE (%s)", a.QuoteIdentifier(con.Name), joinQuoted(a, con.Columns))
+			case "foreign":
+				line = fmt.Sprintf("    CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+					a.QuoteIdentifier(con.Name), joinQuoted(a, con.Columns),
+					a.QuoteIdentifier(con.RefTable), joinQuoted(a, con.RefColumns))
+			case "check":
+				line = fmt.Sprintf("    CONSTRAINT %s CHECK (%s)", a.QuoteIdentifier(con.Name), con.Definition)
+			}
 		}
 		if line != "" {
 			lines = append(lines, line+",")
@@ -406,12 +481,24 @@ func (a *pgAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
 	lines = append(lines, ");")
 	// 非主键索引以独立 CREATE INDEX 输出
 	for _, idx := range structure.Indexes {
+		if idx.Definition != "" {
+			lines = append(lines, strings.TrimSuffix(idx.Definition, ";")+";")
+			continue
+		}
 		uniq := ""
 		if idx.Unique {
 			uniq = "UNIQUE "
 		}
 		lines = append(lines, fmt.Sprintf("CREATE %sINDEX %s ON %s (%s);",
 			uniq, a.QuoteIdentifier(idx.Name), qualifiedName, joinQuoted(a, idx.Columns)))
+	}
+	for _, col := range structure.Columns {
+		if col.Comment == "" {
+			continue
+		}
+		comment := strings.ReplaceAll(col.Comment, "'", "''")
+		lines = append(lines, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS '%s';",
+			qualifiedName, a.QuoteIdentifier(col.Name), comment))
 	}
 	return strings.Join(lines, "\n"), nil
 }
