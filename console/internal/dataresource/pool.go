@@ -19,16 +19,19 @@ type PoolManager struct {
 	mu    sync.Mutex
 	pools map[string]*sql.DB // resourceID → *sql.DB
 	// activeTx 记录每个资源是否有活动手工事务（ref count）。
-	activeTx   map[string]int
-	credKey    *CredentialKey
+	activeTx map[string]int
+	// importing 记录每个资源上正在执行的导入占用（ref count），与手工事务互斥。
+	importing map[string]int
+	credKey   *CredentialKey
 }
 
 // NewPoolManager 创建连接池管理器。
 func NewPoolManager(credKey *CredentialKey) *PoolManager {
 	return &PoolManager{
-		pools:    map[string]*sql.DB{},
-		activeTx: map[string]int{},
-		credKey:  credKey,
+		pools:     map[string]*sql.DB{},
+		activeTx:  map[string]int{},
+		importing: map[string]int{},
+		credKey:   credKey,
 	}
 }
 
@@ -87,11 +90,15 @@ func (pm *PoolManager) HasActiveTx(resourceID string) bool {
 	return pm.activeTx[resourceID] > 0
 }
 
-// BeginTx 增加活动事务计数。
-func (pm *PoolManager) BeginTx(resourceID string) {
+// BeginTx 增加活动事务计数。若资源正在导入则失败，避免与导入并行写。
+func (pm *PoolManager) BeginTx(resourceID string) error {
 	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.importing[resourceID] > 0 {
+		return fmt.Errorf("资源正在导入数据，请稍后再开启手工事务")
+	}
 	pm.activeTx[resourceID]++
-	pm.mu.Unlock()
+	return nil
 }
 
 // EndTx 减少活动事务计数。
@@ -99,6 +106,30 @@ func (pm *PoolManager) EndTx(resourceID string) {
 	pm.mu.Lock()
 	if pm.activeTx[resourceID] > 0 {
 		pm.activeTx[resourceID]--
+	}
+	pm.mu.Unlock()
+}
+
+// TryBeginImport 在无活动手工事务时原子占用导入槽；失败表示有手工事务（或竞态）。
+// 与 BeginTx 互斥，消除「HasActiveTx 检查 → Begin 手工事务」之间的 TOCTOU。
+func (pm *PoolManager) TryBeginImport(resourceID string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.activeTx[resourceID] > 0 {
+		return false
+	}
+	pm.importing[resourceID]++
+	return true
+}
+
+// EndImport 释放导入占用。
+func (pm *PoolManager) EndImport(resourceID string) {
+	pm.mu.Lock()
+	if pm.importing[resourceID] > 0 {
+		pm.importing[resourceID]--
+		if pm.importing[resourceID] == 0 {
+			delete(pm.importing, resourceID)
+		}
 	}
 	pm.mu.Unlock()
 }

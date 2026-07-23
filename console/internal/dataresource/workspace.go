@@ -332,9 +332,12 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 		if err != nil {
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
+		if err := wm.pool.BeginTx(ws.ResourceID); err != nil {
+			_ = tx.Rollback()
+			return &APIError{Code: "IMPORT_ACTIVE", Message: err.Error()}
+		}
 		ws.Tx = tx
 		ws.TxState = TxActive
-		wm.pool.BeginTx(ws.ResourceID)
 	}
 
 	pageSQL, err := ws.Adapter.PageSQL(sqlText, limit, 0)
@@ -387,9 +390,12 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 		if err != nil {
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
+		if err := wm.pool.BeginTx(ws.ResourceID); err != nil {
+			_ = tx.Rollback()
+			return &APIError{Code: "IMPORT_ACTIVE", Message: err.Error()}
+		}
 		ws.Tx = tx
 		ws.TxState = TxActive
-		wm.pool.BeginTx(ws.ResourceID)
 	}
 	res, err := ws.Tx.Exec(ctx, sqlText)
 	if err != nil {

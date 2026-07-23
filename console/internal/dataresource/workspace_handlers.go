@@ -142,6 +142,12 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		if apiErr, isAPIErr := err.(*APIError); isAPIErr {
 			if apiErr.Code == "DATA_RESOURCE_READ_ONLY" {
 				s.auditSQL(user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
+				writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
+				return
+			}
+			if apiErr.Code == "IMPORT_ACTIVE" {
+				writeErr(w, http.StatusConflict, apiErr.Code, apiErr.Message)
+				return
 			}
 			writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
 			return
