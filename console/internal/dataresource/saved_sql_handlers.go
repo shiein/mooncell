@@ -91,9 +91,15 @@ func (s *Service) CreateSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 
 // UpdateSavedSQLHandler 处理 PUT /api/data-resources/{id}/saved-sql/{sqlId}
 func (s *Service) UpdateSavedSQLHandler(w http.ResponseWriter, r *http.Request) {
-	user, _, ok := userFromCtx(r)
+	user, role, ok := userFromCtx(r)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
+		return
+	}
+	resourceID := r.PathValue("id")
+	mode, _ := UserAccessMode(s.db, user, role, resourceID)
+	if mode == "" {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return
 	}
 	sqlID := r.PathValue("sqlId")
@@ -114,7 +120,8 @@ func (s *Service) UpdateSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", "SQL 内容不能为空")
 		return
 	}
-	if err := UpdateSavedSQL(s.db, sqlID, user, body.Name, body.SQLText); err != nil {
+	// 同时约束 owner + path 资源 id，防止跨资源改删与撤权后仍操作
+	if err := UpdateSavedSQL(s.db, sqlID, user, resourceID, body.Name, body.SQLText); err != nil {
 		if err == sql.ErrNoRows {
 			writeErr(w, http.StatusNotFound, "NOT_FOUND", "SQL 不存在或无权修改")
 			return
@@ -131,13 +138,19 @@ func (s *Service) UpdateSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 
 // DeleteSavedSQLHandler 处理 DELETE /api/data-resources/{id}/saved-sql/{sqlId}
 func (s *Service) DeleteSavedSQLHandler(w http.ResponseWriter, r *http.Request) {
-	user, _, ok := userFromCtx(r)
+	user, role, ok := userFromCtx(r)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
+	resourceID := r.PathValue("id")
+	mode, _ := UserAccessMode(s.db, user, role, resourceID)
+	if mode == "" {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
+		return
+	}
 	sqlID := r.PathValue("sqlId")
-	if err := DeleteSavedSQL(s.db, sqlID, user); err != nil {
+	if err := DeleteSavedSQL(s.db, sqlID, user, resourceID); err != nil {
 		if err == sql.ErrNoRows {
 			writeErr(w, http.StatusNotFound, "NOT_FOUND", "SQL 不存在或无权删除")
 			return

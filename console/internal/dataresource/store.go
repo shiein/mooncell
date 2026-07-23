@@ -481,11 +481,13 @@ func CreateSavedSQL(db *sql.DB, s SavedSQL) error {
 	return err
 }
 
-// UpdateSavedSQL 更新一条保存 SQL。仅 owner 可更新。
-func UpdateSavedSQL(db *sql.DB, id, username, name, sqlText string) error {
+// UpdateSavedSQL 更新一条保存 SQL。仅 owner 且属于指定 resource 时可更新。
+func UpdateSavedSQL(db *sql.DB, id, username, resourceID, name, sqlText string) error {
 	now := time.Now().UnixMilli()
-	res, err := db.Exec("UPDATE saved_sql SET name=?, sql_text=?, updated_at=? WHERE id=? AND username=?",
-		name, sqlText, now, id, username)
+	res, err := db.Exec(
+		"UPDATE saved_sql SET name=?, sql_text=?, updated_at=? WHERE id=? AND username=? AND resource_id=?",
+		name, sqlText, now, id, username, resourceID,
+	)
 	if err != nil {
 		return err
 	}
@@ -496,9 +498,9 @@ func UpdateSavedSQL(db *sql.DB, id, username, name, sqlText string) error {
 	return nil
 }
 
-// DeleteSavedSQL 删除一条保存 SQL。仅 owner 可删除。
-func DeleteSavedSQL(db *sql.DB, id, username string) error {
-	res, err := db.Exec("DELETE FROM saved_sql WHERE id=? AND username=?", id, username)
+// DeleteSavedSQL 删除一条保存 SQL。仅 owner 且属于指定 resource 时可删除。
+func DeleteSavedSQL(db *sql.DB, id, username, resourceID string) error {
+	res, err := db.Exec("DELETE FROM saved_sql WHERE id=? AND username=? AND resource_id=?", id, username, resourceID)
 	if err != nil {
 		return err
 	}

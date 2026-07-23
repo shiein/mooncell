@@ -217,8 +217,10 @@ func TestVisibleResources(t *testing.T) {
 
 func TestSavedSQLUserIsolation(t *testing.T) {
 	db := testDB(t)
-	r := DataResource{ID: "r1", Name: "R1", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}
-	CreateDataResource(db, r)
+	r1 := DataResource{ID: "r1", Name: "R1", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}
+	r2 := DataResource{ID: "r2", Name: "R2", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", CredentialCipher: "c", SSLMode: "disable", CreatedBy: "a", CreatedAt: 2, UpdatedAt: 2}
+	CreateDataResource(db, r1)
+	CreateDataResource(db, r2)
 
 	CreateSavedSQL(db, SavedSQL{ID: "s1", Username: "u1", ResourceID: "r1", Name: "q1", SQLText: "SELECT 1", CreatedAt: 1, UpdatedAt: 1})
 	CreateSavedSQL(db, SavedSQL{ID: "s2", Username: "u2", ResourceID: "r1", Name: "q2", SQLText: "SELECT 2", CreatedAt: 2, UpdatedAt: 2})
@@ -229,12 +231,23 @@ func TestSavedSQLUserIsolation(t *testing.T) {
 		t.Errorf("u1 应只看到 s1,实际 %+v", l1)
 	}
 	// u2 不能更新 u1 的 SQL
-	if err := UpdateSavedSQL(db, "s1", "u2", "hack", "DROP TABLE"); err == nil {
+	if err := UpdateSavedSQL(db, "s1", "u2", "r1", "hack", "DROP TABLE"); err == nil {
 		t.Fatal("u2 不应能更新 u1 的 SQL")
 	}
 	// u2 不能删除 u1 的 SQL
-	if err := DeleteSavedSQL(db, "s1", "u2"); err == nil {
+	if err := DeleteSavedSQL(db, "s1", "u2", "r1"); err == nil {
 		t.Fatal("u2 不应能删除 u1 的 SQL")
+	}
+	// 正确 owner 但 path 资源 id 不一致：不得改删
+	if err := UpdateSavedSQL(db, "s1", "u1", "r2", "hack", "SELECT 9"); err == nil {
+		t.Fatal("跨资源 path 不应能更新 SQL")
+	}
+	if err := DeleteSavedSQL(db, "s1", "u1", "r2"); err == nil {
+		t.Fatal("跨资源 path 不应能删除 SQL")
+	}
+	// 正确 owner + 资源可更新
+	if err := UpdateSavedSQL(db, "s1", "u1", "r1", "q1b", "SELECT 3"); err != nil {
+		t.Fatalf("owner 更新失败: %v", err)
 	}
 }
 
