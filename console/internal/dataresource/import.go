@@ -321,7 +321,7 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, result)
 }
 
-// executeImport 执行导入：读取文件全部行，参数化 INSERT 批量执行。
+// executeImport 执行导入：校验目标表/列来自元数据，参数化 INSERT 在同一事务内按批执行。
 func executeImport(ctx context.Context, adapter DataSourceAdapter, session *ImportSession, tableName, schema string, mapping []string) (*ImportExecuteResult, error) {
 	start := time.Now()
 	result := &ImportExecuteResult{}
@@ -330,7 +330,7 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 	var targetCols []string
 	for _, col := range mapping {
 		if strings.TrimSpace(col) != "" {
-			targetCols = append(targetCols, col)
+			targetCols = append(targetCols, strings.TrimSpace(col))
 		}
 	}
 	if len(targetCols) == 0 {
@@ -338,32 +338,39 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 		return result, nil
 	}
 
+	// 设计：动态对象名只能来自已读取的元数据——Describe 校验表与列存在
+	resolvedCols, err := validateImportTarget(ctx, adapter, schema, tableName, targetCols)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	// 将 mapping 中的目标列替换为库内真实列名（保留大小写）
+	resolvedMapping := make([]string, len(mapping))
+	ri := 0
+	for j, col := range mapping {
+		if strings.TrimSpace(col) == "" {
+			continue
+		}
+		resolvedMapping[j] = resolvedCols[ri]
+		ri++
+	}
+
 	// 构建 INSERT SQL
 	qualified := adapter.QuoteIdentifier(schema) + "." + adapter.QuoteIdentifier(tableName)
 	if schema == "" {
 		qualified = adapter.QuoteIdentifier(tableName)
 	}
-	placeholders := make([]string, len(targetCols))
+	placeholders := make([]string, len(resolvedCols))
 	for i := range placeholders {
 		// 1-based；PG 系为 $n，MySQL/DM 为 ?
 		placeholders[i] = adapter.Placeholder(i + 1)
 	}
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		qualified,
-		joinIdentifiers(adapter, targetCols),
+		joinIdentifiers(adapter, resolvedCols),
 		strings.Join(placeholders, ", "))
 
-	// 读取文件全部行
-	allRows, err := readAllRows(session)
-	if err != nil {
-		result.Error = err.Error()
-		return result, nil
-	}
-	if len(allRows) <= 1 { // 只有表头
-		return result, nil
-	}
-
-	// 在一个事务中批量执行
+	// 在一个事务中按 ImportBatchSize 批处理；任一行失败则全部回滚
 	tx, err := adapter.Begin(ctx, false)
 	if err != nil {
 		result.Error = fmt.Sprintf("开启事务失败: %v", err)
@@ -371,11 +378,15 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 	}
 
 	imported := 0
-	for i, row := range allRows[1:] { // 跳过表头
-		// 按映射提取值
-		args := make([]any, 0, len(targetCols))
-		for j, col := range mapping {
-			if strings.TrimSpace(col) == "" {
+	rowNum := 1 // 1-based 含表头；数据行从 2 起
+	err = streamImportRows(session, func(row []string, isHeader bool) error {
+		if isHeader {
+			return nil
+		}
+		rowNum++
+		args := make([]any, 0, len(resolvedCols))
+		for j, col := range resolvedMapping {
+			if col == "" {
 				continue
 			}
 			if j < len(row) {
@@ -385,12 +396,26 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 			}
 		}
 		if _, err := tx.Exec(ctx, insertSQL, args...); err != nil {
-			tx.Rollback()
-			result.Error = fmt.Sprintf("第 %d 行插入失败: %s", i+2, adapter.NormalizeError(err).Message)
-			result.ErrorRow = i + 2
-			return result, nil
+			return &importRowError{row: rowNum, msg: adapter.NormalizeError(err).Message}
 		}
 		imported++
+		// 每批检查上下文取消
+		if imported%ImportBatchSize == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		tx.Rollback()
+		if re, ok := err.(*importRowError); ok {
+			result.Error = fmt.Sprintf("第 %d 行插入失败: %s", re.row, re.msg)
+			result.ErrorRow = re.row
+			return result, nil
+		}
+		result.Error = err.Error()
+		return result, nil
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -403,21 +428,67 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 	return result, nil
 }
 
-// readAllRows 读取文件全部行。
-func readAllRows(session *ImportSession) ([][]string, error) {
-	switch session.Format {
-	case "csv":
-		return readAllCSV(session.FilePath)
-	case "xlsx":
-		return readAllXLSX(session.FilePath, session.Sheet)
-	}
-	return nil, fmt.Errorf("不支持的格式")
+type importRowError struct {
+	row int
+	msg string
 }
 
-func readAllCSV(path string) ([][]string, error) {
+func (e *importRowError) Error() string { return e.msg }
+
+// validateImportTarget 通过 Describe 确认表存在，且映射列均在表结构中。
+func validateImportTarget(ctx context.Context, adapter DataSourceAdapter, schema, tableName string, targetCols []string) ([]string, error) {
+	obj := MetadataNode{Kind: NodeTable, Schema: schema, Name: tableName}
+	structure, err := adapter.Describe(ctx, obj)
+	if err != nil {
+		return nil, fmt.Errorf("无法读取目标表结构: %w", err)
+	}
+	if len(structure.Columns) == 0 {
+		return nil, fmt.Errorf("目标表不存在或无字段: %s", tableName)
+	}
+	exact := map[string]string{}  // lower -> actual
+	for _, c := range structure.Columns {
+		exact[c.Name] = c.Name
+		exact[strings.ToLower(c.Name)] = c.Name
+	}
+	resolved := make([]string, 0, len(targetCols))
+	for _, col := range targetCols {
+		if actual, ok := exact[col]; ok {
+			resolved = append(resolved, actual)
+			continue
+		}
+		if actual, ok := exact[strings.ToLower(col)]; ok {
+			resolved = append(resolved, actual)
+			continue
+		}
+		return nil, fmt.Errorf("目标表不存在列: %s", col)
+	}
+	return resolved, nil
+}
+
+// streamImportRows 逐行回调文件内容；CSV 流式读取，XLSX 受 excelize 限制整表读入后逐行回调。
+func streamImportRows(session *ImportSession, fn func(row []string, isHeader bool) error) error {
+	switch session.Format {
+	case "csv":
+		return streamCSVRows(session.FilePath, fn)
+	case "xlsx":
+		rows, err := readAllXLSX(session.FilePath, session.Sheet)
+		if err != nil {
+			return err
+		}
+		for i, row := range rows {
+			if err := fn(row, i == 0); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("不支持的格式")
+}
+
+func streamCSVRows(path string, fn func(row []string, isHeader bool) error) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
 	bom := make([]byte, 3)
@@ -427,7 +498,21 @@ func readAllCSV(path string) ([][]string, error) {
 	}
 	reader := csv.NewReader(f)
 	reader.LazyQuotes = true
-	return reader.ReadAll()
+	reader.ReuseRecord = false
+	first := true
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := fn(row, first); err != nil {
+			return err
+		}
+		first = false
+	}
 }
 
 func readAllXLSX(path, sheet string) ([][]string, error) {
