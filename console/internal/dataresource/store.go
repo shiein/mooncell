@@ -235,16 +235,20 @@ func DeleteDataResource(db *sql.DB, id string) error {
 	return tx.Commit()
 }
 
-// UpdateTestStatus 更新资源的最近测试状态。
+// UpdateTestStatus 更新资源的最近测试状态（无 CAS，仅供测试辅助）。
 func UpdateTestStatus(db *sql.DB, id, status string) error {
 	_, err := db.Exec("UPDATE data_resources SET last_test_status=?, last_test_at=? WHERE id=?",
 		status, time.Now().UnixMilli(), id)
 	return err
 }
 
+// ErrConfigChanged 表示测试期间资源配置已变更，测试结果不得写回。
+var ErrConfigChanged = errors.New("CONFIG_CHANGED")
+
 // UpdateTestStatusAndRevokeRead 更新连接测试状态；认证降级时在同一事务内撤销既有 read 授权。
+// expectedUpdatedAt 为测试开始前读到的 updated_at；不一致则返回 ErrConfigChanged（CAS）。
 // 返回被撤销的用户名，供调用方立即失效其内存工作台。
-func UpdateTestStatusAndRevokeRead(db *sql.DB, id, status string) ([]string, error) {
+func UpdateTestStatusAndRevokeRead(db *sql.DB, id, status string, expectedUpdatedAt int64) ([]string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -278,10 +282,15 @@ func UpdateTestStatusAndRevokeRead(db *sql.DB, id, status string) ([]string, err
 			return nil, err
 		}
 	}
-	if _, err := tx.Exec(
-		"UPDATE data_resources SET last_test_status=?, last_test_at=? WHERE id=?",
-		status, time.Now().UnixMilli(), id); err != nil {
+	res, err := tx.Exec(
+		"UPDATE data_resources SET last_test_status=?, last_test_at=? WHERE id=? AND updated_at=?",
+		status, time.Now().UnixMilli(), id, expectedUpdatedAt)
+	if err != nil {
 		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, ErrConfigChanged
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -536,6 +545,10 @@ func ValidateInput(input DataResourceInput) error {
 	}
 	if !validSSLMode(input.SSLMode) {
 		return errors.New("SSL 模式只能为 disable 或 require")
+	}
+	// 达梦 DSN 当前未接线 TLS：禁止 require，避免界面宣称加密实际明文连接
+	if input.DBType == DriverDM && input.SSLMode == "require" {
+		return errors.New("达梦驱动当前不支持 sslMode=require，请使用 disable")
 	}
 	return nil
 }

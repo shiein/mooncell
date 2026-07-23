@@ -105,23 +105,13 @@ func snapshotCellString(v any) string {
 }
 
 // ExportCSV 流式导出查询结果为 CSV。
-// sqlText 是要导出的查询语句，header 写入表头。
+// 先成功 Begin/Query/Columns，再写响应头，避免失败时返回空 200 下载。
 func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
 	if err := prepareExportSQL(sqlText); err != nil {
 		return err
 	}
 
-	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.csv", time.Now().Format("20060102-150405")))
-
-	// BOM for Excel UTF-8
-	n, _ := w.Write([]byte{0xEF, 0xBB, 0xBF})
-	approxBytes := n
-
-	cw := csv.NewWriter(w)
-	defer cw.Flush()
-
-	// 在只读事务中执行全量查询
+	// 在只读事务中执行全量查询（成功前不写 HTTP 体）
 	tx, err := adapter.Begin(ctx, true)
 	if err != nil {
 		return fmt.Errorf("开启只读事务失败: %w", err)
@@ -138,6 +128,18 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	if err != nil {
 		return err
 	}
+	typeNames := columnTypeNames(rows, len(cols))
+
+	// 查询就绪后再提交下载头
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.csv", time.Now().Format("20060102-150405")))
+
+	// BOM for Excel UTF-8
+	n, _ := w.Write([]byte{0xEF, 0xBB, 0xBF})
+	approxBytes := n
+
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
 
 	// 写表头
 	if err := cw.Write(cols); err != nil {
@@ -146,7 +148,6 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	for _, c := range cols {
 		approxBytes += len(c) + 1
 	}
-	typeNames := columnTypeNames(rows, len(cols))
 
 	rowCount := 0
 	for rows.Next() {
@@ -167,7 +168,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 		record := make([]string, len(cols))
 		rowBytes := 0
 		for i, v := range values {
-			record[i] = valueToCSV(v, typeNames[i])
+			record[i] = csvFormulaSafe(valueToCSV(v, typeNames[i]))
 			rowBytes += len(record[i]) + 1
 		}
 		if approxBytes+rowBytes > ExportMaxBytes {
@@ -183,6 +184,18 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 		rowCount++
 	}
 	return rows.Err()
+}
+
+// csvFormulaSafe 防止 Excel 将单元格当公式执行（以 = + - @ 开头）。
+func csvFormulaSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@':
+		return "'" + s
+	}
+	return s
 }
 
 // valueToCSV 将数据库值转为 CSV 字符串。

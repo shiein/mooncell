@@ -423,6 +423,8 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
+	// 快照配置版本：测试可能长达 10s，写回时用 CAS 防止旧结果覆盖新配置
+	configVersion := res.UpdatedAt
 	password, err := s.credKey.Decrypt(res.CredentialCipher)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DECRYPT_ERROR", "凭据解密失败")
@@ -430,8 +432,12 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 	}
 	result := TestConnection(res, password)
 	status := result.PersistStatus()
-	revoked, err := UpdateTestStatusAndRevokeRead(s.db, id, status)
+	revoked, err := UpdateTestStatusAndRevokeRead(s.db, id, status, configVersion)
 	if err != nil {
+		if errors.Is(err, ErrConfigChanged) {
+			writeErr(w, http.StatusConflict, "CONFIG_CHANGED", "测试期间资源配置已变更，请使用新配置重新测试")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "保存连接测试结果失败")
 		return
 	}

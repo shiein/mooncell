@@ -222,23 +222,46 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 			DefaultValue: defVal.String, Comment: comment.String,
 		})
 	}
-	// 约束（主键、唯一、外键）
+	// 约束（主键/唯一/外键）及列：key_column_usage 提供列序
 	conRows, err := a.db.QueryContext(ctx, `
-		SELECT constraint_name, constraint_type
-		FROM information_schema.table_constraints
-		WHERE table_schema = ? AND table_name = ?
-		ORDER BY constraint_type, constraint_name`, obj.Schema, obj.Name)
+		SELECT tc.constraint_name, tc.constraint_type, kcu.column_name, kcu.ordinal_position
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON kcu.constraint_schema = tc.constraint_schema
+		 AND kcu.constraint_name = tc.constraint_name
+		 AND kcu.table_schema = tc.table_schema
+		 AND kcu.table_name = tc.table_name
+		WHERE tc.table_schema = ? AND tc.table_name = ?
+		  AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
+		ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position`, obj.Schema, obj.Name)
 	if err == nil {
+		type conAcc struct {
+			name, typ string
+			cols      []string
+		}
+		order := []string{}
+		byName := map[string]*conAcc{}
 		for conRows.Next() {
-			var name, conType string
-			if err := conRows.Scan(&name, &conType); err != nil {
+			var name, conType, col string
+			var ord int
+			if err := conRows.Scan(&name, &conType, &col, &ord); err != nil {
 				continue
 			}
-			structure.Constraints = append(structure.Constraints, ConstraintInfo{
-				Name: name, Type: strings.ToLower(conType),
-			})
+			acc, ok := byName[name]
+			if !ok {
+				acc = &conAcc{name: name, typ: normalizeConstraintType(conType)}
+				byName[name] = acc
+				order = append(order, name)
+			}
+			acc.cols = append(acc.cols, col)
 		}
 		conRows.Close()
+		for _, name := range order {
+			acc := byName[name]
+			structure.Constraints = append(structure.Constraints, ConstraintInfo{
+				Name: acc.name, Type: acc.typ, Columns: acc.cols,
+			})
+		}
 	}
 	// 索引
 	idxRows, err := a.db.QueryContext(ctx, `

@@ -2,6 +2,7 @@ package dataresource
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -149,7 +150,7 @@ func TestUpdateTestStatusAndRevokeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	revoked, err := UpdateTestStatusAndRevokeRead(db, "r1", TestStatusOKNoRO)
+	revoked, err := UpdateTestStatusAndRevokeRead(db, "r1", TestStatusOKNoRO, r.UpdatedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +168,10 @@ func TestUpdateTestStatusAndRevokeRead(t *testing.T) {
 	got, ok, err := GetDataResource(db, "r1")
 	if err != nil || !ok || got.LastTestStatus != TestStatusOKNoRO {
 		t.Fatalf("测试状态未原子更新: resource=%+v ok=%v err=%v", got, ok, err)
+	}
+	// CAS：配置已变更（updated_at 不一致）则拒绝写回
+	if _, err := UpdateTestStatusAndRevokeRead(db, "r1", TestStatusOK, r.UpdatedAt+999); !errors.Is(err, ErrConfigChanged) {
+		t.Fatalf("期望 CONFIG_CHANGED, got %v", err)
 	}
 }
 
@@ -262,6 +267,8 @@ func TestValidateInput(t *testing.T) {
 		{"非法类型", DataResourceInput{Name: "R", DBType: "oracle", Host: "h", Port: 5432, DatabaseName: "d", Username: "u", SSLMode: "disable"}, false},
 		{"端口越界", DataResourceInput{Name: "R", DBType: DriverPostgreSQL, Host: "h", Port: 99999, DatabaseName: "d", Username: "u", SSLMode: "disable"}, false},
 		{"非法SSL", DataResourceInput{Name: "R", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", SSLMode: "verify-full"}, false},
+		{"DM拒绝require", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "d", Username: "u", SSLMode: "require"}, false},
+		{"DM允许disable", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "d", Username: "u", SSLMode: "disable"}, true},
 	}
 	for _, c := range cases {
 		err := ValidateInput(c.input)

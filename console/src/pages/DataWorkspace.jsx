@@ -275,9 +275,10 @@ function DataWorkspacePage({ resource, onBack }) {
     }
   }, []);
 
-  const runSQL = async (confirmed = false, fixedSQL = '') => {
+  /** @returns {Promise<boolean>} 是否执行成功 */
+  const runSQL = async (confirmed = false, fixedSQL = '', { silentToast = false } = {}) => {
     const target = fixedSQL || editorTarget().sql;
-    if (!wsId || !target) return;
+    if (!wsId || !target) return false;
     const controller = new AbortController();
     runControllerRef.current = controller;
     setBusy(true);
@@ -305,10 +306,11 @@ function DataWorkspacePage({ resource, onBack }) {
           + (res.totalStatus === 'available' ? ` / 共 ${res.total}` : '')
           + ` · ${res.durationMs}ms` + extra);
       }
+      return true;
     } catch (e) {
       if (e.name === 'AbortError') {
         setMsg('执行已取消');
-        return;
+        return false;
       }
       if (e.code === 'DANGEROUS_SQL' && !confirmed) {
         const ok = await confirmDialog({
@@ -320,13 +322,14 @@ function DataWorkspacePage({ resource, onBack }) {
         });
         if (ok) {
           setBusy(false);
-          return runSQL(true, target);
+          return runSQL(true, target, { silentToast });
         }
-        return;
+        return false;
       }
       setResult(null);
       setMsg(e.message || '执行失败');
-      toast(e.message || '执行失败', { tone: 'error' });
+      if (!silentToast) toast(e.message || '执行失败', { tone: 'error' });
+      return false;
     } finally {
       if (runControllerRef.current === controller) {
         runControllerRef.current = null;
@@ -477,9 +480,12 @@ function DataWorkspacePage({ resource, onBack }) {
       });
       toast(`已保存 · 更新 ${res.updated || 0} · 删除 ${res.deleted || 0}`);
       setEditMode(false);
-      // 重新执行原查询刷新
+      // 刷新与保存拆开错误边界，避免“已提交却提示保存失败”
       if (lastSQLRef.current) {
-        await runSQL(false, lastSQLRef.current);
+        const ok = await runSQL(false, lastSQLRef.current, { silentToast: true });
+        if (!ok) {
+          toast('保存成功，但刷新结果失败，请手动重新查询', { tone: 'warn' });
+        }
       }
     } catch (e) {
       toast(e.message || '保存失败', { tone: 'error' });

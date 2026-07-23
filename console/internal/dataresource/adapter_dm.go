@@ -178,19 +178,60 @@ func (a *dmAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 			DefaultValue: defVal.String,
 		})
 	}
+
+	// 主键/唯一/外键：all_constraints + all_cons_columns（Oracle 兼容视图）
+	conRows, err := a.db.QueryContext(ctx, `
+		SELECT c.constraint_name, c.constraint_type, cc.column_name, cc.position
+		FROM all_constraints c
+		JOIN all_cons_columns cc
+		  ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+		WHERE c.owner = ? AND c.table_name = ?
+		  AND c.constraint_type IN ('P', 'U', 'R')
+		ORDER BY c.constraint_type, c.constraint_name, cc.position`, obj.Schema, obj.Name)
+	if err == nil {
+		type acc struct {
+			name, typ string
+			cols      []string
+		}
+		order := []string{}
+		byName := map[string]*acc{}
+		for conRows.Next() {
+			var name, ctype, col string
+			var pos sql.NullInt64
+			if err := conRows.Scan(&name, &ctype, &col, &pos); err != nil {
+				continue
+			}
+			a2, ok := byName[name]
+			if !ok {
+				a2 = &acc{name: name, typ: normalizeConstraintType(ctype)}
+				byName[name] = a2
+				order = append(order, name)
+			}
+			a2.cols = append(a2.cols, col)
+		}
+		conRows.Close()
+		for _, name := range order {
+			ac := byName[name]
+			structure.Constraints = append(structure.Constraints, ConstraintInfo{
+				Name: ac.name, Type: ac.typ, Columns: ac.cols,
+			})
+		}
+	}
 	return structure, nil
 }
 
 func (a *dmAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
-	// DM 可用 DBMS_METADATA.GET_DDL，但复杂度高。v1 从 Describe 生成基础 DDL。
+	// 视图：避免误生成 CREATE TABLE
+	if obj.Kind == NodeView || obj.Kind == NodeMatView {
+		return "", fmt.Errorf("达梦视图 DDL 导出尚未完整支持")
+	}
 	structure, err := a.Describe(ctx, obj)
 	if err != nil {
 		return "", err
 	}
 	qualified := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
-	var lines []string
-	lines = append(lines, fmt.Sprintf("CREATE TABLE %s (", qualified))
-	for i, col := range structure.Columns {
+	parts := make([]string, 0, len(structure.Columns)+1)
+	for _, col := range structure.Columns {
 		line := fmt.Sprintf("    %s %s", a.QuoteIdentifier(col.Name), col.DataType)
 		if !col.IsNullable {
 			line += " NOT NULL"
@@ -198,13 +239,19 @@ func (a *dmAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
 		if col.DefaultValue != "" {
 			line += " DEFAULT " + col.DefaultValue
 		}
-		if i < len(structure.Columns)-1 {
-			line += ","
-		}
-		lines = append(lines, line)
+		parts = append(parts, line)
 	}
-	lines = append(lines, ");")
-	return strings.Join(lines, "\n"), nil
+	for _, c := range structure.Constraints {
+		if c.Type == "primary" && len(c.Columns) > 0 {
+			quoted := make([]string, len(c.Columns))
+			for i, col := range c.Columns {
+				quoted[i] = a.QuoteIdentifier(col)
+			}
+			parts = append(parts, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)", a.QuoteIdentifier(c.Name), strings.Join(quoted, ", ")))
+			break
+		}
+	}
+	return fmt.Sprintf("CREATE TABLE %s (\n%s\n);", qualified, strings.Join(parts, ",\n")), nil
 }
 
 func (a *dmAdapter) SQLTemplate(obj MetadataNode, operation string) (string, error) {
@@ -266,7 +313,8 @@ func (a *dmAdapter) NormalizeError(err error) DatabaseError {
 
 func (a *dmAdapter) Capabilities() Capabilities {
 	return Capabilities{
-		DDLSupported:        true,  // 基础 DDL 生成
+		// 视图 DDL 与完整索引/外键导出仍不完整；表级基础 DDL+PK 可用
+		DDLSupported:        true,
 		ImportSupported:     true,
 		ReadOnlyTxSupported: true,
 		StoredProcSupported: true,

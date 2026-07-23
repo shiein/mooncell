@@ -151,6 +151,10 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 				writeErr(w, http.StatusConflict, apiErr.Code, apiErr.Message)
 				return
 			}
+			if apiErr.Code == "WORKSPACE_CLOSED" {
+				writeErr(w, http.StatusGone, apiErr.Code, apiErr.Message)
+				return
+			}
 			writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
 			return
 		}
@@ -261,6 +265,10 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	if err := ws.ensureOpenLocked(); err != nil {
+		writeErr(w, http.StatusGone, "WORKSPACE_CLOSED", err.Error())
+		return
+	}
 	if !ws.AutoCommit {
 		writeErr(w, http.StatusConflict, "AUTO_COMMIT_REQUIRED", "已关闭自动提交时不可就地编辑，请开启自动提交或使用 SQL")
 		return
@@ -272,9 +280,12 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.LastActivity = time.Now()
 
-	result, err := ApplyRowEdits(r.Context(), ws.Adapter, body.Schema, body.Table, pks, body)
+	ectx, cancel := context.WithTimeout(r.Context(), QueryTimeout)
+	defer cancel()
+	result, err := ApplyRowEdits(ectx, ws.Adapter, body.Schema, body.Table, pks, body)
 	if err != nil {
-		s.auditLog(user, "就地编辑", body.Schema+"."+body.Table, "失败·"+err.Error())
+		// 审计不落库原始错误文本
+		s.auditLog(user, "就地编辑", body.Schema+"."+body.Table, "失败")
 		writeErr(w, http.StatusBadRequest, "ROW_EDIT_ERROR", err.Error())
 		return
 	}
@@ -381,16 +392,23 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ectx, cancel := context.WithTimeout(r.Context(), ExportTimeout)
+	defer cancel()
+
 	switch body.Format {
 	case "csv":
-		if err := ExportCSV(r.Context(), adapter, sqlText, w); err != nil {
+		if err := ExportCSV(ectx, adapter, sqlText, w); err != nil {
 			if _, ok := err.(*ErrExportLimit); ok {
 				return
+			}
+			// 若尚未写入响应体，ExportCSV 会返回错误；已写头则无法改状态
+			if !headersSentHint(err) {
+				writeErr(w, http.StatusBadRequest, "EXPORT_ERROR", err.Error())
 			}
 			return
 		}
 	case "xlsx":
-		if err := ExportXLSX(r.Context(), adapter, sqlText, w); err != nil {
+		if err := ExportXLSX(ectx, adapter, sqlText, w); err != nil {
 			if lim, ok := err.(*ErrExportLimit); ok {
 				writeErr(w, http.StatusRequestEntityTooLarge, "EXPORT_LIMIT", lim.Reason)
 				return
@@ -401,6 +419,11 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: "+body.Format)
 	}
+}
+
+// headersSentHint 预留：CSV 成功写头后的错误无法再 JSON 化。
+func headersSentHint(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "headers_sent")
 }
 
 // DeleteWorkspaceHandler 处理 DELETE /api/data-resources/{id}/workspaces/{workspaceId}

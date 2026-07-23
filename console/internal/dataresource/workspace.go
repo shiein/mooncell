@@ -40,7 +40,18 @@ type Workspace struct {
 	Adapter      DataSourceAdapter
 	LastSQL      string     // 最近一次成功的查询（供全量导出重放）
 	LastActivity time.Time  // 最近活动时间（用于超时回滚）
+	closed       bool       // 已失效/删除：持指针的迟到请求必须拒绝
 	mu           sync.Mutex // 串行化同一工作台的请求
+}
+
+// errWorkspaceClosed 工作台已从管理器移除或被失效。
+var errWorkspaceClosed = fmt.Errorf("工作台已关闭或失效")
+
+func (ws *Workspace) ensureOpenLocked() error {
+	if ws.closed {
+		return errWorkspaceClosed
+	}
+	return nil
 }
 
 // WorkspaceManager 管理所有工作台。
@@ -89,7 +100,7 @@ func (wm *WorkspaceManager) GetWorkspace(id string) (*Workspace, bool) {
 }
 
 // DeleteWorkspace 删除工作台。有活动事务时回滚。
-// 必须持 ws.mu 再动 Tx，避免与 ExecuteInWorkspace/Commit 并发 Rollback/Query。
+// 先标记 closed，再从 map 移除，最后在 ws.mu 下回滚，避免已取指针的请求在失效后仍 BeginTx。
 func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	wm.mu.Lock()
 	ws, ok := wm.workspaces[id]
@@ -99,7 +110,9 @@ func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	}
 	delete(wm.workspaces, id)
 	wm.mu.Unlock()
+
 	ws.mu.Lock()
+	ws.closed = true
 	if ws.Tx != nil {
 		ws.Tx.Rollback()
 		ws.Tx = nil
@@ -228,7 +241,15 @@ func (wm *WorkspaceManager) CloseAll() {
 func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit int) (*ExecutionResult, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	if err := ws.ensureOpenLocked(); err != nil {
+		return nil, &APIError{Code: "WORKSPACE_CLOSED", Message: err.Error()}
+	}
 	ws.LastActivity = time.Now()
+
+	// 服务端执行期限，防止慢查询占满连接池
+	qctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	defer cancel()
+	ctx = qctx
 
 	// 校验单语句
 	if err := ValidateSingleStatement(sqlText); err != nil {
@@ -309,16 +330,18 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 			return err
 		}
 
-		// 计数（同一只读事务）
+		// 计数：更短独立超时，失败不影响数据返回
 		countSQL, err := ws.Adapter.CountSQL(sqlText)
 		if err == nil {
+			cctx, ccancel := context.WithTimeout(ctx, CountTimeout)
 			var total int
-			if err := tx.QueryRow(ctx, countSQL).Scan(&total); err == nil {
+			if err := tx.QueryRow(cctx, countSQL).Scan(&total); err == nil {
 				result.Total = total
 				result.TotalStatus = "available"
 			} else {
 				result.TotalStatus = "unavailable"
 			}
+			ccancel()
 		} else {
 			result.TotalStatus = "unavailable"
 		}
@@ -411,6 +434,9 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 func (wm *WorkspaceManager) CommitWorkspace(ws *Workspace) error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	if err := ws.ensureOpenLocked(); err != nil {
+		return err
+	}
 	ws.LastActivity = time.Now()
 	if ws.Tx == nil {
 		return fmt.Errorf("无活动事务可提交")
@@ -429,6 +455,9 @@ func (wm *WorkspaceManager) CommitWorkspace(ws *Workspace) error {
 func (wm *WorkspaceManager) RollbackWorkspace(ws *Workspace) error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	if err := ws.ensureOpenLocked(); err != nil {
+		return err
+	}
 	ws.LastActivity = time.Now()
 	if ws.Tx == nil {
 		return nil // 无事务可回滚，幂等
@@ -447,6 +476,9 @@ func (wm *WorkspaceManager) RollbackWorkspace(ws *Workspace) error {
 func (wm *WorkspaceManager) SetAutoCommit(ws *Workspace, autoCommit bool) error {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	if err := ws.ensureOpenLocked(); err != nil {
+		return err
+	}
 	ws.LastActivity = time.Now()
 	if autoCommit && ws.Tx != nil {
 		return fmt.Errorf("存在活动事务，不能开启自动提交，请先提交或回滚")
