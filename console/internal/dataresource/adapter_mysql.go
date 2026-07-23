@@ -33,7 +33,35 @@ func (a *mysqlAdapter) Begin(ctx context.Context, readOnly bool) (Transaction, e
 	return &pgTx{tx: tx}, nil // MySQL 的 *sql.Tx 与 PG 接口一致，复用 pgTx
 }
 
-// Children: root → databases, schema(database) → tables/views/functions/procedures/triggers
+// boundDatabase 返回本资源绑定的唯一数据库（一资源一库）。
+// 优先配置的 defaultSchema/database_name，否则 DATABASE()。
+func (a *mysqlAdapter) boundDatabase(ctx context.Context) (string, error) {
+	if a.schema != "" {
+		return a.schema, nil
+	}
+	var db string
+	if err := a.db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&db); err != nil {
+		return "", fmt.Errorf("获取当前数据库失败: %w", err)
+	}
+	if db == "" {
+		return "", fmt.Errorf("资源未绑定数据库")
+	}
+	return db, nil
+}
+
+// ensureBoundSchema 拒绝跨库元数据访问。
+func (a *mysqlAdapter) ensureBoundSchema(ctx context.Context, schema string) error {
+	bound, err := a.boundDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	if schema != "" && schema != bound {
+		return fmt.Errorf("禁止访问其他数据库")
+	}
+	return nil
+}
+
+// Children: root → 仅绑定库, schema(database) → tables/views/functions/procedures/triggers
 func (a *mysqlAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
 	switch parent.Kind {
 	case NodeRoot, "":
@@ -45,26 +73,20 @@ func (a *mysqlAdapter) Children(ctx context.Context, parent MetadataNode) ([]Met
 }
 
 func (a *mysqlAdapter) listDatabases(ctx context.Context) ([]MetadataNode, error) {
-	rows, err := a.db.QueryContext(ctx, `
-		SELECT schema_name FROM information_schema.schemata
-		WHERE schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
-		ORDER BY schema_name`)
+	// 设计：一个数据资源只绑定一个数据库，禁止通过树切换到其他数据库
+	name, err := a.boundDatabase(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("查询数据库失败: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	var out []MetadataNode
-	for rows.Next() {
-		var name string
-		rows.Scan(&name)
-		n := MetadataNode{Kind: NodeSchema, Schema: name, Name: name}
-		n.ID = n.EncodeID()
-		out = append(out, n)
-	}
-	return out, rows.Err()
+	n := MetadataNode{Kind: NodeSchema, Schema: name, Name: name}
+	n.ID = n.EncodeID()
+	return []MetadataNode{n}, nil
 }
 
 func (a *mysqlAdapter) listTables(ctx context.Context, dbName string) ([]MetadataNode, error) {
+	if err := a.ensureBoundSchema(ctx, dbName); err != nil {
+		return nil, err
+	}
 	var out []MetadataNode
 	// 表
 	tableRows, err := a.db.QueryContext(ctx, `
@@ -148,6 +170,9 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 	structure := ObjectStructure{
 		Columns: []ColumnInfo{}, Constraints: []ConstraintInfo{}, Indexes: []IndexInfo{},
 	}
+	if err := a.ensureBoundSchema(ctx, obj.Schema); err != nil {
+		return structure, err
+	}
 	// 字段
 	colRows, err := a.db.QueryContext(ctx, `
 		SELECT column_name, column_type, is_nullable, column_default, column_comment
@@ -217,6 +242,9 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 }
 
 func (a *mysqlAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
+	if err := a.ensureBoundSchema(ctx, obj.Schema); err != nil {
+		return "", err
+	}
 	// MySQL 可用 SHOW CREATE TABLE 获取完整 DDL
 	var ddl sql.NullString
 	err := a.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+a.QuoteIdentifier(obj.Schema)+"."+a.QuoteIdentifier(obj.Name)).Scan(&ddl, &ddl)
@@ -227,6 +255,10 @@ func (a *mysqlAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error
 }
 
 func (a *mysqlAdapter) SQLTemplate(obj MetadataNode, operation string) (string, error) {
+	// SQLTemplate 无 ctx：若配置了绑定库则校验；未配置时由后续执行路径约束
+	if a.schema != "" && obj.Schema != "" && obj.Schema != a.schema {
+		return "", fmt.Errorf("禁止访问其他数据库")
+	}
 	qualified := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
 	switch operation {
 	case "SELECT":
