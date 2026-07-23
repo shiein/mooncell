@@ -92,7 +92,7 @@ func hasWhereClause(sqlText string) bool {
 	return strings.Contains(cleaned, " WHERE ")
 }
 
-// stripStringLiteralsAndComments 移除 SQL 中的字符串字面量和注释，避免误判 WHERE。
+// stripStringLiteralsAndComments 移除 SQL 中的字符串字面量、注释与 dollar quote，避免误判关键字。
 func stripStringLiteralsAndComments(sql string) string {
 	var sb strings.Builder
 	r := []rune(sql)
@@ -108,12 +108,89 @@ func stripStringLiteralsAndComments(sql string) string {
 			i = skipLineComment(r, i)
 		case c == '/' && i+1 < len(r) && r[i+1] == '*':
 			i = skipBlockComment(r, i)
+		case c == '$':
+			if ni, ok := trySkipDollarQuote(r, i); ok {
+				i = ni
+				// dollar quote 内容整段丢弃
+			} else {
+				sb.WriteRune(c)
+			}
 		default:
 			sb.WriteRune(c)
 		}
 		i++
 	}
 	return sb.String()
+}
+
+// containsSQLKeyword 在已清理文本中查找独立关键字（前后为非标识符字符）。
+func containsSQLKeyword(upperCleaned, keyword string) bool {
+	kw := strings.ToUpper(keyword)
+	start := 0
+	for {
+		idx := strings.Index(upperCleaned[start:], kw)
+		if idx < 0 {
+			return false
+		}
+		abs := start + idx
+		beforeOK := abs == 0 || !isIdentRune(rune(upperCleaned[abs-1]))
+		after := abs + len(kw)
+		afterOK := after >= len(upperCleaned) || !isIdentRune(rune(upperCleaned[after]))
+		if beforeOK && afterOK {
+			return true
+		}
+		start = abs + 1
+	}
+}
+
+func isIdentRune(c rune) bool {
+	return unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_'
+}
+
+// classifyWithCTE 将 WITH 开头的语句分类。
+// 数据修改 CTE（体内或最终语句含 INSERT/UPDATE/DELETE/MERGE/TRUNCATE）按写类型处理，
+// 避免一律标 SELECT 导致危险确认/写审计旁路，或自动提交误走只读事务。
+func classifyWithCTE(sql string) StatementType {
+	cleaned := strings.ToUpper(stripStringLiteralsAndComments(sql))
+	// 按出现顺序取第一个写关键字；均无则只读 CTE
+	type hit struct {
+		pos int
+		t   StatementType
+	}
+	var best *hit
+	for _, pair := range []struct {
+		word string
+		t    StatementType
+	}{
+		{"INSERT", StmtInsert},
+		{"UPDATE", StmtUpdate},
+		{"DELETE", StmtDelete},
+		{"MERGE", StmtMerge},
+		{"TRUNCATE", StmtTruncate},
+	} {
+		start := 0
+		for {
+			idx := strings.Index(cleaned[start:], pair.word)
+			if idx < 0 {
+				break
+			}
+			abs := start + idx
+			beforeOK := abs == 0 || !isIdentRune(rune(cleaned[abs-1]))
+			after := abs + len(pair.word)
+			afterOK := after >= len(cleaned) || !isIdentRune(rune(cleaned[after]))
+			if beforeOK && afterOK {
+				if best == nil || abs < best.pos {
+					best = &hit{pos: abs, t: pair.t}
+				}
+				break
+			}
+			start = abs + 1
+		}
+	}
+	if best != nil {
+		return best.t
+	}
+	return StmtSelect
 }
 
 // ClassifySQL 分析 SQL 文本，返回语句类型。
@@ -127,8 +204,10 @@ func ClassifySQL(sql string) StatementType {
 	upper := strings.ToUpper(first)
 
 	switch upper {
-	case "SELECT", "WITH", "VALUES", "TABLE":
+	case "SELECT", "VALUES", "TABLE":
 		return StmtSelect
+	case "WITH":
+		return classifyWithCTE(s)
 	case "INSERT":
 		return StmtInsert
 	case "UPDATE":
