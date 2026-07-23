@@ -274,7 +274,8 @@ func (a *mysqlAdapter) SQLTemplate(obj MetadataNode, operation string) (string, 
 }
 
 func (a *mysqlAdapter) PageSQL(query string, limit, offset int) (string, error) {
-	return fmt.Sprintf("%s LIMIT %d OFFSET %d", query, limit, offset), nil
+	q := strings.TrimRight(strings.TrimSpace(query), ";")
+	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil
 }
 
 func (a *mysqlAdapter) CountSQL(query string) (string, error) {

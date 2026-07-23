@@ -372,7 +372,8 @@ func (a *pgAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 
 // PageSQL 包装查询为分页查询。
 func (a *pgAdapter) PageSQL(query string, limit, offset int) (string, error) {
-	return fmt.Sprintf("%s LIMIT %d OFFSET %d", query, limit, offset), nil
+	q := strings.TrimRight(strings.TrimSpace(query), ";")
+	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil
 }
 
 // CountSQL 包装查询为计数查询。

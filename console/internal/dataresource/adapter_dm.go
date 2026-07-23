@@ -235,7 +235,8 @@ func (a *dmAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 
 func (a *dmAdapter) PageSQL(query string, limit, offset int) (string, error) {
 	// DM 支持 LIMIT/OFFSET（8.1+），也支持 rownum。保守用 LIMIT/OFFSET。
-	return fmt.Sprintf("%s LIMIT %d OFFSET %d", query, limit, offset), nil
+	q := strings.TrimRight(strings.TrimSpace(query), ";")
+	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil
 }
 
 func (a *dmAdapter) CountSQL(query string) (string, error) {
