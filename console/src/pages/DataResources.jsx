@@ -6,8 +6,64 @@ import { PageHead } from '../components/Shell.jsx';
 import { useAsync } from '../lib/async.js';
 import {
   listDataResources, listDrivers, createDataResource, updateDataResource,
-  deleteDataResource, testDataResource,
+  deleteDataResource, testDataResource, testDataResourceConfig,
 } from '../lib/dataresource-api.js';
+
+const EMPTY_RESOURCE_FORM = {
+  name: '',
+  dbType: 'pgx',
+  host: '127.0.0.1',
+  port: 5432,
+  databaseName: '',
+  defaultSchema: 'public',
+  username: '',
+  password: '',
+  sslMode: 'disable',
+};
+
+/** 合并受控 state 与 DOM（兼容浏览器自动填充未触发 onChange 的情况） */
+function mergeResourceForm(state, formEl) {
+  const out = { ...EMPTY_RESOURCE_FORM, ...state };
+  if (!formEl) return out;
+  const fd = new FormData(formEl);
+  for (const key of ['name', 'dbType', 'host', 'port', 'databaseName', 'defaultSchema', 'username', 'password', 'sslMode']) {
+    if (!fd.has(key)) continue;
+    const v = fd.get(key);
+    if (typeof v === 'string') out[key] = v;
+  }
+  return out;
+}
+
+function validateResourceForm(f, { requirePassword }) {
+  const missing = [];
+  if (!String(f.name || '').trim()) missing.push('名称');
+  if (!String(f.host || '').trim()) missing.push('主机');
+  if (!String(f.databaseName || '').trim()) missing.push('数据库名');
+  if (!String(f.username || '').trim()) missing.push('用户名');
+  if (requirePassword && !String(f.password || '')) missing.push('密码');
+  const port = Number(f.port);
+  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+    return { ok: false, message: '端口必须在 1–65535 范围内' };
+  }
+  if (missing.length) {
+    return { ok: false, message: `请填写：${missing.join('、')}` };
+  }
+  return { ok: true };
+}
+
+function resourcePayloadFromForm(f) {
+  return {
+    name: String(f.name || '').trim(),
+    dbType: f.dbType || 'pgx',
+    host: String(f.host || '').trim(),
+    port: Number(f.port) || 5432,
+    databaseName: String(f.databaseName || '').trim(),
+    defaultSchema: String(f.defaultSchema || '').trim(),
+    username: String(f.username || '').trim(),
+    sslMode: f.sslMode || 'disable',
+    password: f.password || '',
+  };
+}
 
 const DB_TYPE_LABEL = {
   pgx: 'PostgreSQL',
@@ -133,12 +189,16 @@ function DataResourcesPage({ onOpenWorkspace }) {
 
 function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
   const isEdit = !!(resource && resource.id);
-  const [form, setForm] = React.useState({});
+  const formRef = React.useRef(null);
+  const [form, setForm] = React.useState(EMPTY_RESOURCE_FORM);
   const [busy, setBusy] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
+
   React.useEffect(() => {
     if (!open) return;
     if (isEdit) {
       setForm({
+        ...EMPTY_RESOURCE_FORM,
         name: resource.name || '',
         dbType: resource.dbType || 'pgx',
         host: resource.host || '',
@@ -150,38 +210,69 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
         sslMode: resource.sslMode || 'disable',
       });
     } else {
-      setForm({
-        name: '', dbType: 'pgx', host: '127.0.0.1', port: 5432,
-        databaseName: '', defaultSchema: 'public', username: '', password: '', sslMode: 'disable',
-      });
+      setForm({ ...EMPTY_RESOURCE_FORM });
     }
     setBusy(false);
+    setTesting(false);
   }, [open, resource, isEdit]);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  const submit = async () => {
-    if (!form.name?.trim() || !form.host?.trim() || !form.databaseName?.trim() || !form.username?.trim()) {
-      toast('请填写名称、主机、数据库与用户名', { tone: 'warn' });
+  const currentForm = () => mergeResourceForm(form, formRef.current);
+
+  const onTestConfig = async () => {
+    const f = currentForm();
+    // 编辑且未改密码：用已保存资源测连接；新建/改了密码：用表单配置测
+    if (isEdit && !String(f.password || '')) {
+      setTesting(true);
+      try {
+        const res = await testDataResource(resource.id);
+        if (res.ok) {
+          toast(`连接成功 · ${res.latencyMs || 0}ms` + (res.readOnlyTxSupported ? ' · 只读事务可用' : ' · 只读事务不可用'));
+        } else {
+          toast(res.error || res.errorCode || '连接失败', { tone: 'error' });
+        }
+      } catch (e) {
+        toast(e.message || '测试失败', { tone: 'error' });
+      } finally {
+        setTesting(false);
+      }
       return;
     }
-    if (!isEdit && !form.password) {
-      toast('新建时密码不能为空', { tone: 'warn' });
+    const v = validateResourceForm(f, { requirePassword: true });
+    if (!v.ok) {
+      toast(v.message, { tone: 'warn' });
+      return;
+    }
+    const payload = resourcePayloadFromForm(f);
+    setTesting(true);
+    try {
+      const res = await testDataResourceConfig(payload);
+      if (res.ok) {
+        toast(`连接成功 · ${res.latencyMs || 0}ms` + (res.readOnlyTxSupported ? ' · 只读事务可用' : ' · 只读事务不可用'));
+      } else {
+        toast(res.error || res.errorCode || '连接失败', { tone: 'error' });
+      }
+    } catch (e) {
+      toast(e.message || '测试失败', { tone: 'error' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const submit = async () => {
+    const f = currentForm();
+    // 同步 DOM 值回 state，避免自动填充后界面有值但 state 空
+    setForm((prev) => ({ ...prev, ...f }));
+    const v = validateResourceForm(f, { requirePassword: !isEdit });
+    if (!v.ok) {
+      toast(v.message, { tone: 'warn' });
       return;
     }
     setBusy(true);
     try {
-      const payload = {
-        name: form.name.trim(),
-        dbType: form.dbType,
-        host: form.host.trim(),
-        port: Number(form.port) || 5432,
-        databaseName: form.databaseName.trim(),
-        defaultSchema: (form.defaultSchema || '').trim(),
-        username: form.username.trim(),
-        sslMode: form.sslMode || 'disable',
-      };
-      if (form.password) payload.password = form.password;
+      const payload = resourcePayloadFromForm(f);
+      if (!payload.password) delete payload.password;
       if (isEdit) await updateDataResource(resource.id, payload);
       else await createDataResource(payload);
       toast(isEdit ? '已更新资源' : '已创建资源');
@@ -196,42 +287,64 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
     ? drivers
     : ['pgx', 'mysql', 'dm', 'kingbase'].map((id) => ({ id, label: DB_TYPE_LABEL[id] }));
 
+  const actionBusy = busy || testing;
+
   return (
     <Dialog open={open} onClose={onClose} width={520}
       title={isEdit ? `编辑 · ${resource.name}` : '新建数据资源'}
-      desc="连接配置不开放任意 DSN；保存后需测试连接才可授予只读权限"
+      desc="连接配置不开放任意 DSN；可先测试连接，保存后也需测试成功才可授予只读权限"
       foot={<React.Fragment>
-        <Btn variant="ghost" onClick={onClose}>取消</Btn>
-        <Btn variant="primary" icon="check" disabled={busy} onClick={submit}>{busy ? <Spinner size={12} /> : '保存'}</Btn>
+        <Btn variant="ghost" onClick={onClose} disabled={actionBusy}>取消</Btn>
+        <Btn variant="outline" icon="activity" disabled={actionBusy} onClick={onTestConfig}>
+          {testing ? <Spinner size={12} /> : '测试连接'}
+        </Btn>
+        <Btn variant="primary" icon="check" disabled={actionBusy} onClick={submit}>
+          {busy ? <Spinner size={12} /> : '保存'}
+        </Btn>
       </React.Fragment>}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <Field label="名称"><input className="input" value={form.name || ''} onChange={(e) => set('name', e.target.value)} /></Field>
+      <form
+        ref={formRef}
+        autoComplete="off"
+        onSubmit={(e) => { e.preventDefault(); submit(); }}
+        style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+      >
+        <Field label="名称">
+          <input className="input" name="name" value={form.name || ''} onChange={(e) => set('name', e.target.value)} autoComplete="off" />
+        </Field>
         <Field label="数据库类型">
-          <select className="input" value={form.dbType || 'pgx'} onChange={(e) => set('dbType', e.target.value)}>
+          <select className="input" name="dbType" value={form.dbType || 'pgx'} onChange={(e) => set('dbType', e.target.value)}>
             {opts.map((d) => (
               <option key={d.id} value={d.id}>{d.label}{d.experimental ? '（实验性）' : ''}</option>
             ))}
           </select>
         </Field>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px', gap: 10 }}>
-          <Field label="主机"><input className="input" value={form.host || ''} onChange={(e) => set('host', e.target.value)} /></Field>
-          <Field label="端口"><input className="input" type="number" value={form.port || ''} onChange={(e) => set('port', e.target.value)} /></Field>
+          <Field label="主机">
+            <input className="input" name="host" value={form.host || ''} onChange={(e) => set('host', e.target.value)} autoComplete="off" />
+          </Field>
+          <Field label="端口">
+            <input className="input" name="port" type="number" value={form.port ?? ''} onChange={(e) => set('port', e.target.value)} />
+          </Field>
         </div>
-        <Field label="数据库名"><input className="input" value={form.databaseName || ''} onChange={(e) => set('databaseName', e.target.value)} /></Field>
-        <Field label="默认 Schema" hint="MySQL 可留空；PG 默认 public">
-          <input className="input" value={form.defaultSchema || ''} onChange={(e) => set('defaultSchema', e.target.value)} />
+        <Field label="数据库名" hint="必填 · 目标 database / catalog，不是 schema">
+          <input className="input" name="databaseName" value={form.databaseName || ''} onChange={(e) => set('databaseName', e.target.value)} autoComplete="off" />
         </Field>
-        <Field label="用户名"><input className="input" value={form.username || ''} onChange={(e) => set('username', e.target.value)} autoComplete="off" /></Field>
+        <Field label="默认 Schema" hint="可选 · MySQL 可留空；PostgreSQL 常用 public">
+          <input className="input" name="defaultSchema" value={form.defaultSchema || ''} onChange={(e) => set('defaultSchema', e.target.value)} autoComplete="off" />
+        </Field>
+        <Field label="用户名">
+          <input className="input" name="username" value={form.username || ''} onChange={(e) => set('username', e.target.value)} autoComplete="off" />
+        </Field>
         <Field label={isEdit ? '密码（留空保留原密码）' : '密码'}>
-          <input className="input" type="password" value={form.password || ''} onChange={(e) => set('password', e.target.value)} autoComplete="new-password" />
+          <input className="input" name="password" type="password" value={form.password || ''} onChange={(e) => set('password', e.target.value)} autoComplete="new-password" />
         </Field>
         <Field label="SSL">
-          <select className="input" value={form.sslMode || 'disable'} onChange={(e) => set('sslMode', e.target.value)}>
+          <select className="input" name="sslMode" value={form.sslMode || 'disable'} onChange={(e) => set('sslMode', e.target.value)}>
             <option value="disable">disable</option>
             <option value="require">require</option>
           </select>
         </Field>
-      </div>
+      </form>
     </Dialog>
   );
 }
