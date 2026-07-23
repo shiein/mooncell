@@ -341,7 +341,8 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 	}
 	placeholders := make([]string, len(targetCols))
 	for i := range placeholders {
-		placeholders[i] = "?"
+		// 1-based；PG 系为 $n，MySQL/DM 为 ?
+		placeholders[i] = adapter.Placeholder(i + 1)
 	}
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		qualified,

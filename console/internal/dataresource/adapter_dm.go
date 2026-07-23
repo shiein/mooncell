@@ -247,6 +247,11 @@ func (a *dmAdapter) QuoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
+// Placeholder 返回达梦风格 ? 占位符。
+func (a *dmAdapter) Placeholder(n int) string {
+	return "?"
+}
+
 func (a *dmAdapter) NormalizeError(err error) DatabaseError {
 	if err == nil {
 		return DatabaseError{}

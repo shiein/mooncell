@@ -387,6 +387,11 @@ func (a *pgAdapter) QuoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
+// Placeholder 返回 PostgreSQL 风格 $n 占位符（1-based）。
+func (a *pgAdapter) Placeholder(n int) string {
+	return fmt.Sprintf("$%d", n)
+}
+
 // NormalizeError 归一化 PostgreSQL 错误。
 func (a *pgAdapter) NormalizeError(err error) DatabaseError {
 	if err == nil {

@@ -152,6 +152,9 @@ type DataSourceAdapter interface {
 	CountSQL(sql string) (string, error)
 	// QuoteIdentifier 安全引用标识符。
 	QuoteIdentifier(name string) string
+	// Placeholder 返回第 n 个参数占位符（1-based）。
+	// PostgreSQL 系为 $n，MySQL/达梦为 ?。
+	Placeholder(n int) string
 	// NormalizeError 归一化数据库错误。
 	NormalizeError(error) DatabaseError
 	// Capabilities 返回适配器能力声明。

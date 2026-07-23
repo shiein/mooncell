@@ -254,6 +254,11 @@ func (a *mysqlAdapter) QuoteIdentifier(name string) string {
 	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
 
+// Placeholder 返回 MySQL 风格 ? 占位符。
+func (a *mysqlAdapter) Placeholder(n int) string {
+	return "?"
+}
+
 func (a *mysqlAdapter) NormalizeError(err error) DatabaseError {
 	if err == nil {
 		return DatabaseError{}
