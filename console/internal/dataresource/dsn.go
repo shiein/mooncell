@@ -53,7 +53,8 @@ func mysqlDSN(r DataResource, password string) string {
 	cfg.Addr = fmt.Sprintf("%s:%d", r.Host, r.Port)
 	cfg.DBName = r.DatabaseName
 	cfg.ParseTime = true
-	cfg.InterpolateParams = true
+	// 默认关闭客户端拼参：走二进制协议预编译绑定，避免扩大转义边界依赖。
+	cfg.InterpolateParams = false
 	if r.SSLMode == "require" {
 		cfg.TLSConfig = "true"
 	} else {
