@@ -39,12 +39,7 @@ func (s *Service) getAdapterForRequest(w http.ResponseWriter, r *http.Request) (
 		writeErr(w, http.StatusInternalServerError, "POOL_ERROR", "获取数据库连接失败")
 		return nil, "", false
 	}
-	// MySQL 的 schema 即 database；未填 default_schema 时用 database_name 绑定一库
-	schema := res.DefaultSchema
-	if schema == "" {
-		schema = res.DatabaseName
-	}
-	adapter, err := NewAdapter(db, res.DBType, schema)
+	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "ADAPTER_ERROR", "创建适配器失败")
 		return nil, "", false

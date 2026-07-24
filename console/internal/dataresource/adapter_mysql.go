@@ -319,7 +319,8 @@ func (a *mysqlAdapter) SQLTemplate(obj MetadataNode, operation string) (string, 
 	qualified := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
 	switch operation {
 	case "SELECT":
-		return fmt.Sprintf("SELECT * FROM %s LIMIT 100;", qualified), nil
+		// 不写 LIMIT：行数由服务端隐式分页（默认 100）
+		return fmt.Sprintf("SELECT * FROM %s;", qualified), nil
 	case "INSERT":
 		return fmt.Sprintf("INSERT INTO %s (col1, col2) VALUES (?, ?);", qualified), nil
 	case "UPDATE":

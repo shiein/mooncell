@@ -345,7 +345,7 @@ func SetUserGrantsTx(tx *sql.Tx, username string, grants []DataResourceGrant, gr
 		}
 		if g.AccessMode == AccessRead {
 			if !SupportsReadGrant(testStatus) {
-				return fmt.Errorf("资源未通过只读事务认证，不能授予只读权限（请先成功测试连接且 readOnlyTxSupported=true）: %s", g.ResourceID)
+				return fmt.Errorf("资源未通过只读事务认证，不能授予只读权限（请在数据资源列表点「测试连接」或保存资源后状态为成功且支持只读）")
 			}
 		}
 		if _, err := tx.Exec(`INSERT INTO data_resource_grants (resource_id, username, access_mode, granted_by, granted_at)
@@ -538,11 +538,17 @@ func ValidateInput(input DataResourceInput) error {
 	if input.Port <= 0 || input.Port > 65535 {
 		return errors.New("端口必须在 1-65535 范围内")
 	}
-	if strings.TrimSpace(input.DatabaseName) == "" {
-		return errors.New("数据库名不能为空")
-	}
 	if strings.TrimSpace(input.Username) == "" {
 		return errors.New("用户名不能为空")
+	}
+	// 达梦：实例内只有 schema/用户模式两层，无独立「库」；库名字段可空（用 schema 或用户名）
+	if input.DBType == DriverDM {
+		if strings.TrimSpace(input.DatabaseName) == "" &&
+			strings.TrimSpace(input.DefaultSchema) == "" {
+			// 允许都空：驱动默认以用户名为 schema
+		}
+	} else if strings.TrimSpace(input.DatabaseName) == "" {
+		return errors.New("数据库名不能为空")
 	}
 	if !validSSLMode(input.SSLMode) {
 		return errors.New("SSL 模式只能为 disable 或 require")

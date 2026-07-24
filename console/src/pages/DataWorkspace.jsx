@@ -19,6 +19,9 @@ const TREE_MIN = 180;
 const TREE_MAX = 480;
 const EDITOR_MIN = 120;
 const EDITOR_MAX = 560;
+/** 结果区分页：默认每页 100；展开全部上限 10000（与后端 MaxLimit/ExpandAllMax 对齐） */
+const RESULT_PAGE_SIZE = 100;
+const RESULT_EXPAND_MAX = 10000;
 
 /** schema 节点：MySQL 下是 database（库）；PG/Kingbase/DM 是 schema/owner（模式） */
 function kindLabelFor(kind, dbType) {
@@ -153,11 +156,15 @@ function DataWorkspacePage({ resource, onBack }) {
   const [busy, setBusy] = React.useState(false);
   const [result, setResult] = React.useState(null);
   const [msg, setMsg] = React.useState('');
-  // 结果区就地编辑（仅单表 + 主键 + 写权限）
-  const [editMode, setEditMode] = React.useState(false);
+  // 结果区就地编辑：按行进入（仅单表 + 主键 + 写权限）
+  const [editingRows, setEditingRows] = React.useState(() => new Set()); // 正在编辑的行下标
   const [draftRows, setDraftRows] = React.useState([]); // 与 result.rows 对齐的可编辑副本
   const [deletedRows, setDeletedRows] = React.useState(() => new Set());
   const [editSaving, setEditSaving] = React.useState(false);
+  // 结果分页：offset 由 pageIndex * pageSize；expanded 时 pageSize 变大为全量
+  const [pageIndex, setPageIndex] = React.useState(0);
+  const [pageSize, setPageSize] = React.useState(RESULT_PAGE_SIZE);
+  const [expandedAll, setExpandedAll] = React.useState(false);
   const lastSQLRef = React.useRef('');
   const [tree, setTree] = React.useState([]);
   const [expanded, setExpanded] = React.useState({});
@@ -266,17 +273,25 @@ function DataWorkspacePage({ resource, onBack }) {
   }, [sqlText]);
 
   const resetEditState = React.useCallback((res) => {
-    setEditMode(false);
+    setEditingRows(new Set());
     setDeletedRows(new Set());
     if (res?.rows) {
-      setDraftRows(res.rows.map((row) => row.map((cell) => (cellIsBinary(cell) ? cell : cell))));
+      setDraftRows(res.rows.map((row) => row.slice()));
     } else {
       setDraftRows([]);
     }
   }, []);
 
-  /** @returns {Promise<boolean>} 是否执行成功 */
-  const runSQL = async (confirmed = false, fixedSQL = '', { silentToast = false } = {}) => {
+  /**
+   * 执行 SQL。limit/offset 为服务端隐式分页，不改写编辑器文本。
+   * @returns {Promise<boolean>} 是否执行成功
+   */
+  const runSQL = async (confirmed = false, fixedSQL = '', {
+    silentToast = false,
+    limit = pageSize,
+    offset = pageIndex * pageSize,
+    resetPage = false,
+  } = {}) => {
     const target = fixedSQL || editorTarget().sql;
     if (!wsId || !target) return false;
     const controller = new AbortController();
@@ -284,8 +299,22 @@ function DataWorkspacePage({ resource, onBack }) {
     setBusy(true);
     setMsg('');
     try {
+      // 新查询重置到第一页（除非调用方指定了 offset）
+      let useLimit = limit;
+      let useOffset = offset;
+      if (resetPage) {
+        useOffset = 0;
+        useLimit = RESULT_PAGE_SIZE;
+        setPageIndex(0);
+        setPageSize(RESULT_PAGE_SIZE);
+        setExpandedAll(false);
+      }
       const res = await executeSQL(resource.id, wsId, {
-        sql: target, limit: 100, confirmed, signal: controller.signal,
+        sql: target,
+        limit: useLimit,
+        offset: useOffset,
+        confirmed,
+        signal: controller.signal,
       });
       lastSQLRef.current = target;
       setResult(res);
@@ -302,9 +331,12 @@ function DataWorkspacePage({ resource, onBack }) {
             extra = ' · 不可就地编辑';
           }
         }
-        setMsg(`返回 ${res.returnedRows ?? 0} 行`
-          + (res.totalStatus === 'available' ? ` / 共 ${res.total}` : '')
-          + ` · ${res.durationMs}ms` + extra);
+        const from = (res.offset || 0) + 1;
+        const to = (res.offset || 0) + (res.returnedRows || 0);
+        const totalPart = res.totalStatus === 'available'
+          ? ` · 第 ${from || 0}–${to || 0} 行 / 共 ${res.total} 行`
+          : ` · 本页 ${res.returnedRows ?? 0} 行`;
+        setMsg(`${res.durationMs}ms${totalPart}${extra}`);
       }
       return true;
     } catch (e) {
@@ -372,20 +404,52 @@ function DataWorkspacePage({ resource, onBack }) {
   const canGridEdit = !!(
     canWrite && autoCommit && result?.editable?.primaryKeys?.length && result?.columns?.length
   );
+  const hasPendingEdits = editingRows.size > 0 || deletedRows.size > 0;
   const pkSet = React.useMemo(() => {
     const s = new Set();
     (result?.editable?.primaryKeys || []).forEach((k) => s.add(String(k).toLowerCase()));
     return s;
   }, [result]);
 
-  const beginEdit = () => {
+  /** 点哪行编辑哪行：仅将该行纳入编辑态 */
+  const beginEditRow = (rowIndex) => {
     if (!canGridEdit) return;
-    setDraftRows((result.rows || []).map((row) => row.slice()));
-    setDeletedRows(new Set());
-    setEditMode(true);
+    const orig = result?.rows || [];
+    if (rowIndex < 0 || rowIndex >= orig.length) return;
+    setDraftRows((prev) => {
+      // 以当前 result 为底，保留已在编辑行的草稿
+      const next = orig.map((row, i) => {
+        if (prev[i] && (editingRows.has(i) || i === rowIndex)) {
+          // 新进入的行用原始数据；已在编辑的用草稿
+          if (i === rowIndex && !editingRows.has(i)) return row.slice();
+          return prev[i].slice();
+        }
+        return row.slice();
+      });
+      return next;
+    });
+    setEditingRows((prev) => new Set(prev).add(rowIndex));
   };
 
-  const cancelEdit = () => {
+  const cancelEditRow = (rowIndex) => {
+    setEditingRows((prev) => {
+      const next = new Set(prev);
+      next.delete(rowIndex);
+      return next;
+    });
+    setDeletedRows((prev) => {
+      const next = new Set(prev);
+      next.delete(rowIndex);
+      return next;
+    });
+    setDraftRows((prev) => {
+      const next = prev.map((r) => r.slice());
+      if (result?.rows?.[rowIndex]) next[rowIndex] = result.rows[rowIndex].slice();
+      return next;
+    });
+  };
+
+  const cancelAllEdits = () => {
     resetEditState(result);
   };
 
@@ -393,7 +457,6 @@ function DataWorkspacePage({ resource, onBack }) {
     setDraftRows((rows) => {
       const next = rows.map((r) => r.slice());
       if (!next[rowIndex]) return rows;
-      // 保留空字符串，不自动变 NULL
       next[rowIndex][colIndex] = value;
       return next;
     });
@@ -408,11 +471,15 @@ function DataWorkspacePage({ resource, onBack }) {
     });
   };
 
-  const toggleDeleteRow = (rowIndex) => {
+  const markDeleteRow = (rowIndex) => {
+    beginEditRow(rowIndex);
+    setDeletedRows((prev) => new Set(prev).add(rowIndex));
+  };
+
+  const unmarkDeleteRow = (rowIndex) => {
     setDeletedRows((prev) => {
       const next = new Set(prev);
-      if (next.has(rowIndex)) next.delete(rowIndex);
-      else next.add(rowIndex);
+      next.delete(rowIndex);
       return next;
     });
   };
@@ -425,7 +492,10 @@ function DataWorkspacePage({ resource, onBack }) {
     const updates = [];
     const deletes = [];
 
-    for (let ri = 0; ri < orig.length; ri += 1) {
+    // 只处理进入过编辑态或标记删除的行
+    const touch = new Set([...editingRows, ...deletedRows]);
+    for (const ri of touch) {
+      if (ri < 0 || ri >= orig.length) continue;
       const keys = {};
       pks.forEach((pk) => {
         const ci = cols.findIndex((c) => String(c).toLowerCase() === String(pk).toLowerCase());
@@ -435,6 +505,7 @@ function DataWorkspacePage({ resource, onBack }) {
         deletes.push({ keys });
         continue;
       }
+      if (!editingRows.has(ri)) continue;
       const set = {};
       const old = {};
       let changed = false;
@@ -442,9 +513,8 @@ function DataWorkspacePage({ resource, onBack }) {
         if (pkSet.has(String(col).toLowerCase())) return;
         if (cellIsBinary(orig[ri][ci])) return;
         const before = orig[ri][ci];
-        let after = draftRows[ri]?.[ci];
+        const after = draftRows[ri]?.[ci];
         if (cellIsBinary(after)) return;
-        // 比较：null 与 '' 不同
         const same = (before == null && after == null)
           || (before != null && after != null && String(before) === String(after));
         if (!same) {
@@ -479,8 +549,8 @@ function DataWorkspacePage({ resource, onBack }) {
         deletes,
       });
       toast(`已保存 · 更新 ${res.updated || 0} · 删除 ${res.deleted || 0}`);
-      setEditMode(false);
-      // 刷新与保存拆开错误边界，避免“已提交却提示保存失败”
+      setEditingRows(new Set());
+      setDeletedRows(new Set());
       if (lastSQLRef.current) {
         const ok = await runSQL(false, lastSQLRef.current, { silentToast: true });
         if (!ok) {
@@ -537,6 +607,75 @@ function DataWorkspacePage({ resource, onBack }) {
       }
     } catch (e) {
       toast(e.message || '生成模板失败', { tone: 'error' });
+    }
+  };
+
+  /** 查看数据：生成 SELECT（无 LIMIT 文本）并自动执行（服务端隐式分页） */
+  const viewData = async (node) => {
+    try {
+      const data = await sqlTemplate(resource.id, node.id, 'SELECT');
+      const sql = (data.sql || data.template || '').trim();
+      if (!sql) {
+        toast('无法生成查询', { tone: 'error' });
+        return;
+      }
+      setSqlText(sql);
+      setActiveSaved(null);
+      await runSQL(false, sql, { resetPage: true });
+    } catch (e) {
+      toast(e.message || '查看数据失败', { tone: 'error' });
+    }
+  };
+
+  const goResultPage = async (nextIndex) => {
+    if (!lastSQLRef.current || busy) return;
+    if (nextIndex < 0) return;
+    const size = RESULT_PAGE_SIZE;
+    if (result?.totalStatus === 'available') {
+      const totalPages = Math.max(1, Math.ceil((result.total || 0) / size));
+      if (nextIndex >= totalPages) return;
+    }
+    const ok = await runSQL(false, lastSQLRef.current, {
+      limit: size,
+      offset: nextIndex * size,
+    });
+    if (ok) {
+      setPageIndex(nextIndex);
+      setPageSize(size);
+      setExpandedAll(false);
+    }
+  };
+
+  const expandAllOnPage = async () => {
+    if (!lastSQLRef.current || busy) return;
+    if (result?.totalStatus !== 'available') {
+      toast('无法获取总行数，暂不支持展开全部', { tone: 'warn' });
+      return;
+    }
+    const total = result.total || 0;
+    if (total > RESULT_EXPAND_MAX) {
+      toast(`总数 ${total} 超过 ${RESULT_EXPAND_MAX}，不允许在当前页展示全部，请用导出或加条件过滤`, { tone: 'warn' });
+      return;
+    }
+    if (total <= 0) {
+      toast('无数据可展开', { tone: 'warn' });
+      return;
+    }
+    const ok = await runSQL(false, lastSQLRef.current, { limit: total, offset: 0 });
+    if (ok) {
+      setExpandedAll(true);
+      setPageIndex(0);
+      setPageSize(total);
+    }
+  };
+
+  const collapseToPages = async () => {
+    if (!lastSQLRef.current || busy) return;
+    const ok = await runSQL(false, lastSQLRef.current, { limit: RESULT_PAGE_SIZE, offset: 0 });
+    if (ok) {
+      setExpandedAll(false);
+      setPageIndex(0);
+      setPageSize(RESULT_PAGE_SIZE);
     }
   };
 
@@ -724,7 +863,7 @@ function DataWorkspacePage({ resource, onBack }) {
     const leaf = isTreeLeaf(node.kind);
     if (!leaf) return [];
     const actions = [
-      { label: '生成 SELECT', action: () => insertTemplate(node, 'SELECT') },
+      { label: '查看数据', action: () => viewData(node) },
       ...(table ? [{ label: '查看表结构', action: () => showStructure(node) }] : []),
       { label: '查看 DDL', action: () => showDDL(node) },
       { label: '导出 DDL', action: () => downloadDDL(node) },
@@ -750,7 +889,7 @@ function DataWorkspacePage({ resource, onBack }) {
       <div key={id}>
         <div className="dr-tree-node" style={{ paddingLeft: 8 + depth * 13 }}
           onClick={() => (leaf ? null : loadChildren(node))}
-          onDoubleClick={() => leaf && insertTemplate(node, 'SELECT')}
+          onDoubleClick={() => leaf && viewData(node)}
           onContextMenu={(event) => {
             const actions = contextActions(node);
             if (actions.length === 0) return;
@@ -835,7 +974,7 @@ function DataWorkspacePage({ resource, onBack }) {
                 <span className="dr-toolbar-sep" />
               </React.Fragment>
             ) : null}
-            <Btn size="sm" variant="primary" icon="play" disabled={busy || !wsId} onClick={() => runSQL(false)}>执行</Btn>
+            <Btn size="sm" variant="primary" icon="play" disabled={busy || !wsId} onClick={() => runSQL(false, '', { resetPage: true })}>执行</Btn>
             <Btn size="sm" variant="ghost" icon="stop" disabled={!busy}
               onClick={() => runControllerRef.current?.abort()}>取消</Btn>
             <Btn size="sm" variant="ghost" disabled={busy} onClick={toggleAC}>自动提交: {autoCommit ? '开' : '关'}</Btn>
@@ -882,16 +1021,48 @@ function DataWorkspacePage({ resource, onBack }) {
               {canWrite && !autoCommit && result?.editable?.primaryKeys?.length ? (
                 <span style={{ fontSize: 11, color: 'var(--muted-fg)' }} title="关闭自动提交时不可就地编辑">就地编辑已禁用</span>
               ) : null}
-              {canGridEdit && !editMode ? (
-                <Btn size="sm" variant="outline" disabled={busy} onClick={beginEdit}>编辑结果</Btn>
+              {canGridEdit && !hasPendingEdits ? (
+                <span style={{ fontSize: 11, color: 'var(--muted-fg)' }} title="双击行或点「编辑」">点行编辑 · 双击亦可</span>
               ) : null}
-              {editMode ? (
+              {hasPendingEdits ? (
                 <React.Fragment>
-                  <Btn size="sm" variant="ghost" disabled={editSaving} onClick={cancelEdit}>取消</Btn>
+                  <span style={{ fontSize: 11, color: 'var(--muted-fg)' }}>
+                    编辑中 {editingRows.size} 行{deletedRows.size ? ` · 删除 ${deletedRows.size}` : ''}
+                  </span>
+                  <Btn size="sm" variant="ghost" disabled={editSaving} onClick={cancelAllEdits}>取消全部</Btn>
                   <Btn size="sm" variant="primary" disabled={editSaving} onClick={saveEdits}>
                     {editSaving ? <Spinner size={12} /> : '保存变更'}
                   </Btn>
                 </React.Fragment>
+              ) : null}
+              {/* SELECT 结果分页（服务端隐式 limit/offset，SQL 文本不含 LIMIT） */}
+              {result?.columns && result.statementType === 'SELECT' && !hasPendingEdits ? (
+                <div className="dr-result-pager">
+                  <Btn size="sm" variant="ghost" disabled={busy || pageIndex <= 0 || expandedAll}
+                    onClick={() => goResultPage(pageIndex - 1)}>上一页</Btn>
+                  <span className="dr-pager-info">
+                    {expandedAll
+                      ? `全部 ${result.returnedRows || 0} 行`
+                      : result.totalStatus === 'available'
+                        ? `第 ${pageIndex + 1} / ${Math.max(1, Math.ceil((result.total || 0) / RESULT_PAGE_SIZE))} 页`
+                        : `第 ${pageIndex + 1} 页`}
+                  </span>
+                  <Btn size="sm" variant="ghost"
+                    disabled={busy || expandedAll
+                      || (result.totalStatus === 'available'
+                        ? (pageIndex + 1) * RESULT_PAGE_SIZE >= (result.total || 0)
+                        : !result.hasMore)}
+                    onClick={() => goResultPage(pageIndex + 1)}>下一页</Btn>
+                  {!expandedAll ? (
+                    <Btn size="sm" variant="outline" disabled={busy}
+                      title={result.totalStatus === 'available' && result.total > RESULT_EXPAND_MAX
+                        ? `总数超过 ${RESULT_EXPAND_MAX}，不可展开全部`
+                        : '一次加载全部结果（上限 10000）'}
+                      onClick={expandAllOnPage}>展开全部</Btn>
+                  ) : (
+                    <Btn size="sm" variant="outline" disabled={busy} onClick={collapseToPages}>恢复分页</Btn>
+                  )}
+                </div>
               ) : null}
             </div>
             {result?.columns ? (
@@ -899,7 +1070,7 @@ function DataWorkspacePage({ resource, onBack }) {
                 <table className="table">
                   <thead>
                     <tr>
-                      {editMode ? <th style={{ width: 44 }}>删除</th> : null}
+                      {canGridEdit ? <th style={{ width: 88 }}>操作</th> : null}
                       {result.columns.map((column) => (
                         <th key={column}>
                           {column}
@@ -911,22 +1082,52 @@ function DataWorkspacePage({ resource, onBack }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {(editMode ? draftRows : (result.rows || [])).map((row, rowIndex) => {
-                      const markedDel = editMode && deletedRows.has(rowIndex);
+                    {(result.rows || []).map((origRow, rowIndex) => {
+                      const rowEditing = editingRows.has(rowIndex);
+                      const markedDel = deletedRows.has(rowIndex);
+                      const row = rowEditing ? (draftRows[rowIndex] || origRow) : origRow;
                       return (
-                        <tr key={rowIndex} className={markedDel ? 'dr-row-deleted' : undefined}>
-                          {editMode ? (
-                            <td>
-                              <input type="checkbox" checked={!!markedDel}
-                                onChange={() => toggleDeleteRow(rowIndex)}
-                                title="标记删除" />
+                        <tr
+                          key={rowIndex}
+                          className={[
+                            markedDel ? 'dr-row-deleted' : '',
+                            rowEditing ? 'dr-row-editing' : '',
+                            canGridEdit ? 'dr-row-editable' : '',
+                          ].filter(Boolean).join(' ') || undefined}
+                          onDoubleClick={() => {
+                            if (canGridEdit && !rowEditing) beginEditRow(rowIndex);
+                          }}
+                          title={canGridEdit && !rowEditing ? '双击编辑此行' : undefined}
+                        >
+                          {canGridEdit ? (
+                            <td className="dr-row-actions" onDoubleClick={(e) => e.stopPropagation()}>
+                              {!rowEditing ? (
+                                <React.Fragment>
+                                  <button type="button" className="dr-row-act" disabled={busy || editSaving}
+                                    onClick={() => beginEditRow(rowIndex)}>编辑</button>
+                                  <button type="button" className="dr-row-act dr-row-act-danger" disabled={busy || editSaving}
+                                    onClick={() => markDeleteRow(rowIndex)}>删</button>
+                                </React.Fragment>
+                              ) : (
+                                <React.Fragment>
+                                  {markedDel ? (
+                                    <button type="button" className="dr-row-act" disabled={editSaving}
+                                      onClick={() => unmarkDeleteRow(rowIndex)}>撤销删</button>
+                                  ) : (
+                                    <button type="button" className="dr-row-act dr-row-act-danger" disabled={editSaving}
+                                      onClick={() => markDeleteRow(rowIndex)}>删</button>
+                                  )}
+                                  <button type="button" className="dr-row-act" disabled={editSaving}
+                                    onClick={() => cancelEditRow(rowIndex)}>取消</button>
+                                </React.Fragment>
+                              )}
                             </td>
                           ) : null}
                           {row.map((cell, cellIndex) => {
                             const col = result.columns[cellIndex];
                             const isPK = pkSet.has(String(col).toLowerCase());
-                            const binary = cellIsBinary(cell) || cellIsBinary(result.rows?.[rowIndex]?.[cellIndex]);
-                            if (editMode && !markedDel && !isPK && !binary) {
+                            const binary = cellIsBinary(cell) || cellIsBinary(origRow[cellIndex]);
+                            if (rowEditing && !markedDel && !isPK && !binary) {
                               const isNull = cell == null;
                               return (
                                 <td key={cellIndex} style={{ fontSize: 12.5, padding: '2px 4px' }}>
@@ -945,7 +1146,7 @@ function DataWorkspacePage({ resource, onBack }) {
                             }
                             return (
                               <td key={cellIndex} style={{ fontSize: 12.5, opacity: markedDel ? 0.45 : 1 }}>
-                                {cellDisplay(editMode ? (result.rows?.[rowIndex]?.[cellIndex] ?? cell) : cell)}
+                                {cellDisplay(rowEditing ? (markedDel ? origRow[cellIndex] : cell) : cell)}
                               </td>
                             );
                           })}

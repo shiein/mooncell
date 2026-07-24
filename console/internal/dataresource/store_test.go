@@ -269,6 +269,7 @@ func TestValidateInput(t *testing.T) {
 		{"非法SSL", DataResourceInput{Name: "R", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", SSLMode: "verify-full"}, false},
 		{"DM拒绝require", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "d", Username: "u", SSLMode: "require"}, false},
 		{"DM允许disable", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "d", Username: "u", SSLMode: "disable"}, true},
+		{"DM无库名仅用户", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, Username: "SYSDBA", SSLMode: "disable"}, true},
 	}
 	for _, c := range cases {
 		err := ValidateInput(c.input)

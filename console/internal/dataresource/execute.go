@@ -3,7 +3,8 @@
 // 设计文档第三节「SQL 执行规则」：
 //   - 一次请求只允许一条 SQL；拒绝多语句。
 //   - 显式 BEGIN/COMMIT/ROLLBACK/SAVEPOINT 一律拒绝。
-//   - SELECT 默认返回 100 行，接口最大允许 500 行。
+//   - SELECT 默认分页 100 行（服务端隐式 PageSQL，模板 SQL 不写 LIMIT）；
+//     接口最大允许 10000 行（当前页展开全部上限）。
 //   - 默认尝试 COUNT(*) FROM (query) 返回总数；统计失败仍返回数据，标记 totalStatus=unavailable。
 //   - 自动提交查询和只读事务中的统计、分页在同一只读事务内执行。
 //   - 大整数、DECIMAL 使用字符串传输；二进制字段以类型标识和截断预览返回。
@@ -22,8 +23,9 @@ import (
 
 // 执行常量。
 const (
-	DefaultLimit = 100  // SELECT 默认返回行数
-	MaxLimit     = 500  // SELECT 接口最大返回行数
+	DefaultLimit   = 100   // SELECT 默认每页行数（隐式，不写入编辑器 SQL）
+	MaxLimit       = 10000 // SELECT 单次最大行数（展开全部上限）
+	ExpandAllMax   = 10000 // 前端「展开全部」允许的最大总数
 )
 
 // ExecutionResult 是 SQL 执行的返回结构。
@@ -36,6 +38,8 @@ type ExecutionResult struct {
 	Total         int             `json:"total,omitempty"`
 	TotalStatus   string          `json:"totalStatus,omitempty"` // available/unavailable
 	HasMore       bool            `json:"hasMore,omitempty"`
+	Limit         int             `json:"limit,omitempty"`  // 本次分页 limit
+	Offset        int             `json:"offset,omitempty"` // 本次分页 offset
 	AffectedRows  int64           `json:"affectedRows,omitempty"`
 	DurationMs    int64           `json:"durationMs"`
 	Messages      []string        `json:"messages,omitempty"`
@@ -46,9 +50,10 @@ type ExecutionResult struct {
 
 // ExecuteOptions 控制执行行为。
 type ExecuteOptions struct {
-	Limit     int    // 返回行数上限
-	ReadOnly  bool   // 是否强制只读事务
-	AutoCommit bool  // 是否自动提交（true 时每条 SQL 独立事务）
+	Limit      int  // 返回行数上限
+	Offset     int  // 分页偏移
+	ReadOnly   bool // 是否强制只读事务
+	AutoCommit bool // 是否自动提交（true 时每条 SQL 独立事务）
 }
 
 // ExecuteSQL 在给定适配器上执行单条 SQL。
@@ -122,7 +127,12 @@ func executeQuery(ctx context.Context, adapter DataSourceAdapter, sqlText string
 	defer tx.Rollback()
 
 	// 分页查询
-	pageSQL, err := adapter.PageSQL(sqlText, opts.Limit, 0)
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	result.Limit = opts.Limit
+	result.Offset = opts.Offset
+	pageSQL, err := adapter.PageSQL(sqlText, opts.Limit, opts.Offset)
 	if err != nil {
 		return err
 	}

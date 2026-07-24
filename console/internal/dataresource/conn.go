@@ -30,6 +30,8 @@ type TestResult struct {
 	CurrentDatabase     string `json:"currentDatabase"`
 	ReadOnlyTxSupported bool   `json:"readOnlyTxSupported"`
 	ErrorCode           string `json:"errorCode,omitempty"`
+	// Error 用户可读失败原因（含稳定描述 + 脱敏后的驱动细节，不含密码/DSN）。
+	Error string `json:"error,omitempty"`
 }
 
 // PersistStatus 返回应写入 last_test_status 的值。
@@ -61,12 +63,20 @@ func TestConnection(r DataResource, password string) TestResult {
 	driverName := DriverName(r.DBType)
 	dsn := BuildDSN(r, password)
 	if dsn == "" {
-		return TestResult{ErrorCode: "UNSUPPORTED_DB_TYPE"}
+		return TestResult{
+			ErrorCode: "UNSUPPORTED_DB_TYPE",
+			Error:     ErrorDescription("UNSUPPORTED_DB_TYPE"),
+		}
 	}
 
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
-		return TestResult{ErrorCode: "OPEN_FAILED", LatencyMs: time.Since(start).Milliseconds()}
+		code := "OPEN_FAILED"
+		return TestResult{
+			ErrorCode: code,
+			Error:     formatConnError(code, err),
+			LatencyMs: time.Since(start).Milliseconds(),
+		}
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
@@ -75,9 +85,11 @@ func TestConnection(r DataResource, password string) TestResult {
 
 	// Ping
 	if err := db.PingContext(ctx); err != nil {
+		code := classifyConnError(err)
 		return TestResult{
 			LatencyMs: time.Since(start).Milliseconds(),
-			ErrorCode: classifyConnError(err),
+			ErrorCode: code,
+			Error:     formatConnError(code, err),
 		}
 	}
 
@@ -194,12 +206,22 @@ func classifyConnError(err error) string {
 		return ""
 	}
 	msg := strings.ToLower(err.Error())
+	// 含中文达梦/国产库常见文案
 	switch {
-	case strings.Contains(msg, "timeout") || strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "i/o timeout"):
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "超时"):
 		return "CONN_TIMEOUT"
-	case strings.Contains(msg, "authentication") || strings.Contains(msg, "auth") || strings.Contains(msg, "password") || strings.Contains(msg, "login"):
+	case strings.Contains(msg, "authentication") || strings.Contains(msg, "password") ||
+		strings.Contains(msg, "login") || strings.Contains(msg, "auth fail") ||
+		strings.Contains(msg, "invalid username") || strings.Contains(msg, "invalid user") ||
+		strings.Contains(msg, "access denied") || strings.Contains(msg, "登录失败") ||
+		strings.Contains(msg, "用户名") || strings.Contains(msg, "密码错误") ||
+		strings.Contains(msg, "口令") || strings.Contains(msg, "鉴权"):
 		return "AUTH_FAILED"
-	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host") || strings.Contains(msg, "network is unreachable"):
+	case strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "network is unreachable") || strings.Contains(msg, "connectex") ||
+		strings.Contains(msg, "actively refused") || strings.Contains(msg, "找不到主机") ||
+		strings.Contains(msg, "无法连接") || strings.Contains(msg, "拒绝") && strings.Contains(msg, "连接"):
 		return "CONN_REFUSED"
 	case strings.Contains(msg, "tls") || strings.Contains(msg, "ssl") || strings.Contains(msg, "certificate"):
 		return "TLS_ERROR"
@@ -223,7 +245,27 @@ func ErrorDescription(code string) string {
 		return "不支持的数据库类型"
 	case "OPEN_FAILED":
 		return "驱动初始化失败"
+	case "CONN_ERROR":
+		return "连接失败"
 	default:
 		return "连接失败"
 	}
+}
+
+// formatConnError 组合稳定描述与脱敏驱动细节，便于用户排查（尤其达梦等中文错误）。
+func formatConnError(code string, err error) string {
+	base := ErrorDescription(code)
+	if err == nil {
+		return base
+	}
+	detail := sanitizeErrMsg(err.Error())
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return base
+	}
+	// 细节已与基线相同或已含基线时不再重复拼接
+	if strings.EqualFold(detail, base) || strings.Contains(detail, base) {
+		return detail
+	}
+	return base + "（" + detail + "）"
 }

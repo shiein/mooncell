@@ -38,6 +38,8 @@ const IC = {
   link: <g><path d="M10 14a4 4 0 0 0 6 .4l2.5-2.5a4 4 0 0 0-5.7-5.7L11.5 7.5" fill="none"/><path d="M14 10a4 4 0 0 0-6-.4L5.5 12a4 4 0 0 0 5.7 5.7l1.3-1.3" fill="none"/></g>,
   eye: <g><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" fill="none"/><circle cx="12" cy="12" r="2.8" fill="none"/></g>,
   settings: <g><circle cx="12" cy="12" r="3" fill="none"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1" fill="none"/></g>,
+  // 铅笔编辑
+  pencil: <g><path d="M14.5 4.5l5 5L8 21H3v-5L14.5 4.5z" fill="none"/><path d="M12.5 6.5l5 5" fill="none"/></g>,
   zap: <path d="M13 3L5 13.5h6L11 21l8-10.5h-6z" fill="none"/>,
   layers: <g><path d="M12 3.5l9 5-9 5-9-5z" fill="none"/><path d="M3.5 13l8.5 4.7L20.5 13" fill="none"/><path d="M3.5 17l8.5 4.7L20.5 17" fill="none" transform="translate(0,-1)"/></g>,
 };

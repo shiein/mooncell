@@ -83,13 +83,13 @@ export async function patchAutoCommit(resourceId, workspaceId, autoCommit) {
   );
 }
 
-export async function executeSQL(resourceId, workspaceId, { sql, limit, confirmed, signal }) {
+export async function executeSQL(resourceId, workspaceId, { sql, limit, offset, confirmed, signal }) {
   return jsonFetch(
     `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/execute`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sql, limit, confirmed }),
+      body: JSON.stringify({ sql, limit, offset: offset || 0, confirmed }),
       signal,
     },
   );

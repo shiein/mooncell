@@ -1,7 +1,7 @@
 // 数据资源列表：admin CRUD + 普通用户进入工作台
 import React from 'react';
-import { useMC, fmtTime } from '../lib/data.js';
-import { Btn, Field, Icon, Badge, Spinner, EmptyState, Dialog, toast } from '../components/primitives.jsx';
+import { useMC } from '../lib/data.js';
+import { Btn, Field, Badge, Spinner, EmptyState, Dialog, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAsync } from '../lib/async.js';
 import {
@@ -9,11 +9,44 @@ import {
   deleteDataResource, testDataResource, testDataResourceConfig, testDataResourceDraft,
 } from '../lib/dataresource-api.js';
 
+/** 各驱动默认端口（与后端 DefaultPort / DriverCatalog.defaultPort 对齐） */
+const DEFAULT_PORTS = {
+  pgx: 5432,
+  mysql: 3306,
+  dm: 5236,
+  kingbase: 54321,
+  opengauss: 5432,
+};
+
+const DB_TYPE_LABEL = {
+  pgx: 'PostgreSQL',
+  mysql: 'MySQL',
+  dm: '达梦 DM8',
+  kingbase: 'KingbaseES',
+  opengauss: 'Vastbase G100（当前构建不可用）',
+};
+
+/** 达梦无独立 catalog：实例 → schema/用户模式 → 对象（两层） */
+function isDM(dbType) {
+  return dbType === 'dm';
+}
+
+function defaultPortFor(dbType, drivers) {
+  const fromApi = (drivers || []).find((d) => d.id === dbType)?.defaultPort;
+  if (fromApi > 0) return fromApi;
+  return DEFAULT_PORTS[dbType] || 5432;
+}
+
+function defaultSchemaFor(dbType) {
+  if (dbType === 'pgx' || dbType === 'kingbase' || dbType === 'opengauss') return 'public';
+  return '';
+}
+
 const EMPTY_RESOURCE_FORM = {
   name: '',
   dbType: 'pgx',
   host: '127.0.0.1',
-  port: 5432,
+  port: DEFAULT_PORTS.pgx,
   databaseName: '',
   defaultSchema: 'public',
   username: '',
@@ -38,7 +71,7 @@ function validateResourceForm(f, { requirePassword }) {
   const missing = [];
   if (!String(f.name || '').trim()) missing.push('名称');
   if (!String(f.host || '').trim()) missing.push('主机');
-  if (!String(f.databaseName || '').trim()) missing.push('数据库名');
+  if (!isDM(f.dbType) && !String(f.databaseName || '').trim()) missing.push('数据库名');
   if (!String(f.username || '').trim()) missing.push('用户名');
   if (requirePassword && !String(f.password || '')) missing.push('密码');
   const port = Number(f.port);
@@ -52,32 +85,40 @@ function validateResourceForm(f, { requirePassword }) {
 }
 
 function resourcePayloadFromForm(f) {
+  const dbType = f.dbType || 'pgx';
+  let databaseName = String(f.databaseName || '').trim();
+  let defaultSchema = String(f.defaultSchema || '').trim();
+  // 达梦：表单只填 schema；同步写入 databaseName 便于列表展示与兼容旧字段
+  if (isDM(dbType)) {
+    const schema = defaultSchema || databaseName;
+    databaseName = schema;
+    defaultSchema = schema;
+  }
   return {
     name: String(f.name || '').trim(),
-    dbType: f.dbType || 'pgx',
+    dbType,
     host: String(f.host || '').trim(),
-    port: Number(f.port) || 5432,
-    databaseName: String(f.databaseName || '').trim(),
-    defaultSchema: String(f.defaultSchema || '').trim(),
+    port: Number(f.port) || defaultPortFor(dbType, []),
+    databaseName,
+    defaultSchema,
     username: String(f.username || '').trim(),
     sslMode: f.sslMode || 'disable',
     password: f.password || '',
   };
 }
 
-const DB_TYPE_LABEL = {
-  pgx: 'PostgreSQL',
-  mysql: 'MySQL',
-  dm: '达梦 DM8',
-  kingbase: 'KingbaseES',
-  opengauss: 'Vastbase G100（当前构建不可用）',
-};
-
 function modeLabel(m) {
   if (m === 'admin') return '管理员';
   if (m === 'write') return '读写';
   if (m === 'read') return '只读';
   return m || '—';
+}
+
+function catalogColumn(r) {
+  if (isDM(r.dbType)) {
+    return r.defaultSchema || r.databaseName || r.username || '—';
+  }
+  return r.databaseName || '—';
 }
 
 function DataResourcesPage({ onOpenWorkspace }) {
@@ -123,7 +164,7 @@ function DataResourcesPage({ onOpenWorkspace }) {
               <th>名称</th>
               <th>类型</th>
               <th>地址</th>
-              <th>数据库</th>
+              <th>库 / Schema</th>
               <th>权限</th>
               <th>最近测试</th>
               <th style={{ width: isAdmin ? 200 : 100 }}></th>
@@ -140,7 +181,7 @@ function DataResourcesPage({ onOpenWorkspace }) {
                   </span>
                 </td>
                 <td className="mono" style={{ fontSize: 12.5 }}>{r.host}:{r.port}</td>
-                <td className="mono" style={{ fontSize: 12.5 }}>{r.databaseName}</td>
+                <td className="mono" style={{ fontSize: 12.5 }}>{catalogColumn(r)}</td>
                 <td><Badge tone={r.accessMode === 'read' ? 'info' : 'success'}>{modeLabel(r.accessMode)}</Badge></td>
                 <td style={{ fontSize: 12.5, color: 'var(--muted-fg)' }}>{r.lastTestInfo || '未测试'}</td>
                 <td>
@@ -149,7 +190,7 @@ function DataResourcesPage({ onOpenWorkspace }) {
                     {isAdmin ? (
                       <React.Fragment>
                         <Btn size="sm" variant="ghost" icon="activity" title="测试连接" onClick={() => onTest(r)} />
-                        <Btn size="sm" variant="ghost" icon="settings" title="编辑" onClick={() => setEdit(r)} />
+                        <Btn size="sm" variant="ghost" icon="pencil" title="编辑" onClick={() => setEdit(r)} />
                         <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => setDelRes(r)} />
                       </React.Fragment>
                     ) : null}
@@ -197,14 +238,15 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
   React.useEffect(() => {
     if (!open) return;
     if (isEdit) {
+      const dbType = resource.dbType || 'pgx';
       setForm({
         ...EMPTY_RESOURCE_FORM,
         name: resource.name || '',
-        dbType: resource.dbType || 'pgx',
+        dbType,
         host: resource.host || '',
-        port: resource.port || 5432,
+        port: resource.port || defaultPortFor(dbType, drivers),
         databaseName: resource.databaseName || '',
-        defaultSchema: resource.defaultSchema || '',
+        defaultSchema: resource.defaultSchema || (isDM(dbType) ? (resource.databaseName || '') : ''),
         username: resource.username || '',
         password: '',
         sslMode: resource.sslMode || 'disable',
@@ -214,9 +256,37 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
     }
     setBusy(false);
     setTesting(false);
-  }, [open, resource, isEdit]);
+  }, [open, resource, isEdit, drivers]);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const onDbTypeChange = (nextType) => {
+    setForm((f) => {
+      const prevType = f.dbType || 'pgx';
+      const prevDefault = defaultPortFor(prevType, drivers);
+      const nextDefault = defaultPortFor(nextType, drivers);
+      const curPort = Number(f.port);
+      // 仅当端口仍是「上一类型默认端口」或空时自动切换，避免覆盖用户手改
+      const shouldBumpPort = !curPort || curPort === prevDefault;
+      const next = {
+        ...f,
+        dbType: nextType,
+        port: shouldBumpPort ? nextDefault : f.port,
+      };
+      if (isDM(nextType)) {
+        // 达梦：schema 字段用 defaultSchema；若从 PG 切过来，可用原 databaseName
+        if (!next.defaultSchema && next.databaseName) next.defaultSchema = next.databaseName;
+        next.sslMode = 'disable';
+      } else if (isDM(prevType)) {
+        // 从达梦切回：库名字段用 schema 填充
+        if (!next.databaseName && next.defaultSchema) next.databaseName = next.defaultSchema;
+        if (!next.defaultSchema) next.defaultSchema = defaultSchemaFor(nextType);
+      } else if (!next.defaultSchema) {
+        next.defaultSchema = defaultSchemaFor(nextType);
+      }
+      return next;
+    });
+  };
 
   const currentForm = () => mergeResourceForm(form, formRef.current);
 
@@ -276,9 +346,15 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
 
   const opts = drivers.length
     ? drivers
-    : ['pgx', 'mysql', 'dm', 'kingbase'].map((id) => ({ id, label: DB_TYPE_LABEL[id] }));
+    : ['pgx', 'mysql', 'dm', 'kingbase'].map((id) => ({
+      id,
+      label: DB_TYPE_LABEL[id],
+      defaultPort: DEFAULT_PORTS[id],
+      hasCatalog: id !== 'dm',
+    }));
 
   const actionBusy = busy || testing;
+  const dm = isDM(form.dbType);
 
   return (
     <Dialog open={open} onClose={onClose} width={520}
@@ -303,7 +379,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
           <input className="input" name="name" value={form.name || ''} onChange={(e) => set('name', e.target.value)} autoComplete="off" />
         </Field>
         <Field label="数据库类型">
-          <select className="input" name="dbType" value={form.dbType || 'pgx'} onChange={(e) => set('dbType', e.target.value)}>
+          <select className="input" name="dbType" value={form.dbType || 'pgx'} onChange={(e) => onDbTypeChange(e.target.value)}>
             {opts.map((d) => (
               <option key={d.id} value={d.id}>{d.label}{d.experimental ? '（实验性）' : ''}</option>
             ))}
@@ -317,22 +393,46 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
             <input className="input" name="port" type="number" value={form.port ?? ''} onChange={(e) => set('port', e.target.value)} />
           </Field>
         </div>
-        <Field label="数据库名" hint="必填 · 目标 database / catalog，不是 schema">
-          <input className="input" name="databaseName" value={form.databaseName || ''} onChange={(e) => set('databaseName', e.target.value)} autoComplete="off" />
-        </Field>
-        <Field label="默认 Schema" hint="可选 · MySQL 可留空；PostgreSQL 常用 public">
-          <input className="input" name="defaultSchema" value={form.defaultSchema || ''} onChange={(e) => set('defaultSchema', e.target.value)} autoComplete="off" />
-        </Field>
+        {dm ? (
+          <Field
+            label="默认 Schema（用户模式）"
+            hint="达梦无独立「库」层：连接实例后为 schema/用户 → 表。可留空，默认与用户名相同"
+          >
+            <input
+              className="input"
+              name="defaultSchema"
+              value={form.defaultSchema || ''}
+              onChange={(e) => set('defaultSchema', e.target.value)}
+              placeholder="如 SYSDBA 或业务用户名"
+              autoComplete="off"
+            />
+          </Field>
+        ) : (
+          <React.Fragment>
+            <Field label="数据库名" hint="必填 · 目标 database / catalog，不是 schema">
+              <input className="input" name="databaseName" value={form.databaseName || ''} onChange={(e) => set('databaseName', e.target.value)} autoComplete="off" />
+            </Field>
+            <Field label="默认 Schema" hint="可选 · MySQL 可留空；PostgreSQL 常用 public">
+              <input className="input" name="defaultSchema" value={form.defaultSchema || ''} onChange={(e) => set('defaultSchema', e.target.value)} autoComplete="off" />
+            </Field>
+          </React.Fragment>
+        )}
         <Field label="用户名">
           <input className="input" name="username" value={form.username || ''} onChange={(e) => set('username', e.target.value)} autoComplete="off" />
         </Field>
         <Field label={isEdit ? '密码（留空保留原密码）' : '密码'}>
           <input className="input" name="password" type="password" value={form.password || ''} onChange={(e) => set('password', e.target.value)} autoComplete="new-password" />
         </Field>
-        <Field label="SSL">
-          <select className="input" name="sslMode" value={form.sslMode || 'disable'} onChange={(e) => set('sslMode', e.target.value)}>
+        <Field label="SSL" hint={dm ? '达梦当前仅支持 disable' : undefined}>
+          <select
+            className="input"
+            name="sslMode"
+            value={form.sslMode || 'disable'}
+            onChange={(e) => set('sslMode', e.target.value)}
+            disabled={dm}
+          >
             <option value="disable">disable</option>
-            <option value="require">require</option>
+            {!dm ? <option value="require">require</option> : null}
           </select>
         </Field>
       </form>
@@ -346,7 +446,8 @@ function DeleteDialog({ open, resource, onClose, onDeleted }) {
   React.useEffect(() => { if (open) { setName(''); setBusy(false); } }, [open]);
   if (!resource) return null;
   const submit = async () => {
-    if (name.trim() !== resource.name) {
+    // 与后端 EqualFold 一致：大小写不敏感确认
+    if (name.trim().toLowerCase() !== String(resource.name || '').toLowerCase()) {
       toast('请输入完整资源名称以确认删除', { tone: 'warn' });
       return;
     }

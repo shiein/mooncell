@@ -24,9 +24,19 @@ func TestDSNBuilders(t *testing.T) {
 	}
 
 	r.DBType = DriverDM
+	r.DefaultSchema = "ADMIN" // 保留字：驱动 set schema "ADMIN"；且不得 URL 编码引号
 	dm := BuildDSN(r, "secret")
 	if !strings.Contains(dm, "dm://u:secret@h:5432") {
 		t.Errorf("dmDSN 不符: %s", dm)
+	}
+	// 驱动不解码 query：必须是字面 ?schema="ADMIN"，不能是 %22ADMIN%22
+	if !strings.Contains(dm, `?schema="ADMIN"`) || strings.Contains(dm, "%22") {
+		t.Errorf("dmDSN schema 应原样带双引号且不 URL 编码: %s", dm)
+	}
+	r.DefaultSchema = "APP"
+	dmApp := BuildDSN(r, "secret")
+	if !strings.Contains(dmApp, `?schema="APP"`) {
+		t.Errorf("dmDSN APP 也应加引号: %s", dmApp)
 	}
 
 	r.DBType = DriverKingbase

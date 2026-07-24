@@ -113,6 +113,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 	var body struct {
 		SQL       string `json:"sql"`
 		Limit     int    `json:"limit,omitempty"`
+		Offset    int    `json:"offset,omitempty"` // 隐式分页偏移，不改写 SQL
 		Confirmed bool   `json:"confirmed,omitempty"` // 危险 SQL 二次确认
 	}
 	if err := jsonDecodeBody(r, &body); err != nil {
@@ -139,7 +140,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	result, err := s.workspaces.ExecuteInWorkspace(r.Context(), ws, body.SQL, body.Limit)
+	result, err := s.workspaces.ExecuteInWorkspace(r.Context(), ws, body.SQL, body.Limit, body.Offset)
 	if err != nil {
 		if apiErr, isAPIErr := err.(*APIError); isAPIErr {
 			if apiErr.Code == "DATA_RESOURCE_READ_ONLY" {
@@ -192,10 +193,7 @@ func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText
 	schema := target.Schema
 	if schema == "" {
 		if res, found, _ := GetDataResource(s.db, ws.ResourceID); found {
-			schema = res.DefaultSchema
-			if schema == "" {
-				schema = res.DatabaseName
-			}
+			schema = BoundSchema(res)
 		}
 	}
 	obj := MetadataNode{Kind: NodeTable, Schema: schema, Name: target.Table}
@@ -206,7 +204,7 @@ func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText
 	pks := primaryKeyColumns(structure)
 	info := &EditableInfo{Schema: schema, Table: target.Table}
 	if len(pks) == 0 {
-		info.Reason = "该表没有主键，无法安全地修改或删除行（需主键定位目标行，与 Navicat 等工具一致）"
+		info.Reason = "该表没有主键，无法安全地修改或删除行"
 		result.Editable = info
 		return
 	}

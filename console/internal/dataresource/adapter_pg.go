@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -552,7 +553,8 @@ func (a *pgAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 	qualified := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
 	switch operation {
 	case "SELECT":
-		return fmt.Sprintf("SELECT * FROM %s LIMIT 100;", qualified), nil
+		// 不写 LIMIT：行数由服务端隐式分页（默认 100）
+		return fmt.Sprintf("SELECT * FROM %s;", qualified), nil
 	case "INSERT":
 		return fmt.Sprintf("INSERT INTO %s (col1, col2) VALUES ($1, $2);", qualified), nil
 	case "UPDATE":
@@ -619,9 +621,20 @@ func (a *pgAdapter) Capabilities() Capabilities {
 	}
 }
 
+var (
+	// scheme://user:pass@host → 抹掉 userinfo
+	reURLCred = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s"']+@`)
+	// password=… / pwd=…（值到空白或分隔符）
+	reKVSecret = regexp.MustCompile(`(?i)\b(password|pwd|passwd)\s*=\s*([^\s;&"']+)`)
+)
+
 // sanitizeErrMsg 移除错误消息中可能包含的敏感信息（DSN、密码等）。
 func sanitizeErrMsg(msg string) string {
-	// PostgreSQL 错误一般不含 DSN，但保守处理：截断过长的消息。
+	if msg == "" {
+		return msg
+	}
+	msg = reURLCred.ReplaceAllString(msg, `${1}***@`)
+	msg = reKVSecret.ReplaceAllString(msg, `${1}=***`)
 	if len(msg) > 500 {
 		msg = msg[:500] + "..."
 	}

@@ -160,6 +160,8 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "创建资源失败")
 		return
 	}
+	// 创建后自动测连并落库 last_test_status（授权 read 依赖 ok；对话框测试不写库）
+	res = s.persistConnectionTest(res, input.Password)
 	s.auditLog(user, "创建数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
@@ -247,8 +249,33 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 	s.workspaces.InvalidateResource(id)
 	s.pools.CloseDB(id)
 	res, _, _ := GetDataResource(s.db, id)
+	// UpdateDataResource 会清空 last_test_status；保存后用当前凭据重测并写回，便于立即授权 read
+	password := input.Password
+	if password == "" {
+		if p, err := s.credKey.Decrypt(res.CredentialCipher); err == nil {
+			password = p
+		}
+	}
+	if password != "" {
+		res = s.persistConnectionTest(res, password)
+	}
 	s.auditLog(user, "更新数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
+}
+
+// persistConnectionTest 对资源跑一次连接测试并写入 last_test_status/at，返回刷新后的资源视图。
+func (s *Service) persistConnectionTest(res DataResource, password string) DataResource {
+	result := TestConnection(res, password)
+	status := result.PersistStatus()
+	if err := UpdateTestStatus(s.db, res.ID, status); err != nil {
+		return res
+	}
+	if updated, found, err := GetDataResource(s.db, res.ID); err == nil && found {
+		return updated
+	}
+	res.LastTestStatus = status
+	res.LastTestAt = time.Now().UnixMilli()
+	return res
 }
 
 // DeleteResource 处理 DELETE /api/data-resources/{id}（仅 admin）。
@@ -329,19 +356,11 @@ func (s *Service) TestConnectionHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	res := DataResource{
 		DBType: input.DBType, Host: input.Host, Port: input.Port,
-		DatabaseName: input.DatabaseName, Username: input.Username, SSLMode: input.SSLMode,
+		DatabaseName: input.DatabaseName, DefaultSchema: input.DefaultSchema,
+		Username: input.Username, SSLMode: input.SSLMode,
 	}
 	result := TestConnection(res, input.Password)
-	if !result.OK {
-		writeOK(w, map[string]any{
-			"ok":        false,
-			"latencyMs": result.LatencyMs,
-			"errorCode": result.ErrorCode,
-			"error":     ErrorDescription(result.ErrorCode),
-		})
-		return
-	}
-	writeOK(w, result)
+	writeOK(w, testResultResponse(result))
 }
 
 // TestResourceDraftHandler 处理 POST /api/data-resources/{id}/test-draft（仅 admin）。
@@ -387,19 +406,11 @@ func (s *Service) TestResourceDraftHandler(w http.ResponseWriter, r *http.Reques
 	}
 	res := DataResource{
 		DBType: input.DBType, Host: input.Host, Port: input.Port,
-		DatabaseName: input.DatabaseName, Username: input.Username, SSLMode: input.SSLMode,
+		DatabaseName: input.DatabaseName, DefaultSchema: input.DefaultSchema,
+		Username: input.Username, SSLMode: input.SSLMode,
 	}
 	result := TestConnection(res, password)
-	if !result.OK {
-		writeOK(w, map[string]any{
-			"ok":        false,
-			"latencyMs": result.LatencyMs,
-			"errorCode": result.ErrorCode,
-			"error":     ErrorDescription(result.ErrorCode),
-		})
-		return
-	}
-	writeOK(w, result)
+	writeOK(w, testResultResponse(result))
 }
 
 // TestExistingConnection 处理 POST /api/data-resources/{id}/test（仅 admin，用已保存的配置测试）。
@@ -446,16 +457,24 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 	}
 	user, _, _ := userFromCtx(r)
 	s.auditLog(user, "测试连接", res.Name, status)
-	if !result.OK {
-		writeOK(w, map[string]any{
-			"ok":        false,
-			"latencyMs": result.LatencyMs,
-			"errorCode": result.ErrorCode,
-			"error":     ErrorDescription(result.ErrorCode),
-		})
-		return
+	writeOK(w, testResultResponse(result))
+}
+
+// testResultResponse 统一连接测试响应：失败时带可读 error（含脱敏驱动细节）。
+func testResultResponse(result TestResult) any {
+	if result.OK {
+		return result
 	}
-	writeOK(w, result)
+	errMsg := result.Error
+	if errMsg == "" {
+		errMsg = ErrorDescription(result.ErrorCode)
+	}
+	return map[string]any{
+		"ok":        false,
+		"latencyMs": result.LatencyMs,
+		"errorCode": result.ErrorCode,
+		"error":     errMsg,
+	}
 }
 
 // isUniqueConstraint 检查是否为 SQLite UNIQUE 约束冲突。

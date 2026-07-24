@@ -238,7 +238,8 @@ func (wm *WorkspaceManager) CloseAll() {
 }
 
 // ExecuteInWorkspace 在工作台中执行 SQL，处理自动提交和手工事务逻辑。
-func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit int) (*ExecutionResult, error) {
+// limit/offset 仅对 SELECT 生效：服务端隐式分页，不改写编辑器中的 SQL 文本。
+func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit, offset int) (*ExecutionResult, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	if err := ws.ensureOpenLocked(); err != nil {
@@ -278,20 +279,23 @@ func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspac
 	}
 
 	if stmtType.IsReadOnly() {
-		// SELECT
+		// SELECT：隐式分页
 		if limit <= 0 {
 			limit = DefaultLimit
 		}
 		if limit > MaxLimit {
 			limit = MaxLimit
 		}
-		err := wm.executeQueryInWorkspace(ctx, ws, sqlText, limit, result)
+		if offset < 0 {
+			offset = 0
+		}
+		err := wm.executeQueryInWorkspace(ctx, ws, sqlText, limit, offset, result)
 		result.DurationMs = time.Since(start).Milliseconds()
 		result.TxState = string(ws.TxState)
 		if err != nil {
 			return result, err
 		}
-		ws.LastSQL = sqlText // 记录最近成功的查询供导出
+		ws.LastSQL = sqlText // 记录最近成功的查询供导出（无分页包装的原文）
 	} else {
 		// 写操作
 		err := wm.executeWriteInWorkspace(ctx, ws, sqlText, result)
@@ -308,7 +312,10 @@ func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspac
 // executeQueryInWorkspace 执行 SELECT。
 // 自动提交模式：在只读事务中执行查询和计数。
 // 手工事务模式：在当前事务中执行（不自动统计总数，避免副作用函数被调用两次）。
-func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit int, result *ExecutionResult) error {
+func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit, offset int, result *ExecutionResult) error {
+	result.Limit = limit
+	result.Offset = offset
+
 	if ws.AutoCommit {
 		// 自动提交：只读事务
 		tx, err := ws.Adapter.Begin(ctx, true)
@@ -317,7 +324,7 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 		}
 		defer tx.Rollback()
 
-		pageSQL, err := ws.Adapter.PageSQL(sqlText, limit, 0)
+		pageSQL, err := ws.Adapter.PageSQL(sqlText, limit, offset)
 		if err != nil {
 			return err
 		}
@@ -338,12 +345,15 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 			if err := tx.QueryRow(cctx, countSQL).Scan(&total); err == nil {
 				result.Total = total
 				result.TotalStatus = "available"
+				result.HasMore = offset+result.ReturnedRows < total
 			} else {
 				result.TotalStatus = "unavailable"
+				result.HasMore = result.ReturnedRows >= limit
 			}
 			ccancel()
 		} else {
 			result.TotalStatus = "unavailable"
+			result.HasMore = result.ReturnedRows >= limit
 		}
 		return nil
 	}
@@ -363,7 +373,7 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 		ws.TxState = TxActive
 	}
 
-	pageSQL, err := ws.Adapter.PageSQL(sqlText, limit, 0)
+	pageSQL, err := ws.Adapter.PageSQL(sqlText, limit, offset)
 	if err != nil {
 		return err
 	}
@@ -379,6 +389,7 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 	}
 	// 手工事务中不自动统计总数（避免副作用函数被调用两次）
 	result.TotalStatus = "unavailable"
+	result.HasMore = result.ReturnedRows >= limit
 	return nil
 }
 

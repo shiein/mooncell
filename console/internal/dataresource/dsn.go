@@ -63,22 +63,66 @@ func mysqlDSN(r DataResource, password string) string {
 	return cfg.FormatDSN()
 }
 
-// dmDSN 构建达梦 DM 的 DSN：dm://user:pass@host:port，URL 编码用户/密码组件。
+// dmSchema 达梦连接后 SET SCHEMA 的目标：默认 schema > database_name > 用户名。
+// 达梦无独立 catalog（库）层，用户模式与 schema 对应（见驱动 README）。
+func dmSchema(r DataResource) string {
+	if s := strings.TrimSpace(r.DefaultSchema); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(r.DatabaseName); s != "" {
+		return s
+	}
+	return strings.TrimSpace(r.Username)
+}
+
+// quoteDMSchemaIdent 为达梦 SET SCHEMA 生成安全标识符。
+// 官方驱动实现为：exec("set schema " + schema) 无自动加引号，
+// ADMIN 等保留字会报 -2007 语法分析错误，必须双引号包裹。
+func quoteDMSchemaIdent(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	// 已是双引号标识符则不再包一层
+	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
+		return name
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// dmDSN 构建达梦 DM 的 DSN：dm://user:pass@host:port?schema=…。
+//
+// 注意：官方驱动 parseDSN 对 query 值不做 URL 解码（直接 Split 赋值），
+// 因此 schema 不能走 url.Values.Encode（会把 "ADMIN" 编成 %22ADMIN%22，
+// 最终执行 set schema %22ADMIN%22 触发 -2007）。schema 段须原样拼接；
+// 标识符用双引号包裹以兼容 ADMIN 等保留字。
 func dmDSN(r DataResource, password string) string {
 	u := &url.URL{
 		Scheme: "dm",
 		User:   url.UserPassword(r.Username, password),
 		Host:   fmt.Sprintf("%s:%d", r.Host, r.Port),
 	}
-	if r.DatabaseName != "" {
-		q := url.Values{}
-		q.Set("schema", r.DatabaseName)
-		u.RawQuery = q.Encode()
+	base := u.String()
+	schema := quoteDMSchemaIdent(dmSchema(r))
+	if schema == "" {
+		return base
 	}
-	return u.String()
+	return base + "?schema=" + schema
 }
 
 // DriverName 返回 dbType 对应的 database/sql 驱动注册名。
 func DriverName(dbType string) string {
 	return dbType // 驱动名与 dbType 常量值一致
+}
+
+// BoundSchema 返回适配器绑定用的默认 schema/owner。
+// MySQL 常等同 database；达梦优先 default_schema / database_name / 用户名。
+func BoundSchema(r DataResource) string {
+	if r.DBType == DriverDM {
+		return dmSchema(r)
+	}
+	if s := strings.TrimSpace(r.DefaultSchema); s != "" {
+		return s
+	}
+	return strings.TrimSpace(r.DatabaseName)
 }

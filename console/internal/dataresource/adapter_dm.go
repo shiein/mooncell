@@ -42,7 +42,8 @@ func (a *dmAdapter) Begin(ctx context.Context, readOnly bool) (Transaction, erro
 	return &pgTx{tx: tx}, nil
 }
 
-// Children: root → 业务 schema；schema → 表/视图/函数/过程/序列分组；系统用户已过滤。
+// Children: root → 绑定 schema（用户模式）；schema → 表/视图/函数/过程/序列分组。
+// 达梦资源绑定「实例 + 默认 schema」，不在树中枚举实例上其它用户（避免出现无关模式如业务库中的其它账号）。
 func (a *dmAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
 	switch parent.Kind {
 	case NodeRoot, "":
@@ -63,13 +64,37 @@ func (a *dmAdapter) Children(ctx context.Context, parent MetadataNode) ([]Metada
 	return nil, nil
 }
 
-// dmSystemOwners 达梦/Oracle 风格系统 schema，不在业务元数据树展示。
+// dmSystemOwners 达梦/Oracle 风格系统 schema（仅在未配置绑定 schema 时的兜底枚举中过滤）。
 var dmSystemOwners = map[string]bool{
 	"SYS": true, "SYSDBA": true, "SYSSSO": true, "SYSAUDITOR": true,
 	"CTISYS": true, "SYSGEO": true, "PUBLIC": true, "OUTLN": true, "DMSERVER": true,
 }
 
+// boundSchemaName 规范化适配器绑定的 schema（去掉驱动 DSN 可能带的双引号）。
+func (a *dmAdapter) boundSchemaName() string {
+	s := strings.TrimSpace(a.schema)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+	}
+	return s
+}
+
 func (a *dmAdapter) listSchemas(ctx context.Context) ([]MetadataNode, error) {
+	// 已配置默认 schema：只展示绑定模式，与「一资源一库/模式」一致
+	if bound := a.boundSchemaName(); bound != "" {
+		n := MetadataNode{Kind: NodeSchema, Schema: bound, Name: bound}
+		n.ID = n.EncodeID()
+		return []MetadataNode{n}, nil
+	}
+	// 未配置时兜底：当前用户（USER）
+	var current string
+	if err := a.db.QueryRowContext(ctx, "SELECT USER FROM DUAL").Scan(&current); err == nil && strings.TrimSpace(current) != "" {
+		current = strings.TrimSpace(current)
+		n := MetadataNode{Kind: NodeSchema, Schema: current, Name: current}
+		n.ID = n.EncodeID()
+		return []MetadataNode{n}, nil
+	}
+	// 再兜底：枚举非系统用户（可能权限不足）
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT username FROM all_users ORDER BY username`)
 	if err != nil {
@@ -283,7 +308,8 @@ func (a *dmAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 	qualified := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
 	switch operation {
 	case "SELECT":
-		return fmt.Sprintf("SELECT * FROM %s WHERE rownum <= 100;", qualified), nil
+		// 不写 rownum/LIMIT：行数由服务端隐式分页（默认 100）
+		return fmt.Sprintf("SELECT * FROM %s;", qualified), nil
 	case "INSERT":
 		return fmt.Sprintf("INSERT INTO %s (col1, col2) VALUES (?, ?);", qualified), nil
 	case "UPDATE":

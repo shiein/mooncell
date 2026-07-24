@@ -497,11 +497,7 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "POOL_ERROR", "获取连接失败")
 		return
 	}
-	schema := res.DefaultSchema
-	if schema == "" {
-		schema = res.DatabaseName
-	}
-	adapter, err := NewAdapter(db, res.DBType, schema)
+	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "ADAPTER_ERROR", "创建适配器失败")
 		return
