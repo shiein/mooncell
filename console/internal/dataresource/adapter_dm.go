@@ -242,15 +242,40 @@ func (a *dmAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
 		parts = append(parts, line)
 	}
 	for _, c := range structure.Constraints {
-		if c.Type == "primary" && len(c.Columns) > 0 {
-			quoted := make([]string, len(c.Columns))
-			for i, col := range c.Columns {
-				quoted[i] = a.QuoteIdentifier(col)
+		if len(c.Columns) == 0 {
+			continue
+		}
+		quoted := make([]string, len(c.Columns))
+		for i, col := range c.Columns {
+			quoted[i] = a.QuoteIdentifier(col)
+		}
+		cols := strings.Join(quoted, ", ")
+		switch c.Type {
+		case "primary":
+			parts = append(parts, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)", a.QuoteIdentifier(c.Name), cols))
+		case "unique":
+			parts = append(parts, fmt.Sprintf("    CONSTRAINT %s UNIQUE (%s)", a.QuoteIdentifier(c.Name), cols))
+		case "foreign":
+			// Describe 当前未填 RefTable/RefColumns 时跳过，避免生成不完整 FK
+			if c.RefTable != "" && len(c.RefColumns) > 0 {
+				refCols := make([]string, len(c.RefColumns))
+				for i, col := range c.RefColumns {
+					refCols[i] = a.QuoteIdentifier(col)
+				}
+				// RefTable 可能已含 schema.table（与 PG 适配器一致）
+				refTable := c.RefTable
+				if !strings.Contains(refTable, ".") {
+					refTable = a.QuoteIdentifier(refTable)
+				} else {
+					sp := strings.SplitN(refTable, ".", 2)
+					refTable = a.QuoteIdentifier(sp[0]) + "." + a.QuoteIdentifier(sp[1])
+				}
+				parts = append(parts, fmt.Sprintf("    CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+					a.QuoteIdentifier(c.Name), cols, refTable, strings.Join(refCols, ", ")))
 			}
-			parts = append(parts, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)", a.QuoteIdentifier(c.Name), strings.Join(quoted, ", ")))
-			break
 		}
 	}
+	// 索引与列注释尚未从系统视图导出；调用方勿假定 DDL 可完整重建表
 	return fmt.Sprintf("CREATE TABLE %s (\n%s\n);", qualified, strings.Join(parts, ",\n")), nil
 }
 

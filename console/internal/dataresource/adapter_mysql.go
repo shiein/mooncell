@@ -263,7 +263,7 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 			})
 		}
 	}
-	// 索引
+	// 索引（MySQL 8+ 函数索引 column_name 可能为 NULL，须用 NullString）
 	idxRows, err := a.db.QueryContext(ctx, `
 		SELECT index_name, column_name, non_unique
 		FROM information_schema.statistics
@@ -272,7 +272,8 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 	if err == nil {
 		idxMap := map[string]*IndexInfo{}
 		for idxRows.Next() {
-			var idxName, colName string
+			var idxName string
+			var colName sql.NullString
 			var nonUnique int
 			if err := idxRows.Scan(&idxName, &colName, &nonUnique); err != nil {
 				continue
@@ -282,7 +283,12 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 				ii = &IndexInfo{Name: idxName, Unique: nonUnique == 0}
 				idxMap[idxName] = ii
 			}
-			ii.Columns = append(ii.Columns, colName)
+			if colName.Valid && colName.String != "" {
+				ii.Columns = append(ii.Columns, colName.String)
+			} else {
+				// 表达式/函数索引列无物理列名
+				ii.Columns = append(ii.Columns, "(expression)")
+			}
 		}
 		idxRows.Close()
 		for _, ii := range idxMap {

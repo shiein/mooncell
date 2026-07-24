@@ -122,7 +122,8 @@ func serverInfoSQL(dbType string) (versionSQL, currentDBSQL string) {
 	case DriverMySQL:
 		return "SELECT VERSION()", "SELECT DATABASE()"
 	case DriverDM:
-		return "SELECT * FROM v$version WHERE rownum = 1", "SELECT name FROM v$database WHERE rownum = 1"
+		// v$version 多列；与 adapter_dm.Ping 一致，只取 banner 供单列 Scan
+		return "SELECT banner FROM v$version WHERE rownum = 1", "SELECT name FROM v$database WHERE rownum = 1"
 	}
 	return "", ""
 }

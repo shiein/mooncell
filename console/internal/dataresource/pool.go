@@ -10,6 +10,7 @@
 //   - activeTx：手工事务
 //   - importing：导入执行
 //   - exclusive：配置更新/删除
+//
 // 三者互斥，在同一锁下竞争，避免 TOCTOU。
 package dataresource
 
@@ -133,11 +134,12 @@ func (pm *PoolManager) EndTx(resourceID string) {
 	pm.mu.Unlock()
 }
 
-// TryBeginImport 在无活动手工事务且无配置变更时原子占用导入槽。
+// TryBeginImport 在无活动手工事务、无其他导入且无配置变更时原子占用导入/写槽。
+// 同一资源同时只允许一个导入或就地编辑占用（importing 计数），避免与写操作并发。
 func (pm *PoolManager) TryBeginImport(resourceID string) bool {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	if pm.activeTx[resourceID] > 0 || pm.exclusive[resourceID] > 0 {
+	if pm.isBusyLocked(resourceID) {
 		return false
 	}
 	pm.importing[resourceID]++

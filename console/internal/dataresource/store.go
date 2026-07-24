@@ -334,15 +334,16 @@ func SetUserGrantsTx(tx *sql.Tx, username string, grants []DataResourceGrant, gr
 		if g.AccessMode != AccessRead && g.AccessMode != AccessWrite {
 			return fmt.Errorf("无效的 access_mode: %s", g.AccessMode)
 		}
+		// read/write 均校验资源存在，避免孤儿授权
+		var testStatus string
+		err := tx.QueryRow(`SELECT last_test_status FROM data_resources WHERE id = ?`, g.ResourceID).Scan(&testStatus)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("资源不存在，无法授权: %s", g.ResourceID)
+		}
+		if err != nil {
+			return err
+		}
 		if g.AccessMode == AccessRead {
-			var testStatus string
-			err := tx.QueryRow(`SELECT last_test_status FROM data_resources WHERE id = ?`, g.ResourceID).Scan(&testStatus)
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("资源不存在，无法授权: %s", g.ResourceID)
-			}
-			if err != nil {
-				return err
-			}
 			if !SupportsReadGrant(testStatus) {
 				return fmt.Errorf("资源未通过只读事务认证，不能授予只读权限（请先成功测试连接且 readOnlyTxSupported=true）: %s", g.ResourceID)
 			}

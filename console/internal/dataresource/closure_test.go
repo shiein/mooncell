@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/xuri/excelize/v2"
 )
 
 func TestIsReadOnlyState(t *testing.T) {
@@ -24,12 +26,12 @@ func TestIsReadOnlyState(t *testing.T) {
 func TestExecuteImportRejectsInvalidMappingsBeforeDatabaseAccess(t *testing.T) {
 	session := &ImportSession{Columns: []string{"source_a", "source_b"}}
 
-	result, err := executeImport(context.Background(), nil, session, "target", "public", []string{"only_one"})
+	result, err := executeImport(context.Background(), nil, session, "target", "public", []string{"only_one"}, excelize.Options{})
 	if err != nil || !strings.Contains(result.Error, "数量") {
 		t.Fatalf("应拒绝数量不一致的映射: result=%+v err=%v", result, err)
 	}
 
-	result, err = executeImport(context.Background(), nil, session, "target", "public", []string{"ID", "id"})
+	result, err = executeImport(context.Background(), nil, session, "target", "public", []string{"ID", "id"}, excelize.Options{})
 	if err != nil || !strings.Contains(result.Error, "重复") {
 		t.Fatalf("应拒绝重复目标列: result=%+v err=%v", result, err)
 	}

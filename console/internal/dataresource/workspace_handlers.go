@@ -278,6 +278,13 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再就地编辑")
 		return
 	}
+	// 与导入/配置变更互斥：复用 importing 槽，堵住与 Import 的并发写
+	if !s.pools.TryBeginImport(ws.ResourceID) {
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源正在导入、配置变更或存在活动事务，请稍后再就地编辑")
+		return
+	}
+	defer s.pools.EndImport(ws.ResourceID)
+
 	ws.LastActivity = time.Now()
 
 	ectx, cancel := context.WithTimeout(r.Context(), QueryTimeout)

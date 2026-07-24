@@ -17,7 +17,6 @@ package dataresource
 
 import (
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -288,7 +287,8 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
-	if strings.TrimSpace(body.Name) != res.Name {
+	// 名称唯一索引按 LOWER(name)；删除确认用大小写不敏感比较
+	if !strings.EqualFold(strings.TrimSpace(body.Name), res.Name) {
 		writeErr(w, http.StatusBadRequest, "NAME_MISMATCH", "输入的资源名称不匹配,无法删除")
 		return
 	}
@@ -459,10 +459,10 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 }
 
 // isUniqueConstraint 检查是否为 SQLite UNIQUE 约束冲突。
+// 注意：sql.ErrNoRows 表示未命中，不是唯一约束冲突，不得并入本判断。
 func isUniqueConstraint(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") || errors.Is(err, sql.ErrNoRows)
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }

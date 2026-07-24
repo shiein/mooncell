@@ -4,8 +4,9 @@
 //   - 仅 CSV、XLSX。默认最大 100MB，可配置。
 //   - 先上传预览前 20 行，再选择工作表、表头和字段映射。
 //   - 仅执行参数化 INSERT，不支持 upsert、忽略冲突或部分成功。
-//   - 默认每批 500 行，在一个独立事务内执行；任意一行失败则全部回滚。
-//   - 有活动手工事务时禁止导入。
+//   - 整单独立事务；任一行失败则全部回滚（与「不支持部分成功」一致）。
+//     ImportBatchSize 仅用于周期检查 ctx 取消，不拆分提交。
+//   - 有活动手工事务/其他导入/就地编辑时禁止导入。
 //   - 临时文件在完成、取消或 30 分钟超时后删除。
 package dataresource
 
@@ -26,10 +27,11 @@ import (
 // 导入常量。
 const (
 	ImportPreviewRows     = 20               // 预览行数
-	ImportBatchSize       = 500              // 每批行数
+	ImportBatchSize       = 500              // 周期检查取消的行间隔（非整单分批提交）
 	ImportTempTimeout     = 30 * time.Minute // 临时文件超时
 	importMaxSessionsUser = 3                // 每用户活动导入会话上限
 	importMaxOpenFiles    = 20               // 全局活动导入会话上限
+	importMaxFieldsPerRow = 1000             // 单行最大字段数，防恶意宽行
 )
 
 // excelOpenOptions 限制解压体积，避免 zip bomb 占满磁盘（默认 excelize 16GB）。
@@ -121,7 +123,8 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 每用户 / 全局会话配额
+	// 配额检查与占位同锁：避免并发 preview 双双通过后再写入导致超限
+	sessionID := newID()
 	s.importMu.Lock()
 	userN, totalN := 0, 0
 	for _, sess := range s.importSessions {
@@ -130,14 +133,28 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 			userN++
 		}
 	}
-	s.importMu.Unlock()
 	if userN >= importMaxSessionsUser {
+		s.importMu.Unlock()
 		writeErr(w, http.StatusTooManyRequests, "IMPORT_QUOTA", "导入会话过多，请先完成或取消已有导入")
 		return
 	}
 	if totalN >= importMaxOpenFiles {
+		s.importMu.Unlock()
 		writeErr(w, http.StatusTooManyRequests, "IMPORT_QUOTA", "系统导入会话已满，请稍后重试")
 		return
+	}
+	s.importSessions[sessionID] = &ImportSession{
+		ID: sessionID, ResourceID: id, Username: user, CreatedAt: time.Now(),
+	}
+	s.importMu.Unlock()
+
+	releaseReservation := func(tmpPath string) {
+		s.importMu.Lock()
+		delete(s.importSessions, sessionID)
+		s.importMu.Unlock()
+		if tmpPath != "" {
+			os.Remove(tmpPath)
+		}
 	}
 
 	// 解析 multipart 表单
@@ -147,12 +164,14 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	if err := r.ParseMultipartForm(maxBytes); err != nil {
+		releaseReservation("")
 		writeErr(w, http.StatusBadRequest, "FILE_TOO_LARGE", "文件过大或格式错误")
 		return
 	}
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
+		releaseReservation("")
 		writeErr(w, http.StatusBadRequest, "NO_FILE", "未上传文件")
 		return
 	}
@@ -167,6 +186,7 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 	case ".xlsx":
 		format = "xlsx"
 	default:
+		releaseReservation("")
 		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "仅支持 CSV 和 XLSX")
 		return
 	}
@@ -174,18 +194,20 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 	// 私有目录 + 0600 临时文件
 	dir, err := importDir()
 	if err != nil {
+		releaseReservation("")
 		writeErr(w, http.StatusInternalServerError, "TMP_ERROR", "创建导入目录失败")
 		return
 	}
-	tmpPath := filepath.Join(dir, "mc-import-"+newID()+ext)
+	tmpPath := filepath.Join(dir, "mc-import-"+sessionID+ext)
 	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
+		releaseReservation("")
 		writeErr(w, http.StatusInternalServerError, "TMP_ERROR", "创建临时文件失败")
 		return
 	}
 	if _, err := io.Copy(tmpFile, file); err != nil {
 		tmpFile.Close()
-		os.Remove(tmpPath)
+		releaseReservation(tmpPath)
 		writeErr(w, http.StatusInternalServerError, "TMP_ERROR", "保存临时文件失败")
 		return
 	}
@@ -193,33 +215,39 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 解析预览
 	session := &ImportSession{
-		ID: newID(), ResourceID: id, Username: user,
+		ID: sessionID, ResourceID: id, Username: user,
 		FilePath: tmpPath, FileName: header.Filename,
 		Format: format, CreatedAt: time.Now(),
 	}
 
-	result, err := parsePreview(session)
+	result, err := s.parsePreview(session)
 	if err != nil {
-		os.Remove(tmpPath)
+		releaseReservation(tmpPath)
 		writeErr(w, http.StatusBadRequest, "PARSE_ERROR", err.Error())
 		return
 	}
 
-	// 保存会话
+	// 用完整会话覆盖占位（保留同一 id）
 	s.importMu.Lock()
-	s.importSessions[session.ID] = session
+	if _, ok := s.importSessions[sessionID]; !ok {
+		s.importMu.Unlock()
+		os.Remove(tmpPath)
+		writeErr(w, http.StatusConflict, "IMPORT_EXPIRED", "导入会话已过期，请重新上传")
+		return
+	}
+	s.importSessions[sessionID] = session
 	s.importMu.Unlock()
 
 	writeOK(w, result)
 }
 
 // parsePreview 解析文件前 20 行作为预览。
-func parsePreview(session *ImportSession) (*ImportPreviewResult, error) {
+func (s *Service) parsePreview(session *ImportSession) (*ImportPreviewResult, error) {
 	switch session.Format {
 	case "csv":
 		return parseCSVPreview(session)
 	case "xlsx":
-		return parseXLSXPreview(session)
+		return s.parseXLSXPreview(session)
 	}
 	return nil, fmt.Errorf("不支持的格式: %s", session.Format)
 }
@@ -238,6 +266,7 @@ func parseCSVPreview(session *ImportSession) (*ImportPreviewResult, error) {
 	}
 
 	reader := csv.NewReader(f)
+	reader.FieldsPerRecord = -1 // 允许行宽不一致；上限见 importMaxFieldsPerRow
 	var preview [][]string
 	for i := 0; i <= ImportPreviewRows; i++ {
 		row, err := reader.Read()
@@ -246,6 +275,9 @@ func parseCSVPreview(session *ImportSession) (*ImportPreviewResult, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("解析 CSV 失败: %w", err)
+		}
+		if len(row) > importMaxFieldsPerRow {
+			return nil, fmt.Errorf("单行字段数超过上限 %d", importMaxFieldsPerRow)
 		}
 		preview = append(preview, row)
 	}
@@ -270,11 +302,8 @@ func (s *Service) openXLSX(path string) (*excelize.File, error) {
 	return excelize.OpenFile(path, opts)
 }
 
-func parseXLSXPreview(session *ImportSession) (*ImportPreviewResult, error) {
-	// 无 Service 指针时用默认解压上限
-	f, err := excelize.OpenFile(session.FilePath, excelize.Options{
-		UnzipSizeLimit: 512 << 20, UnzipXMLSizeLimit: 32 << 20,
-	})
+func (s *Service) parseXLSXPreview(session *ImportSession) (*ImportPreviewResult, error) {
+	f, err := s.openXLSX(session.FilePath)
 	if err != nil {
 		return nil, fmt.Errorf("打开 XLSX 失败: %w", err)
 	}
@@ -373,7 +402,7 @@ func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Reques
 
 	oldSheet := session.Sheet
 	session.Sheet = strings.TrimSpace(body.Sheet)
-	result, err := parseXLSXPreview(session)
+	result, err := s.parseXLSXPreview(session)
 	if err != nil {
 		session.Sheet = oldSheet
 	}
@@ -480,7 +509,7 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 
 	ictx, cancel := context.WithTimeout(r.Context(), ImportTimeout)
 	defer cancel()
-	result, err := executeImport(ictx, adapter, session, body.TableName, body.Schema, body.ColumnMapping)
+	result, err := executeImport(ictx, adapter, session, body.TableName, body.Schema, body.ColumnMapping, s.excelOpenOptions())
 	if err != nil {
 		s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, "失败")
 		writeErr(w, http.StatusInternalServerError, "IMPORT_ERROR", err.Error())
@@ -504,8 +533,9 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, result)
 }
 
-// executeImport 执行导入：校验目标表/列来自元数据，参数化 INSERT 在同一事务内按批执行。
-func executeImport(ctx context.Context, adapter DataSourceAdapter, session *ImportSession, tableName, schema string, mapping []string) (*ImportExecuteResult, error) {
+// executeImport 执行导入：校验目标表/列来自元数据，参数化 INSERT 在同一事务内执行。
+// xlsxOpts 控制 XLSX 解压上限（与 importMaxMB 配置一致）；CSV 路径忽略该参数。
+func executeImport(ctx context.Context, adapter DataSourceAdapter, session *ImportSession, tableName, schema string, mapping []string, xlsxOpts excelize.Options) (*ImportExecuteResult, error) {
 	start := time.Now()
 	result := &ImportExecuteResult{}
 
@@ -566,7 +596,7 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 		joinIdentifiers(adapter, resolvedCols),
 		strings.Join(placeholders, ", "))
 
-	// 在一个事务中按 ImportBatchSize 批处理；任一行失败则全部回滚
+	// 整单独立事务；任一行失败则全部回滚（不支持部分成功）
 	tx, err := adapter.Begin(ctx, false)
 	if err != nil {
 		result.Error = fmt.Sprintf("开启事务失败: %v", err)
@@ -575,7 +605,7 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 
 	imported := 0
 	rowNum := 1 // 1-based 含表头；数据行从 2 起
-	err = streamImportRows(session, func(row []string, isHeader bool) error {
+	err = streamImportRows(session, xlsxOpts, func(row []string, isHeader bool) error {
 		if isHeader {
 			return nil
 		}
@@ -595,7 +625,7 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 			return &importRowError{row: rowNum, msg: adapter.NormalizeError(err).Message}
 		}
 		imported++
-		// 每批检查上下文取消
+		// 周期检查上下文取消（非分批提交）
 		if imported%ImportBatchSize == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -662,12 +692,12 @@ func validateImportTarget(ctx context.Context, adapter DataSourceAdapter, schema
 }
 
 // streamImportRows 逐行回调文件内容；CSV 与 XLSX 均流式读取，避免整表入内存。
-func streamImportRows(session *ImportSession, fn func(row []string, isHeader bool) error) error {
+func streamImportRows(session *ImportSession, xlsxOpts excelize.Options, fn func(row []string, isHeader bool) error) error {
 	switch session.Format {
 	case "csv":
 		return streamCSVRows(session.FilePath, fn)
 	case "xlsx":
-		return streamXLSXRows(session.FilePath, session.Sheet, fn)
+		return streamXLSXRows(session.FilePath, session.Sheet, xlsxOpts, fn)
 	}
 	return fmt.Errorf("不支持的格式")
 }
@@ -686,6 +716,7 @@ func streamCSVRows(path string, fn func(row []string, isHeader bool) error) erro
 	reader := csv.NewReader(f)
 	reader.LazyQuotes = true
 	reader.ReuseRecord = false
+	reader.FieldsPerRecord = -1
 	first := true
 	for {
 		row, err := reader.Read()
@@ -695,6 +726,9 @@ func streamCSVRows(path string, fn func(row []string, isHeader bool) error) erro
 		if err != nil {
 			return err
 		}
+		if len(row) > importMaxFieldsPerRow {
+			return fmt.Errorf("单行字段数超过上限 %d", importMaxFieldsPerRow)
+		}
 		if err := fn(row, first); err != nil {
 			return err
 		}
@@ -703,10 +737,15 @@ func streamCSVRows(path string, fn func(row []string, isHeader bool) error) erro
 }
 
 // streamXLSXRows 用 excelize Rows 迭代器逐行读取，不整表装入 [][]string。
-func streamXLSXRows(path, sheet string, fn func(row []string, isHeader bool) error) error {
-	f, err := excelize.OpenFile(path, excelize.Options{
-		UnzipSizeLimit: 512 << 20, UnzipXMLSizeLimit: 32 << 20,
-	})
+// opts 须与 Service.excelOpenOptions 一致，避免硬编码绕过 importMaxMB。
+func streamXLSXRows(path, sheet string, opts excelize.Options, fn func(row []string, isHeader bool) error) error {
+	if opts.UnzipSizeLimit <= 0 {
+		opts.UnzipSizeLimit = 512 << 20
+	}
+	if opts.UnzipXMLSizeLimit <= 0 {
+		opts.UnzipXMLSizeLimit = 32 << 20
+	}
+	f, err := excelize.OpenFile(path, opts)
 	if err != nil {
 		return err
 	}

@@ -46,12 +46,14 @@ func TestClassifySQL(t *testing.T) {
 
 func TestValidateSingleStatement(t *testing.T) {
 	cases := []struct {
-		sql  string
-		ok   bool
+		sql string
+		ok  bool
 	}{
 		{"SELECT 1", true},
 		{"SELECT 1;", true},
 		{"SELECT 1; ", true},
+		{"SELECT 1; -- trailing comment", true},
+		{"SELECT 1; /* block comment */", true},
 		{"SELECT 1; SELECT 2", false},
 		{"SELECT ';'; SELECT 2", false},
 		{"SELECT 'hello;world'", true},
@@ -143,8 +145,8 @@ func TestDollarQuote(t *testing.T) {
 
 func TestDangerousWrite(t *testing.T) {
 	cases := []struct {
-		sql     string
-		danger  bool
+		sql    string
+		danger bool
 	}{
 		{"TRUNCATE TABLE t", true},
 		{"DROP TABLE t", true},

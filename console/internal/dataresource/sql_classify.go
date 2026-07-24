@@ -26,10 +26,10 @@ const (
 	StmtDelete    StatementType = "DELETE"
 	StmtMerge     StatementType = "MERGE"
 	StmtTruncate  StatementType = "TRUNCATE"
-	StmtDDL       StatementType = "DDL"       // CREATE/ALTER/DROP
-	StmtDCL       StatementType = "DCL"       // GRANT/REVOKE
-	StmtCall      StatementType = "CALL"      // CALL/EXECUTE
-	StmtBegin     StatementType = "BEGIN"     // 显式事务控制
+	StmtDDL       StatementType = "DDL"   // CREATE/ALTER/DROP
+	StmtDCL       StatementType = "DCL"   // GRANT/REVOKE
+	StmtCall      StatementType = "CALL"  // CALL/EXECUTE
+	StmtBegin     StatementType = "BEGIN" // 显式事务控制
 	StmtCommit    StatementType = "COMMIT"
 	StmtRollback  StatementType = "ROLLBACK"
 	StmtSavepoint StatementType = "SAVEPOINT"
@@ -263,7 +263,7 @@ func ClassifySQL(sql string) StatementType {
 
 // ValidateSingleStatement 校验 SQL 是否为单条语句（不含分号分隔的多语句）。
 // 设计文档：一次请求只允许一条 SQL；服务端独立识别引号、注释和 PostgreSQL dollar quote。
-// 另识别 MySQL 反引号标识符（`col` / `` `a;b` ``），避免合法标识符被误判为多语句。
+// 另识别 MySQL 反引号标识符（`col` / “ `a;b` “），避免合法标识符被误判为多语句。
 func ValidateSingleStatement(sql string) error {
 	sql = strings.TrimSpace(sql)
 	if sql == "" {
@@ -292,8 +292,8 @@ func ValidateSingleStatement(sql string) error {
 			}
 			// 非 dollar quote（如 $1 参数）正常前进
 		case c == ';': // 语句外分号
-			// 检查分号后是否还有非空白内容
-			rest := strings.TrimSpace(string(rune[i+1:]))
+			// 分号后允许仅空白/注释（如 SELECT 1; -- note），有实质内容则视为多语句
+			rest := stripLeadingCommentsAndWhitespace(string(rune[i+1:]))
 			if rest != "" {
 				return errors.New("一次请求只允许一条 SQL，检测到多语句")
 			}
@@ -314,16 +314,24 @@ func stripLeadingCommentsAndWhitespace(sql string) string {
 			continue
 		}
 		if c == '-' && i+1 < len(r) && r[i+1] == '-' {
+			// skipLineComment 停在 \n 或 len；EOF 行注释无换行时不得 i++ 越界
 			i = skipLineComment(r, i)
-			i++
+			if i < len(r) {
+				i++
+			}
 			continue
 		}
 		if c == '/' && i+1 < len(r) && r[i+1] == '*' {
 			i = skipBlockComment(r, i)
-			i++
+			if i < len(r) {
+				i++
+			}
 			continue
 		}
 		break
+	}
+	if i > len(r) {
+		i = len(r)
 	}
 	return string(r[i:])
 }
@@ -370,7 +378,7 @@ func skipDoubleQuote(r []rune, i int) int {
 	return i
 }
 
-// skipBacktick 跳过 MySQL 反引号标识符：`name`；内部 `` 为转义反引号。
+// skipBacktick 跳过 MySQL 反引号标识符：`name`；内部 “ 为转义反引号。
 func skipBacktick(r []rune, i int) int {
 	i++ // 跳过开头 `
 	for i < len(r) {
@@ -409,7 +417,9 @@ func skipBlockComment(r []rune, i int) int {
 }
 
 // trySkipDollarQuote 识别 PostgreSQL dollar-quoted string：
-//   $$...$$ 或 $tag$...$tag$
+//
+//	$$...$$ 或 $tag$...$tag$
+//
 // tag 为可选标识符（字母/数字/下划线）。成功时返回闭合标签最后一个 rune 的下标。
 // $1 等参数占位符返回 ok=false。
 func trySkipDollarQuote(r []rune, i int) (int, bool) {
