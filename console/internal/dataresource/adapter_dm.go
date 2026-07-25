@@ -328,7 +328,7 @@ func (a *dmAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 func (a *dmAdapter) PageSQL(query string, limit, offset int) (string, error) {
 	// 与 MySQL 相同：派生表重名列会失败；无顶层 LIMIT 时直接追加（DM 8.1+）。
 	q := strings.TrimRight(strings.TrimSpace(query), ";")
-	if sqlHasTopLevelLimit(q) {
+	if sqlHasTopLevelRowLimiter(q) {
 		return fmt.Sprintf("SELECT * FROM (%s) _page LIMIT %d OFFSET %d", q, limit, offset), nil
 	}
 	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil

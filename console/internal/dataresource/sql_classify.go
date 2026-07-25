@@ -91,9 +91,95 @@ func hasWhereClause(sqlText string) bool {
 }
 
 // sqlHasTopLevelLimit 检查顶层是否已有 LIMIT（忽略子查询/括号内）。
-// 用于 MySQL/达梦分页：无 LIMIT 时直接追加，避免子查询包装触发派生表重名列错误。
 func sqlHasTopLevelLimit(sqlText string) bool {
 	return hasTopLevelKeyword(sqlText, "LIMIT")
+}
+
+// sqlHasTopLevelRowLimiter 检查顶层是否已有行限定/锁定子句。
+// 命中任一则不可安全追加 LIMIT（MySQL 要求 LIMIT 在 FOR UPDATE 前；DM FETCH FIRST 与 LIMIT 互斥）。
+func sqlHasTopLevelRowLimiter(sqlText string) bool {
+	if sqlHasTopLevelLimit(sqlText) {
+		return true
+	}
+	if hasTopLevelKeyword(sqlText, "FETCH") { // FETCH FIRST n ROWS ONLY
+		return true
+	}
+	// FOR UPDATE / FOR SHARE
+	if hasTopLevelKeywordPhrase(sqlText, "FOR UPDATE") || hasTopLevelKeywordPhrase(sqlText, "FOR SHARE") {
+		return true
+	}
+	// LOCK IN SHARE MODE
+	if hasTopLevelKeywordPhrase(sqlText, "LOCK IN SHARE MODE") {
+		return true
+	}
+	return false
+}
+
+// hasTopLevelKeywordPhrase 在剥离字面量后匹配顶层多词短语（空格折叠为单空格）。
+func hasTopLevelKeywordPhrase(sqlText, phrase string) bool {
+	upper := strings.ToUpper(stripStringLiteralsAndComments(sqlText))
+	// 折叠空白
+	var sb strings.Builder
+	prevSpace := false
+	depth := 0
+	for _, c := range upper {
+		switch c {
+		case '(':
+			depth++
+			sb.WriteRune(c)
+			prevSpace = false
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			sb.WriteRune(c)
+			prevSpace = false
+		case ' ', '\t', '\n', '\r':
+			if depth == 0 {
+				if !prevSpace {
+					sb.WriteByte(' ')
+					prevSpace = true
+				}
+			} else {
+				sb.WriteByte(' ')
+				prevSpace = true
+			}
+		default:
+			sb.WriteRune(c)
+			prevSpace = false
+		}
+	}
+	cleaned := strings.TrimSpace(sb.String())
+	// 仅在 depth 无关的顶层：简单 Contains 在已去括号内容上仍可能匹配子查询；
+	// 用 depth 扫描短语更准。
+	target := strings.ToUpper(phrase)
+	depth = 0
+	runes := []rune(cleaned)
+	tRunes := []rune(target)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '(' {
+			depth++
+			continue
+		}
+		if runes[i] == ')' {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		if i+len(tRunes) <= len(runes) && string(runes[i:i+len(tRunes)]) == target {
+			beforeOK := i == 0 || !isIdentRune(runes[i-1])
+			after := i + len(tRunes)
+			afterOK := after >= len(runes) || !isIdentRune(runes[after])
+			if beforeOK && afterOK {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasTopLevelKeyword 在剥离字面量/注释后的 SQL 中查找顶层独立关键字。
