@@ -396,7 +396,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
         {dm ? (
           <Field
             label="默认 Schema（用户模式）"
-            hint="达梦无独立「库」层：连接实例后为 schema/用户 → 表。可留空，默认与用户名相同"
+            hint="达梦无独立「库」层：写入连接 DSN，变更后会重建连接池。可留空，默认与用户名相同"
           >
             <input
               className="input"
@@ -412,7 +412,14 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
             <Field label="数据库名" hint="必填 · 目标 database / catalog，不是 schema">
               <input className="input" name="databaseName" value={form.databaseName || ''} onChange={(e) => set('databaseName', e.target.value)} autoComplete="off" />
             </Field>
-            <Field label="默认 Schema" hint="可选 · MySQL 可留空；PostgreSQL 常用 public">
+            <Field
+              label="默认 Schema"
+              hint={
+                form.dbType === 'pgx' || form.dbType === 'kingbase'
+                  ? '可选 · 常用 public。注意：授权可见范围为整个 database 的所有 schema，实际权限由数据库账号决定；推荐资源使用只读账号作为第三层保护'
+                  : '可选 · MySQL 可留空'
+              }
+            >
               <input className="input" name="defaultSchema" value={form.defaultSchema || ''} onChange={(e) => set('defaultSchema', e.target.value)} autoComplete="off" />
             </Field>
           </React.Fragment>

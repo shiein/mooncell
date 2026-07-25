@@ -196,7 +196,7 @@ function CreateUserDialog({ open, onClose, onCreated, apps }) {
         <Field label="授权访问的应用" hint="可多选;未选则登录后看不到任何应用">
           <AppPicker apps={apps} selected={appIds} onChange={setAppIds} />
         </Field>
-        <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证">
+        <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证。PostgreSQL/Kingbase 可见范围为整个库的所有 schema，实际权限由数据库账号决定；推荐资源使用只读账号">
           <DataResourceGrantPicker resources={resources} grants={drGrants} onChange={setDrGrants} />
         </Field>
       </div>
@@ -251,7 +251,7 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
         <Field label="授权访问的应用">
           <AppPicker apps={apps} selected={appIds} onChange={setAppIds} />
         </Field>
-        <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证">
+        <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证。PostgreSQL/Kingbase 可见范围为整个库的所有 schema，实际权限由数据库账号决定；推荐资源使用只读账号">
           <DataResourceGrantPicker resources={resources} grants={drGrants} onChange={setDrGrants} />
         </Field>
       </div>
