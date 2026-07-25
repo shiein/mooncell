@@ -128,7 +128,8 @@ func hasTopLevelKeyword(sqlText, keyword string) bool {
 	return false
 }
 
-// stripStringLiteralsAndComments 移除 SQL 中的字符串字面量、注释与 dollar quote，避免误判关键字。
+// stripStringLiteralsAndComments 移除 SQL 中的字符串字面量、注释、dollar quote 与 MySQL 反引号标识符，避免误判关键字。
+// 须与 ValidateSingleStatement 的跳过集合保持一致（含 skipBacktick）。
 func stripStringLiteralsAndComments(sql string) string {
 	var sb strings.Builder
 	r := []rune(sql)
@@ -140,6 +141,9 @@ func stripStringLiteralsAndComments(sql string) string {
 			i = skipSingleQuote(r, i)
 		case c == '"':
 			i = skipDoubleQuote(r, i)
+		case c == '`':
+			// MySQL 反引号标识符：整段丢弃，避免 `where`/`delete` 触发危险确认或 CTE 误分类
+			i = skipBacktick(r, i)
 		case c == '-' && i+1 < len(r) && r[i+1] == '-':
 			i = skipLineComment(r, i)
 		case c == '/' && i+1 < len(r) && r[i+1] == '*':

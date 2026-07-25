@@ -204,6 +204,9 @@ func TestDangerousWrite(t *testing.T) {
 		{"DELETE FROM t WHERE name = 'hello WHERE world'", false},
 		// 子查询内 WHERE 不应让无 WHERE 的外层 DELETE 逃过确认
 		{"DELETE FROM target USING (SELECT 1 WHERE true) s", true},
+		// MySQL 反引号表名 where 不得被当成 WHERE 子句而跳过二次确认
+		{"DELETE FROM `where`", true},
+		{"DELETE FROM `where` WHERE id = 1", false},
 	}
 	for _, c := range cases {
 		stmtType := ClassifySQL(c.sql)
@@ -211,5 +214,13 @@ func TestDangerousWrite(t *testing.T) {
 		if got != c.danger {
 			t.Errorf("IsDangerousWrite(%q) = %v, 期望 %v", c.sql, got, c.danger)
 		}
+	}
+}
+
+func TestClassifyCTEIgnoresBacktickKeywords(t *testing.T) {
+	// 列名 `delete` 不应把只读 CTE 判成 DELETE
+	sql := "WITH t AS (SELECT `delete` FROM x) SELECT * FROM t"
+	if got := ClassifySQL(sql); got != StmtSelect {
+		t.Fatalf("ClassifySQL(%q) = %s, want SELECT", sql, got)
 	}
 }
