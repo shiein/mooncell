@@ -68,6 +68,10 @@ export async function testDataResourceDraft(id, payload) {
   });
 }
 
+export async function getResourceCapabilities(resourceId) {
+  return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/capabilities`);
+}
+
 export async function createWorkspace(resourceId) {
   return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/workspaces`, { method: 'POST' });
 }

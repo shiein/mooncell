@@ -13,15 +13,46 @@ import {
   commitWorkspace, rollbackWorkspace, metadataChildren, metadataStructure, metadataDDL,
   sqlTemplate, listSavedSQL, createSavedSQL, updateSavedSQL, deleteSavedSQL,
   exportWorkspace, previewImport, selectImportSheet, executeImport, deleteImport,
+  getResourceCapabilities,
 } from '../lib/dataresource-api.js';
 
 const TREE_MIN = 180;
 const TREE_MAX = 480;
 const EDITOR_MIN = 120;
 const EDITOR_MAX = 560;
-/** 结果区分页：默认每页 100；展开全部上限 10000（与后端 MaxLimit/ExpandAllMax 对齐） */
+/** 结果区分页：默认每页 100；展开全部上限 10000（与后端 MaxLimit 对齐） */
 const RESULT_PAGE_SIZE = 100;
 const RESULT_EXPAND_MAX = 10000;
+
+/** 公式注入防护（与后端 csvFormulaSafe 一致） */
+function csvFormulaSafe(s) {
+  if (s == null || s === '') return '';
+  const str = String(s);
+  const c = str[0];
+  if (c === '=' || c === '+' || c === '-' || c === '@') return `'${str}`;
+  return str;
+}
+
+/** 当前结果快照 → CSV Blob（客户端生成，不再 POST 回服务端） */
+function buildSnapshotCSVBlob(columns, rows) {
+  const esc = (v) => {
+    const s = csvFormulaSafe(v == null ? '' : String(v));
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const lines = [columns.map(esc).join(',')];
+  for (const row of rows || []) {
+    lines.push(columns.map((_, i) => {
+      const v = row[i];
+      if (v != null && typeof v === 'object' && v.type === 'binary') {
+        return esc(v.size != null ? `<binary ${v.size} bytes>` : '<binary>');
+      }
+      return esc(v);
+    }).join(','));
+  }
+  // UTF-8 BOM for Excel
+  return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), lines.join('\n') + '\n'], { type: 'text/csv;charset=utf-8' });
+}
 
 /** schema 节点：MySQL 下是 database（库）；PG/Kingbase/DM 是 schema/owner（模式） */
 function kindLabelFor(kind, dbType) {
@@ -57,6 +88,12 @@ function friendlyWorkspaceError(e) {
       return e.message || '当前为只读授权，无法执行写操作';
     case 'DANGEROUS_SQL':
       return e.message || '危险操作需二次确认';
+    case 'QUERY_CANCELED':
+      return e.message || '查询已取消或超时，可修改 SQL 后重试';
+    case 'DUPLICATE_COLUMN':
+      return e.message || '查询存在重复列名，请为列加别名或去掉自带 LIMIT';
+    case 'REQUEST_BODY_TOO_LARGE':
+      return e.message || '请求体过大，请缩小结果集或改用全量导出';
     default:
       return fallback;
   }
@@ -203,6 +240,7 @@ function DataWorkspacePage({ resource, onBack }) {
   const [structureState, setStructureState] = React.useState(null);
   const [importState, setImportState] = React.useState(null);
   const [exportState, setExportState] = React.useState(null);
+  const [caps, setCaps] = React.useState({ ddlSupported: true, importSupported: true });
   const [treeCollapsed, setTreeCollapsed] = React.useState(false);
   const [treeWidth, setTreeWidth] = React.useState(() => Number(localStorage.getItem('mc_dr_tree_width')) || 280);
   const [editorHeight, setEditorHeight] = React.useState(() => Number(localStorage.getItem('mc_dr_editor_height')) || 220);
@@ -263,6 +301,12 @@ function DataWorkspacePage({ resource, onBack }) {
       setAutoCommit(!!d.autoCommit);
       setTxState(d.txState || 'none');
     }).catch((e) => toast(e.message || '创建工作台失败', { tone: 'error' }));
+    getResourceCapabilities(resource.id).then((c) => {
+      if (alive && c) setCaps({
+        ddlSupported: c.ddlSupported !== false,
+        importSupported: c.importSupported !== false,
+      });
+    }).catch(() => {});
     refreshRoot();
     refreshSaved().catch(() => {});
     return () => {
@@ -841,12 +885,25 @@ function DataWorkspacePage({ resource, onBack }) {
     if (!wsId || !exportState) return;
     try {
       const current = exportState.scope === 'current';
+      if (current) {
+        // 快照仅客户端生成，避免 10k 行 POST 回环
+        if (exportState.format !== 'csv') {
+          toast('当前结果仅支持导出 CSV；完整结果请选「全部」导出 XLSX', { tone: 'warn' });
+          return;
+        }
+        if (!result?.columns?.length) {
+          toast('当前没有可导出的结果', { tone: 'warn' });
+          return;
+        }
+        const blob = buildSnapshotCSVBlob(result.columns, result.rows || []);
+        downloadBlob(blob, 'export-current.csv');
+        setExportState(null);
+        return;
+      }
       const blob = await exportWorkspace(resource.id, wsId, {
-        sql: current ? editorTarget().sql : '',
+        sql: '',
         format: exportState.format,
-        scope: exportState.scope,
-        columns: current ? (result?.columns || []) : [],
-        rows: current ? (result?.rows || []) : [],
+        scope: 'all',
       });
       downloadBlob(blob, `export.${exportState.format}`);
       setExportState(null);
@@ -890,16 +947,22 @@ function DataWorkspacePage({ resource, onBack }) {
     const actions = [
       { label: '查看数据', action: () => viewData(node) },
       ...(table ? [{ label: '查看表结构', action: () => showStructure(node) }] : []),
-      { label: '查看 DDL', action: () => showDDL(node) },
-      { label: '导出 DDL', action: () => downloadDDL(node) },
     ];
+    if (caps.ddlSupported) {
+      actions.push(
+        { label: '查看 DDL', action: () => showDDL(node) },
+        { label: '导出 DDL', action: () => downloadDDL(node) },
+      );
+    }
     if (canWrite && table) {
       actions.push(
         { label: '生成 INSERT', action: () => insertTemplate(node, 'INSERT') },
         { label: '生成 UPDATE', action: () => insertTemplate(node, 'UPDATE') },
         { label: '生成 DELETE', action: () => insertTemplate(node, 'DELETE') },
-        { label: '导入数据', action: () => openImport(node) },
       );
+      if (caps.importSupported) {
+        actions.push({ label: '导入数据', action: () => openImport(node) });
+      }
     }
     return actions;
   };
@@ -992,6 +1055,11 @@ function DataWorkspacePage({ resource, onBack }) {
         )}
 
         <main className="dr-main-pane">
+          {(resource.dbType === 'pgx' || resource.dbType === 'kingbase') ? (
+            <div className="dr-inline-status" style={{ marginBottom: 6, opacity: 0.85 }}>
+              PostgreSQL/Kingbase 可见范围为整个数据库的所有 schema；实际权限由数据库账号决定。推荐资源使用只读账号作为第三层保护。
+            </div>
+          ) : null}
           <div className="card dr-toolbar">
             {treeCollapsed ? (
               <React.Fragment>
