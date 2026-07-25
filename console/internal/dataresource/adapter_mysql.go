@@ -382,7 +382,7 @@ func (a *mysqlAdapter) PageSQL(query string, limit, offset int) (string, error) 
 	// SELECT * FROM (...) AS _page 会 ERROR 1060 Duplicate column name。
 	// 用户 SQL 无顶层 LIMIT 时直接追加，保留 JOIN 原投影。
 	q := strings.TrimRight(strings.TrimSpace(query), ";")
-	if sqlHasTopLevelLimit(q) {
+	if sqlHasTopLevelRowLimiter(q) {
 		return fmt.Sprintf("SELECT * FROM (%s) AS _page LIMIT %d OFFSET %d", q, limit, offset), nil
 	}
 	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil
@@ -448,6 +448,10 @@ func classifyMySQLErrorNumber(n uint16) string {
 		return "OBJECT_NOT_FOUND"
 	case 1044, 1045, 1142, 1227: // access denied / privilege
 		return "PERMISSION_DENIED"
+	case 1792: // Cannot execute statement in a READ ONLY transaction
+		return "DATA_RESOURCE_READ_ONLY"
+	case 1317, 1969: // Query execution was interrupted / statement timeout
+		return "QUERY_CANCELED"
 	case 1062: // duplicate entry
 		return "DUPLICATE_KEY"
 	case 1451, 1452, 1216, 1217, 1048: // FK / not null
@@ -456,6 +460,8 @@ func classifyMySQLErrorNumber(n uint16) string {
 		return "DEADLOCK"
 	case 1064: // syntax
 		return "SYNTAX_ERROR"
+	case 1060: // Duplicate column name（派生表重名列等）
+		return "DUPLICATE_COLUMN"
 	default:
 		return "DB_ERROR"
 	}

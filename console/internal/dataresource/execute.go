@@ -24,8 +24,6 @@ import (
 const (
 	DefaultLimit = 100   // SELECT 默认每页行数（隐式，不写入编辑器 SQL）
 	MaxLimit     = 10000 // SELECT 单次最大行数（展开全部上限）
-	// ExpandAllMax 与 MaxLimit 同值；前端注释对齐用。
-	ExpandAllMax = MaxLimit
 )
 
 // ExecutionResult 是 SQL 执行的返回结构。
@@ -217,12 +215,21 @@ func isLikelyUTF8Text(b []byte) bool {
 	return true
 }
 
-// toError 将 DatabaseError 转为 error。
+// Error 实现 error，保留稳定 Code 供 handler 透传（不再包一层丢失码）。
+func (de DatabaseError) Error() string {
+	if de.Message != "" {
+		return de.Message
+	}
+	return de.Code
+}
+
+// toError 将 DatabaseError 转为 error；Code 为空时返回 nil。
 func (de DatabaseError) toError() error {
 	if de.Code == "" {
 		return nil
 	}
-	return fmt.Errorf("[%s] %s", de.Code, de.Message)
+	e := de
+	return e
 }
 
 

@@ -642,6 +642,10 @@ func classifyPGSQLState(state string) string {
 		return "OBJECT_NOT_FOUND"
 	case "42501": // insufficient_privilege
 		return "PERMISSION_DENIED"
+	case "25006": // read_only_sql_transaction — 只读事务第二层安全边界
+		return "DATA_RESOURCE_READ_ONLY"
+	case "57014": // query_canceled — 语句超时/客户端取消
+		return "QUERY_CANCELED"
 	case "23505": // unique_violation
 		return "DUPLICATE_KEY"
 	case "23503", "23514", "23502": // FK / check / not null
@@ -651,12 +655,9 @@ func classifyPGSQLState(state string) string {
 	case "42601": // syntax_error
 		return "SYNTAX_ERROR"
 	}
-	// 类码前缀
+	// 类码前缀（精确匹配未覆盖的码）
 	switch state[:2] {
 	case "42":
-		if state == "42601" {
-			return "SYNTAX_ERROR"
-		}
 		return "DB_ERROR"
 	case "23":
 		return "CONSTRAINT_VIOLATION"

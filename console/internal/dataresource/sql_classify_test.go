@@ -213,6 +213,28 @@ func TestMySQLPageSQLAvoidsWrapWithoutLimit(t *testing.T) {
 	if !strings.Contains(got2, "AS _page") {
 		t.Fatalf("有 LIMIT 时应包装: %s", got2)
 	}
+	// FOR UPDATE / FETCH FIRST 也应包装
+	for _, sql := range []string{
+		`SELECT * FROM t FOR UPDATE`,
+		`SELECT * FROM t FETCH FIRST 10 ROWS ONLY`,
+	} {
+		g, err := a.PageSQL(sql, 100, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(g, "AS _page") {
+			t.Fatalf("行限定/锁定子句应包装: %s -> %s", sql, g)
+		}
+	}
+}
+
+func TestClassifyPGSQLStateReadOnlyAndCancel(t *testing.T) {
+	if got := classifyPGSQLState("25006"); got != "DATA_RESOURCE_READ_ONLY" {
+		t.Fatalf("25006 -> %s", got)
+	}
+	if got := classifyPGSQLState("57014"); got != "QUERY_CANCELED" {
+		t.Fatalf("57014 -> %s", got)
+	}
 }
 
 func TestDangerousWrite(t *testing.T) {

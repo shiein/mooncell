@@ -90,7 +90,7 @@ func (s *Service) PatchAutoCommit(w http.ResponseWriter, r *http.Request) {
 		AutoCommit bool `json:"autoCommit"`
 	}
 	if err := jsonDecodeBody(w, r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if err := s.workspaces.SetAutoCommit(ws, body.AutoCommit); err != nil {
@@ -118,7 +118,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		Confirmed bool   `json:"confirmed,omitempty"` // 危险 SQL 二次确认
 	}
 	if err := jsonDecodeBody(w, r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if body.SQL == "" {
@@ -158,6 +158,18 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 				return
 			}
 			writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
+			return
+		}
+		if de, ok := err.(DatabaseError); ok {
+			s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败·"+de.Code, 0)
+			status := http.StatusBadRequest
+			switch de.Code {
+			case "DATA_RESOURCE_READ_ONLY":
+				status = http.StatusForbidden
+			case "QUERY_CANCELED":
+				status = http.StatusRequestTimeout
+			}
+			writeErr(w, status, de.Code, de.Message)
 			return
 		}
 		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败", 0)
@@ -239,7 +251,7 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 	user, _, _ := userFromCtx(r)
 	var body RowEditRequest
 	if err := jsonDecodeBody(w, r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		writeJSONBodyError(w, err)
 		return
 	}
 	body.Table = strings.TrimSpace(body.Table)
@@ -339,30 +351,31 @@ func (s *Service) RollbackWorkspaceHandler(w http.ResponseWriter, r *http.Reques
 }
 
 // ExportFromWorkspace 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/export
-// 全量导出重新执行最近一次成功的查询。
+// 仅全量导出（重新执行最近成功查询）；当前页快照由前端本地生成 CSV，不再 POST 回环。
 func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws, mode, ok := s.resolveWorkspaceForRequest(w, r)
 	if !ok {
 		return
 	}
 	var body struct {
-		SQL     string   `json:"sql"`     // 指定导出 SQL；空则用最近一次成功查询
-		Format  string   `json:"format"`  // csv 或 xlsx
-		Scope   string   `json:"scope"`   // all 或 current
-		Columns []string `json:"columns"` // current 快照
-		Rows    [][]any  `json:"rows"`    // current 快照，最多 MaxLimit 行
+		SQL    string `json:"sql"`    // 指定导出 SQL；空则用最近一次成功查询
+		Format string `json:"format"` // csv 或 xlsx
+		Scope  string `json:"scope"`  // 仅 all；current 已废弃
 	}
 	if err := jsonDecodeBody(w, r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if body.Format == "" {
 		body.Format = "csv"
 	}
+	if body.Scope == "current" {
+		writeErr(w, http.StatusBadRequest, "BAD_SCOPE", "当前结果请在浏览器本地导出 CSV；服务端仅支持全量导出")
+		return
+	}
 	_ = mode // 授权已在 resolve 校验；SQL 已限制为只读
 
-	// 锁内仅快照 LastSQL/Adapter；导出走独立只读查询，不长时间占用 ws.mu，
-	// 避免慢客户端/大导出阻塞执行、提交与授权失效。
+	// 锁内仅快照 LastSQL/Adapter；导出走独立只读查询，不长时间占用 ws.mu
 	ws.mu.Lock()
 	ws.LastActivity = time.Now()
 	sqlText := body.SQL
@@ -371,23 +384,6 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	adapter := ws.Adapter
 	ws.mu.Unlock()
-
-	if body.Scope == "current" {
-		var err error
-		switch body.Format {
-		case "csv":
-			err = ExportSnapshotCSV(body.Columns, body.Rows, w)
-		case "xlsx":
-			err = ExportSnapshotXLSX(body.Columns, body.Rows, w)
-		default:
-			writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: "+body.Format)
-			return
-		}
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "EXPORT_ERROR", err.Error())
-		}
-		return
-	}
 
 	if sqlText == "" {
 		writeErr(w, http.StatusBadRequest, "NO_QUERY", "无可导出的查询")
@@ -407,14 +403,10 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 			if _, ok := err.(*ErrExportLimit); ok {
 				return
 			}
-			// 响应体已开始：禁止 writeErr JSON，否则会污染 CSV 文件
+			// 响应体已开始：禁止 writeErr JSON；ErrAbortHandler 静默中止连接
 			var bodyStarted *ErrExportBodyStarted
 			if errors.As(err, &bodyStarted) {
-				// 尽量截断连接，避免客户端以为下载完整成功
-				if rc := http.NewResponseController(w); rc != nil {
-					_ = rc.SetWriteDeadline(time.Now().Add(-time.Second))
-				}
-				return
+				panic(http.ErrAbortHandler)
 			}
 			writeErr(w, http.StatusBadRequest, "EXPORT_ERROR", err.Error())
 			return
