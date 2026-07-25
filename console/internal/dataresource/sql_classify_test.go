@@ -1,6 +1,7 @@
 package dataresource
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -140,6 +141,49 @@ func TestDollarQuote(t *testing.T) {
 	sql5 := `SELECT $1`
 	if err := ValidateSingleStatement(sql5); err != nil {
 		t.Errorf("$1 参数应作为单语句通过: %v", err)
+	}
+}
+
+func TestSQLHasTopLevelLimit(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want bool
+	}{
+		{`SELECT * FROM a JOIN b ON a.id = b.id`, false},
+		{`SELECT * FROM t LIMIT 10`, true},
+		{`SELECT * FROM t LIMIT 10 OFFSET 5`, true},
+		// 子查询内 LIMIT 不算顶层
+		{`SELECT * FROM (SELECT * FROM t LIMIT 1) x`, false},
+		{`SELECT * FROM t WHERE name = 'LIMIT 1'`, false},
+	}
+	for _, c := range cases {
+		if got := sqlHasTopLevelLimit(c.sql); got != c.want {
+			t.Errorf("sqlHasTopLevelLimit(%q) = %v, want %v", c.sql, got, c.want)
+		}
+	}
+}
+
+func TestMySQLPageSQLAvoidsWrapWithoutLimit(t *testing.T) {
+	a := &mysqlAdapter{}
+	join := `SELECT * FROM orders o JOIN users u ON o.user_id = u.id`
+	got, err := a.PageSQL(join, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, " LIMIT 100 OFFSET 0") {
+		t.Fatalf("无 LIMIT 的 JOIN 应直接追加分页: %s", got)
+	}
+	if strings.Contains(got, "AS _page") {
+		t.Fatalf("无 LIMIT 时不应子查询包装: %s", got)
+	}
+	// 用户已有 LIMIT：仍包装
+	withLim := `SELECT * FROM t LIMIT 5`
+	got2, err := a.PageSQL(withLim, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got2, "AS _page") {
+		t.Fatalf("有 LIMIT 时应包装: %s", got2)
 	}
 }
 

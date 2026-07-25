@@ -15,6 +15,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -356,16 +357,7 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 		}
 		defer tx.Rollback()
 
-		pageSQL, err := ws.Adapter.PageSQL(sqlText, limit, offset)
-		if err != nil {
-			return err
-		}
-		rows, err := tx.Query(ctx, pageSQL)
-		if err != nil {
-			return ws.Adapter.NormalizeError(err).toError()
-		}
-		defer rows.Close()
-		if err := fillResult(rows, result, limit); err != nil {
+		if err := queryPageIntoResult(ctx, ws.Adapter, tx, sqlText, limit, offset, result); err != nil {
 			return err
 		}
 
@@ -406,23 +398,41 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 		ws.TxState = TxActive
 	}
 
-	pageSQL, err := ws.Adapter.PageSQL(sqlText, limit, offset)
-	if err != nil {
-		return err
-	}
-	rows, err := ws.Tx.Query(ctx, pageSQL)
-	if err != nil {
-		ws.TxState = TxFailed
-		return ws.Adapter.NormalizeError(err).toError()
-	}
-	defer rows.Close()
-	if err := fillResult(rows, result, limit); err != nil {
+	if err := queryPageIntoResult(ctx, ws.Adapter, ws.Tx, sqlText, limit, offset, result); err != nil {
 		ws.TxState = TxFailed
 		return err
 	}
 	// 手工事务中不自动统计总数（避免副作用函数被调用两次）
 	result.TotalStatus = "unavailable"
 	result.HasMore = result.ReturnedRows >= limit
+	return nil
+}
+
+// queryPageIntoResult 执行分页查询并填充 result。
+// 优先 PageSQL；若包装失败（如 MySQL 派生表重名列）则对原文流式跳过 offset、读取 limit。
+func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q interface {
+	Query(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}, sqlText string, limit, offset int, result *ExecutionResult) error {
+	pageSQL, err := adapter.PageSQL(sqlText, limit, offset)
+	if err != nil {
+		return err
+	}
+	rows, err := q.Query(ctx, pageSQL)
+	if err == nil {
+		defer rows.Close()
+		return fillResult(rows, result, limit)
+	}
+	pageErr := err
+	// 流式兜底：不改写用户 SQL（大 offset 成本高，仅作包装失败时的正确性回退）
+	raw := strings.TrimRight(strings.TrimSpace(sqlText), ";")
+	rows2, err2 := q.Query(ctx, raw)
+	if err2 != nil {
+		return adapter.NormalizeError(pageErr).toError()
+	}
+	defer rows2.Close()
+	if err := fillResultStream(rows2, result, limit, offset); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -527,14 +537,67 @@ func (wm *WorkspaceManager) SetAutoCommit(ws *Workspace, autoCommit bool) error 
 	return nil
 }
 
-// fillResult 从 rows 填充 ExecutionResult。
-// 优先使用 *sql.Rows 的 ColumnTypes 区分 TEXT 与 BLOB。
+// fillResult 从已分页的 rows 填充 ExecutionResult（PageSQL 已含 LIMIT/OFFSET）。
+// HasMore 启发式：返回行数 == limit 时可能还有下一页。
 func fillResult(rows interface {
 	Columns() ([]string, error)
 	Next() bool
 	Scan(...any) error
 	Err() error
 }, result *ExecutionResult, limit int) error {
+	if err := scanRowsInto(rows, result, limit); err != nil {
+		return err
+	}
+	result.HasMore = result.ReturnedRows == limit
+	return nil
+}
+
+// fillResultStream 对未分页结果：跳过 offset 后读取 limit+1 行以判断 HasMore。
+func fillResultStream(rows interface {
+	Columns() ([]string, error)
+	Next() bool
+	Scan(...any) error
+	Err() error
+}, result *ExecutionResult, limit, offset int) error {
+	// 跳过 offset
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	for skipped := 0; skipped < offset; skipped++ {
+		if !rows.Next() {
+			result.Columns = cols
+			result.ReturnedRows = 0
+			result.HasMore = false
+			return rows.Err()
+		}
+		discard := make([]any, len(cols))
+		dptrs := make([]any, len(cols))
+		for i := range discard {
+			dptrs[i] = &discard[i]
+		}
+		if err := rows.Scan(dptrs...); err != nil {
+			return err
+		}
+	}
+	// 多读 1 行判断 hasMore
+	if err := scanRowsInto(rows, result, limit+1); err != nil {
+		return err
+	}
+	result.HasMore = result.ReturnedRows > limit
+	if result.HasMore {
+		result.Rows = result.Rows[:limit]
+		result.ReturnedRows = limit
+	}
+	return nil
+}
+
+func scanRowsInto(rows interface {
+	Columns() ([]string, error)
+	Next() bool
+	Scan(...any) error
+	Err() error
+}, result *ExecutionResult, maxRows int) error {
 	cols, err := rows.Columns()
 	if err != nil {
 		return err
@@ -544,7 +607,10 @@ func fillResult(rows interface {
 	if sr, ok := rows.(*sql.Rows); ok {
 		typeNames = columnTypeNames(sr, len(cols))
 	}
-	for rows.Next() {
+	for maxRows <= 0 || len(result.Rows) < maxRows {
+		if !rows.Next() {
+			break
+		}
 		values := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range values {
@@ -563,6 +629,5 @@ func fillResult(rows interface {
 		return err
 	}
 	result.ReturnedRows = len(result.Rows)
-	result.HasMore = result.ReturnedRows == limit
 	return nil
 }

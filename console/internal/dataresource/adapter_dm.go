@@ -321,12 +321,16 @@ func (a *dmAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 }
 
 func (a *dmAdapter) PageSQL(query string, limit, offset int) (string, error) {
-	// 子查询包装，避免与用户 SQL 已有 LIMIT 冲突；DM 8.1+ 支持 LIMIT/OFFSET。
+	// 与 MySQL 相同：派生表重名列会失败；无顶层 LIMIT 时直接追加（DM 8.1+）。
 	q := strings.TrimRight(strings.TrimSpace(query), ";")
-	return fmt.Sprintf("SELECT * FROM (%s) _page LIMIT %d OFFSET %d", q, limit, offset), nil
+	if sqlHasTopLevelLimit(q) {
+		return fmt.Sprintf("SELECT * FROM (%s) _page LIMIT %d OFFSET %d", q, limit, offset), nil
+	}
+	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil
 }
 
 func (a *dmAdapter) CountSQL(query string) (string, error) {
+	// COUNT 包装失败时由调用方降级 totalStatus=unavailable。
 	q := strings.TrimRight(strings.TrimSpace(query), ";")
 	return fmt.Sprintf("SELECT COUNT(*) FROM (%s) _count", q), nil
 }

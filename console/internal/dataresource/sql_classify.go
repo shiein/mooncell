@@ -87,7 +87,21 @@ func (st StatementType) IsDangerousWrite(sqlText string) bool {
 // hasWhereClause 检查顶层 DELETE/UPDATE 是否带 WHERE（尽力而为，非完整解析）。
 // 忽略括号内子查询中的 WHERE，避免 USING (SELECT … WHERE …) 绕过危险确认。
 func hasWhereClause(sqlText string) bool {
+	return hasTopLevelKeyword(sqlText, "WHERE")
+}
+
+// sqlHasTopLevelLimit 检查顶层是否已有 LIMIT（忽略子查询/括号内）。
+// 用于 MySQL/达梦分页：无 LIMIT 时直接追加，避免子查询包装触发派生表重名列错误。
+func sqlHasTopLevelLimit(sqlText string) bool {
+	return hasTopLevelKeyword(sqlText, "LIMIT")
+}
+
+// hasTopLevelKeyword 在剥离字面量/注释后的 SQL 中查找顶层独立关键字。
+func hasTopLevelKeyword(sqlText, keyword string) bool {
 	upper := strings.ToUpper(stripStringLiteralsAndComments(sqlText))
+	kw := strings.ToUpper(keyword)
+	kwRunes := []rune(kw)
+	kwLen := len(kwRunes)
 	depth := 0
 	runes := []rune(upper)
 	for i := 0; i < len(runes); i++ {
@@ -102,10 +116,9 @@ func hasWhereClause(sqlText string) bool {
 			if depth != 0 {
 				continue
 			}
-			// 匹配独立的 WHERE 关键字
-			if i+5 <= len(runes) && string(runes[i:i+5]) == "WHERE" {
+			if i+kwLen <= len(runes) && string(runes[i:i+kwLen]) == kw {
 				beforeOK := i == 0 || !isIdentRune(runes[i-1])
-				afterOK := i+5 >= len(runes) || !isIdentRune(runes[i+5])
+				afterOK := i+kwLen >= len(runes) || !isIdentRune(runes[i+kwLen])
 				if beforeOK && afterOK {
 					return true
 				}
