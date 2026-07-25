@@ -67,7 +67,7 @@ func (s *Service) MetadataChildren(w http.ResponseWriter, r *http.Request) {
 	}
 	children, err := adapter.Children(r.Context(), parent)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "METADATA_ERROR", err.Error())
+		writeErr(w, http.StatusInternalServerError, "METADATA_ERROR", sanitizeErrMsg(err.Error()))
 		return
 	}
 	if children == nil {
@@ -94,7 +94,7 @@ func (s *Service) MetadataStructure(w http.ResponseWriter, r *http.Request) {
 	}
 	structure, err := adapter.Describe(r.Context(), node)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "METADATA_ERROR", err.Error())
+		writeErr(w, http.StatusInternalServerError, "METADATA_ERROR", sanitizeErrMsg(err.Error()))
 		return
 	}
 	writeOK(w, structure)
@@ -118,7 +118,7 @@ func (s *Service) MetadataDDL(w http.ResponseWriter, r *http.Request) {
 	}
 	ddl, err := adapter.DDL(r.Context(), node)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "DDL_ERROR", err.Error())
+		writeErr(w, http.StatusInternalServerError, "DDL_ERROR", sanitizeErrMsg(err.Error()))
 		return
 	}
 	writeOK(w, map[string]string{"ddl": ddl})
@@ -150,7 +150,7 @@ func (s *Service) MetadataSQLTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	tpl, err := adapter.SQLTemplate(node, body.Operation)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "TEMPLATE_ERROR", err.Error())
+		writeErr(w, http.StatusInternalServerError, "TEMPLATE_ERROR", sanitizeErrMsg(err.Error()))
 		return
 	}
 	writeOK(w, map[string]string{"sql": tpl})

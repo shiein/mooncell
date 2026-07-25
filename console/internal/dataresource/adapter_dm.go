@@ -195,8 +195,13 @@ func (a *dmAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 			} else if dataPrec.Int64 > 0 {
 				fullType = fmt.Sprintf("%s(%d)", dataType, dataPrec.Int64)
 			}
-		} else if dataLen.Valid && dataLen.Int64 > 0 && dataType == "VARCHAR2" {
-			fullType = fmt.Sprintf("%s(%d)", dataType, dataLen.Int64)
+		} else if dataLen.Valid && dataLen.Int64 > 0 {
+			// DM8 all_tab_columns 对变长字符常报 VARCHAR（非仅 VARCHAR2）
+			dt := strings.ToUpper(strings.TrimSpace(dataType))
+			if dt == "VARCHAR2" || dt == "VARCHAR" || dt == "CHAR" || dt == "CHARACTER" ||
+				dt == "NVARCHAR2" || dt == "NVARCHAR" || dt == "NCHAR" {
+				fullType = fmt.Sprintf("%s(%d)", dataType, dataLen.Int64)
+			}
 		}
 		structure.Columns = append(structure.Columns, ColumnInfo{
 			Name: name, DataType: fullType, IsNullable: nullable == "Y",
@@ -350,17 +355,28 @@ func (a *dmAdapter) NormalizeError(err error) DatabaseError {
 	}
 	msg := err.Error()
 	code := "DB_ERROR"
-	if strings.Contains(msg, "does not exist") || strings.Contains(msg, "ORA-00942") {
+	lower := strings.ToLower(msg)
+	// 达梦驱动常返回中文；与 classifyConnError 一样同时匹配中英文/ORA 码
+	switch {
+	case strings.Contains(msg, "ORA-00942") || strings.Contains(msg, "ORA-00904") ||
+		strings.Contains(lower, "does not exist") || strings.Contains(msg, "不存在") ||
+		strings.Contains(msg, "无效的表") || strings.Contains(msg, "无效的列"):
 		code = "OBJECT_NOT_FOUND"
-	} else if strings.Contains(msg, "insufficient privileges") {
+	case strings.Contains(lower, "insufficient privileges") || strings.Contains(msg, "权限不足") ||
+		strings.Contains(msg, "没有权限") || strings.Contains(msg, "权限被拒绝") ||
+		strings.Contains(msg, "ORA-01031"):
 		code = "PERMISSION_DENIED"
-	} else if strings.Contains(msg, "unique constraint") {
+	case strings.Contains(lower, "unique constraint") || strings.Contains(msg, "唯一") ||
+		strings.Contains(msg, "重复") || strings.Contains(msg, "ORA-00001"):
 		code = "DUPLICATE_KEY"
-	} else if strings.Contains(msg, "violated") {
+	case strings.Contains(lower, "violated") || strings.Contains(msg, "约束") ||
+		strings.Contains(msg, "完整性") || strings.Contains(msg, "ORA-02291") ||
+		strings.Contains(msg, "ORA-02292"):
 		code = "CONSTRAINT_VIOLATION"
-	} else if strings.Contains(msg, "deadlock") {
+	case strings.Contains(lower, "deadlock") || strings.Contains(msg, "死锁"):
 		code = "DEADLOCK"
-	} else if strings.Contains(msg, "syntax") {
+	case strings.Contains(lower, "syntax") || strings.Contains(msg, "语法") ||
+		strings.Contains(msg, "ORA-00933") || strings.Contains(msg, "ORA-00936"):
 		code = "SYNTAX_ERROR"
 	}
 	return DatabaseError{Code: code, Message: sanitizeErrMsg(msg)}

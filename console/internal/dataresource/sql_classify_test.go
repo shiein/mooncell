@@ -144,6 +144,34 @@ func TestDollarQuote(t *testing.T) {
 	}
 }
 
+func TestNormalizeConstraintTypeOracleR(t *testing.T) {
+	if got := normalizeConstraintType("R"); got != "foreign" {
+		t.Fatalf("Oracle/DM R → foreign, got %q", got)
+	}
+	if got := normalizeConstraintType("f"); got != "foreign" {
+		t.Fatalf("PG f → foreign, got %q", got)
+	}
+	if got := normalizeConstraintType("P"); got != "primary" {
+		t.Fatalf("P → primary, got %q", got)
+	}
+}
+
+func TestSanitizeErrMsgRuneSafe(t *testing.T) {
+	// 构造超过 500 rune 的中文，截断后应为合法 UTF-8
+	var b strings.Builder
+	for i := 0; i < 600; i++ {
+		b.WriteRune('中')
+	}
+	out := sanitizeErrMsg(b.String())
+	if !strings.HasSuffix(out, "...") {
+		t.Fatalf("应带省略号")
+	}
+	core := strings.TrimSuffix(out, "...")
+	if len([]rune(core)) != 500 {
+		t.Fatalf("应按 500 rune 截断, got %d", len([]rune(core)))
+	}
+}
+
 func TestSQLHasTopLevelLimit(t *testing.T) {
 	cases := []struct {
 		sql  string

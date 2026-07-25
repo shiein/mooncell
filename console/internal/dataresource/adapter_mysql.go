@@ -4,8 +4,11 @@ package dataresource
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 type mysqlAdapter struct {
@@ -302,13 +305,56 @@ func (a *mysqlAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error
 	if err := a.ensureBoundSchema(ctx, obj.Schema); err != nil {
 		return "", err
 	}
-	// MySQL 可用 SHOW CREATE TABLE 获取完整 DDL
-	var ddl sql.NullString
-	err := a.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+a.QuoteIdentifier(obj.Schema)+"."+a.QuoteIdentifier(obj.Name)).Scan(&ddl, &ddl)
-	if err != nil {
-		return "", fmt.Errorf("获取 DDL 失败: %w", err)
+	qual := a.QuoteIdentifier(obj.Schema) + "." + a.QuoteIdentifier(obj.Name)
+	switch obj.Kind {
+	case NodeView:
+		// SHOW CREATE VIEW 返回 4 列：View, Create View, character_set_client, collation_connection
+		var name, ddl sql.NullString
+		var cs, coll sql.NullString
+		err := a.db.QueryRowContext(ctx, "SHOW CREATE VIEW "+qual).Scan(&name, &ddl, &cs, &coll)
+		if err != nil {
+			return "", fmt.Errorf("获取视图 DDL 失败: %w", err)
+		}
+		return ddl.String, nil
+	case NodeFunction:
+		// SHOW CREATE FUNCTION：Function, sql_mode, Create Function, character_set_client, collation_connection, Database Collation
+		var name, mode, ddl, cs, coll, dbColl sql.NullString
+		err := a.db.QueryRowContext(ctx, "SHOW CREATE FUNCTION "+qual).Scan(&name, &mode, &ddl, &cs, &coll, &dbColl)
+		if err != nil {
+			return "", fmt.Errorf("获取函数 DDL 失败: %w", err)
+		}
+		return ddl.String, nil
+	case NodeProcedure:
+		var name, mode, ddl, cs, coll, dbColl sql.NullString
+		err := a.db.QueryRowContext(ctx, "SHOW CREATE PROCEDURE "+qual).Scan(&name, &mode, &ddl, &cs, &coll, &dbColl)
+		if err != nil {
+			return "", fmt.Errorf("获取存储过程 DDL 失败: %w", err)
+		}
+		return ddl.String, nil
+	case NodeTrigger:
+		// SHOW CREATE TRIGGER：Trigger, sql_mode, SQL Original Statement, character_set_client, collation_connection, Database Collation, Created
+		var name, mode, ddl, cs, coll, dbColl sql.NullString
+		var created sql.NullString
+		err := a.db.QueryRowContext(ctx, "SHOW CREATE TRIGGER "+qual).Scan(&name, &mode, &ddl, &cs, &coll, &dbColl, &created)
+		if err != nil {
+			// 部分版本无 Created 列
+			err = a.db.QueryRowContext(ctx, "SHOW CREATE TRIGGER "+qual).Scan(&name, &mode, &ddl, &cs, &coll, &dbColl)
+			if err != nil {
+				return "", fmt.Errorf("获取触发器 DDL 失败: %w", err)
+			}
+		}
+		return ddl.String, nil
+	case NodeTable, "":
+		// SHOW CREATE TABLE：Table, Create Table
+		var name, ddl sql.NullString
+		err := a.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qual).Scan(&name, &ddl)
+		if err != nil {
+			return "", fmt.Errorf("获取表 DDL 失败: %w", err)
+		}
+		return ddl.String, nil
+	default:
+		return "", fmt.Errorf("不支持导出该对象类型的 DDL: %s", obj.Kind)
 	}
-	return ddl.String, nil
 }
 
 func (a *mysqlAdapter) SQLTemplate(obj MetadataNode, operation string) (string, error) {
@@ -363,20 +409,56 @@ func (a *mysqlAdapter) NormalizeError(err error) DatabaseError {
 	}
 	msg := err.Error()
 	code := "DB_ERROR"
-	if strings.Contains(msg, "Unknown column") || strings.Contains(msg, "doesn't exist") {
-		code = "OBJECT_NOT_FOUND"
-	} else if strings.Contains(msg, "Access denied") {
-		code = "PERMISSION_DENIED"
-	} else if strings.Contains(msg, "Duplicate entry") {
-		code = "DUPLICATE_KEY"
-	} else if strings.Contains(msg, "constraint") || strings.Contains(msg, "foreign key") {
-		code = "CONSTRAINT_VIOLATION"
-	} else if strings.Contains(msg, "Deadlock") {
-		code = "DEADLOCK"
-	} else if strings.Contains(msg, "syntax") {
-		code = "SYNTAX_ERROR"
+	sqlState := ""
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) && myErr != nil {
+		if myErr.SQLState != [5]byte{} {
+			sqlState = string(myErr.SQLState[:])
+		}
+		if myErr.Message != "" {
+			msg = myErr.Message
+		}
+		code = classifyMySQLErrorNumber(myErr.Number)
+	} else {
+		lower := strings.ToLower(msg)
+		switch {
+		case strings.Contains(msg, "Unknown column") || strings.Contains(lower, "doesn't exist") ||
+			strings.Contains(msg, "不存在"):
+			code = "OBJECT_NOT_FOUND"
+		case strings.Contains(msg, "Access denied") || strings.Contains(msg, "拒绝访问") ||
+			strings.Contains(msg, "权限"):
+			code = "PERMISSION_DENIED"
+		case strings.Contains(msg, "Duplicate entry") || strings.Contains(msg, "重复"):
+			code = "DUPLICATE_KEY"
+		case strings.Contains(lower, "constraint") || strings.Contains(lower, "foreign key") ||
+			strings.Contains(msg, "约束"):
+			code = "CONSTRAINT_VIOLATION"
+		case strings.Contains(lower, "deadlock") || strings.Contains(msg, "死锁"):
+			code = "DEADLOCK"
+		case strings.Contains(lower, "syntax") || strings.Contains(msg, "语法"):
+			code = "SYNTAX_ERROR"
+		}
 	}
-	return DatabaseError{Code: code, Message: sanitizeErrMsg(msg)}
+	return DatabaseError{Code: code, Message: sanitizeErrMsg(msg), SQLState: sqlState}
+}
+
+func classifyMySQLErrorNumber(n uint16) string {
+	switch n {
+	case 1054, 1146, 1049: // unknown column / table / database
+		return "OBJECT_NOT_FOUND"
+	case 1044, 1045, 1142, 1227: // access denied / privilege
+		return "PERMISSION_DENIED"
+	case 1062: // duplicate entry
+		return "DUPLICATE_KEY"
+	case 1451, 1452, 1216, 1217, 1048: // FK / not null
+		return "CONSTRAINT_VIOLATION"
+	case 1213: // deadlock
+		return "DEADLOCK"
+	case 1064: // syntax
+		return "SYNTAX_ERROR"
+	default:
+		return "DB_ERROR"
+	}
 }
 
 func (a *mysqlAdapter) Capabilities() Capabilities {

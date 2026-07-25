@@ -5,9 +5,12 @@ package dataresource
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // pgAdapter 实现 PostgreSQL/Kingbase/Vastbase 的适配器。
@@ -390,13 +393,14 @@ func (a *pgAdapter) pgConstraintColumns(ctx context.Context, oid int64, referenc
 	return out, rows.Err()
 }
 
-// normalizeConstraintType 将 information_schema 的 "PRIMARY KEY" 等规范为 primary/foreign/unique/check。
+// normalizeConstraintType 将 information_schema / Oracle 风格约束类型规范为 primary/foreign/unique/check。
+// PG contype: p/f/u/c；Oracle/达梦 constraint_type: P/R/U/C（R=Referential=外键）。
 func normalizeConstraintType(t string) string {
 	s := strings.ToLower(strings.TrimSpace(t))
 	switch s {
 	case "p":
 		return "primary"
-	case "f":
+	case "f", "r": // f=PG foreign；r=Oracle/DM referential
 		return "foreign"
 	case "u":
 		return "unique"
@@ -589,26 +593,77 @@ func (a *pgAdapter) Placeholder(n int) string {
 }
 
 // NormalizeError 归一化 PostgreSQL 错误。
+// 优先用 pgconn.PgError.Code（SQLSTATE），不依赖 lc_messages 语言。
 func (a *pgAdapter) NormalizeError(err error) DatabaseError {
 	if err == nil {
 		return DatabaseError{}
 	}
 	msg := err.Error()
 	code := "DB_ERROR"
-	if strings.Contains(msg, "does not exist") {
-		code = "OBJECT_NOT_FOUND"
-	} else if strings.Contains(msg, "permission denied") {
-		code = "PERMISSION_DENIED"
-	} else if strings.Contains(msg, "duplicate key") {
-		code = "DUPLICATE_KEY"
-	} else if strings.Contains(msg, "violates") {
-		code = "CONSTRAINT_VIOLATION"
-	} else if strings.Contains(msg, "deadlock") {
-		code = "DEADLOCK"
-	} else if strings.Contains(msg, "syntax error") {
-		code = "SYNTAX_ERROR"
+	sqlState := ""
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr != nil {
+		sqlState = pgErr.Code
+		if pgErr.Message != "" {
+			msg = pgErr.Message
+			if pgErr.Detail != "" {
+				msg = msg + ": " + pgErr.Detail
+			}
+		}
+		code = classifyPGSQLState(pgErr.Code)
+	} else {
+		// 非 pgx 包装错误时回退子串（兼容驱动边界）
+		lower := strings.ToLower(msg)
+		switch {
+		case strings.Contains(lower, "does not exist") || strings.Contains(msg, "不存在"):
+			code = "OBJECT_NOT_FOUND"
+		case strings.Contains(lower, "permission denied") || strings.Contains(msg, "权限") || strings.Contains(msg, "拒绝"):
+			code = "PERMISSION_DENIED"
+		case strings.Contains(lower, "duplicate key") || strings.Contains(msg, "重复"):
+			code = "DUPLICATE_KEY"
+		case strings.Contains(lower, "violates") || strings.Contains(msg, "约束"):
+			code = "CONSTRAINT_VIOLATION"
+		case strings.Contains(lower, "deadlock") || strings.Contains(msg, "死锁"):
+			code = "DEADLOCK"
+		case strings.Contains(lower, "syntax error") || strings.Contains(msg, "语法"):
+			code = "SYNTAX_ERROR"
+		}
 	}
-	return DatabaseError{Code: code, Message: sanitizeErrMsg(msg)}
+	return DatabaseError{Code: code, Message: sanitizeErrMsg(msg), SQLState: sqlState}
+}
+
+// classifyPGSQLState 将 PostgreSQL SQLSTATE 映射为稳定业务错误码。
+func classifyPGSQLState(state string) string {
+	if len(state) < 2 {
+		return "DB_ERROR"
+	}
+	switch state {
+	case "42P01", "42703", "42704", "3F000": // undefined table/column/object/schema
+		return "OBJECT_NOT_FOUND"
+	case "42501": // insufficient_privilege
+		return "PERMISSION_DENIED"
+	case "23505": // unique_violation
+		return "DUPLICATE_KEY"
+	case "23503", "23514", "23502": // FK / check / not null
+		return "CONSTRAINT_VIOLATION"
+	case "40P01": // deadlock_detected
+		return "DEADLOCK"
+	case "42601": // syntax_error
+		return "SYNTAX_ERROR"
+	}
+	// 类码前缀
+	switch state[:2] {
+	case "42":
+		if state == "42601" {
+			return "SYNTAX_ERROR"
+		}
+		return "DB_ERROR"
+	case "23":
+		return "CONSTRAINT_VIOLATION"
+	case "28":
+		return "PERMISSION_DENIED"
+	}
+	return "DB_ERROR"
 }
 
 // Capabilities 返回 PostgreSQL 适配器能力。
@@ -629,14 +684,17 @@ var (
 )
 
 // sanitizeErrMsg 移除错误消息中可能包含的敏感信息（DSN、密码等）。
+// 截断按 rune，避免切断中文等多字节字符。
 func sanitizeErrMsg(msg string) string {
 	if msg == "" {
 		return msg
 	}
 	msg = reURLCred.ReplaceAllString(msg, `${1}***@`)
 	msg = reKVSecret.ReplaceAllString(msg, `${1}=***`)
-	if len(msg) > 500 {
-		msg = msg[:500] + "..."
+	const maxRunes = 500
+	runes := []rune(msg)
+	if len(runes) > maxRunes {
+		msg = string(runes[:maxRunes]) + "..."
 	}
 	return msg
 }
