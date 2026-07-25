@@ -38,6 +38,30 @@ function kindLabelFor(kind, dbType) {
   return '';
 }
 
+/** 将后端稳定错误码转为可操作的提示（避免一律「执行失败」）。 */
+function friendlyWorkspaceError(e) {
+  const code = e && e.code;
+  const fallback = (e && e.message) || '执行失败';
+  switch (code) {
+    case 'WORKSPACE_CLOSED':
+      return e.message || '工作台已关闭或失效，请重新打开资源';
+    case 'RESOURCE_BUSY':
+    case 'TX_ACTIVE':
+    case 'IMPORT_ACTIVE':
+      return e.message || '资源正被占用（事务/导入/配置变更），请稍后再试';
+    case 'CONFIG_CHANGED':
+      return e.message || '资源配置已变更，请刷新后重试';
+    case 'AUTO_COMMIT_REQUIRED':
+      return e.message || '请先开启自动提交，或使用 SQL 完成编辑';
+    case 'DATA_RESOURCE_READ_ONLY':
+      return e.message || '当前为只读授权，无法执行写操作';
+    case 'DANGEROUS_SQL':
+      return e.message || '危险操作需二次确认';
+    default:
+      return fallback;
+  }
+}
+
 function cellIsBinary(v) {
   return v != null && typeof v === 'object' && v.type === 'binary';
 }
@@ -358,9 +382,10 @@ function DataWorkspacePage({ resource, onBack }) {
         }
         return false;
       }
+      const friendly = friendlyWorkspaceError(e);
       setResult(null);
-      setMsg(e.message || '执行失败');
-      if (!silentToast) toast(e.message || '执行失败', { tone: 'error' });
+      setMsg(friendly);
+      if (!silentToast) toast(friendly, { tone: 'error' });
       return false;
     } finally {
       if (runControllerRef.current === controller) {
