@@ -37,11 +37,46 @@ type Workspace struct {
 	ReadOnly     bool // 用户对该资源为 read 授权时为 true；手工事务必须以只读事务创建
 	TxState      TxState
 	Tx           Transaction // 活动事务（nil 表示无）
+	// txCtx/txCancel：手工事务生命周期与单次 HTTP 请求解耦。
+	// database/sql 的 BeginTx(ctx) 在 ctx 取消时会主动 rollback；若用请求 ctx 开启事务，
+	// 请求结束后 defer cancel 会静默毁掉 ws.Tx，导致「执行成功但提交已回滚」。
+	txCtx        context.Context
+	txCancel     context.CancelFunc
 	Adapter      DataSourceAdapter
 	LastSQL      string     // 最近一次成功的查询（供全量导出重放）
 	LastActivity time.Time  // 最近活动时间（用于超时回滚）
 	closed       bool       // 已失效/删除：持指针的迟到请求必须拒绝
 	mu           sync.Mutex // 串行化同一工作台的请求
+}
+
+// beginManualTxLocked 开启工作台级手工事务（调用方须已持 ws.mu）。
+// Begin 使用独立于请求的 txCtx；单条语句仍用调用方传入的短超时 ctx。
+func (ws *Workspace) beginManualTxLocked(readOnly bool) (Transaction, error) {
+	// 与空闲回滚窗口对齐，防止 goroutine/连接无限挂起
+	ctx, cancel := context.WithTimeout(context.Background(), txIdleTimeout)
+	tx, err := ws.Adapter.Begin(ctx, readOnly)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	ws.txCtx = ctx
+	ws.txCancel = cancel
+	return tx, nil
+}
+
+// clearTxLocked 清理事务指针与 txCtx（调用方须已持 ws.mu）。
+// endPool 为 true 时递减 pool.activeTx（事务曾成功占用计数时使用）。
+func (ws *Workspace) clearTxLocked(endPool bool, pool *PoolManager) {
+	if ws.txCancel != nil {
+		ws.txCancel()
+		ws.txCancel = nil
+	}
+	ws.txCtx = nil
+	ws.Tx = nil
+	ws.TxState = TxNone
+	if endPool && pool != nil {
+		pool.EndTx(ws.ResourceID)
+	}
 }
 
 // errWorkspaceClosed 工作台已从管理器移除或被失效。
@@ -114,10 +149,10 @@ func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	ws.mu.Lock()
 	ws.closed = true
 	if ws.Tx != nil {
-		ws.Tx.Rollback()
-		ws.Tx = nil
-		ws.TxState = TxNone
-		wm.pool.EndTx(ws.ResourceID)
+		_ = ws.Tx.Rollback()
+		ws.clearTxLocked(true, wm.pool)
+	} else {
+		ws.clearTxLocked(false, nil)
 	}
 	ws.mu.Unlock()
 }
@@ -135,10 +170,8 @@ func (wm *WorkspaceManager) RollbackUserTx(username, resourceID string) {
 	for _, ws := range toRollback {
 		ws.mu.Lock()
 		if ws.Tx != nil {
-			ws.Tx.Rollback()
-			ws.Tx = nil
-			ws.TxState = TxNone
-			wm.pool.EndTx(ws.ResourceID)
+			_ = ws.Tx.Rollback()
+			ws.clearTxLocked(true, wm.pool)
 		}
 		ws.mu.Unlock()
 	}
@@ -205,10 +238,8 @@ func (wm *WorkspaceManager) CleanupIdle() int {
 	for _, ws := range candidates {
 		ws.mu.Lock()
 		if ws.Tx != nil && now.Sub(ws.LastActivity) > txIdleTimeout {
-			ws.Tx.Rollback()
-			ws.Tx = nil
-			ws.TxState = TxNone
-			wm.pool.EndTx(ws.ResourceID)
+			_ = ws.Tx.Rollback()
+			ws.clearTxLocked(true, wm.pool)
 			rolledBack++
 		}
 		ws.mu.Unlock()
@@ -227,11 +258,12 @@ func (wm *WorkspaceManager) CloseAll() {
 	wm.mu.Unlock()
 	for _, ws := range list {
 		ws.mu.Lock()
+		ws.closed = true
 		if ws.Tx != nil {
-			ws.Tx.Rollback()
-			ws.Tx = nil
-			ws.TxState = TxNone
-			wm.pool.EndTx(ws.ResourceID)
+			_ = ws.Tx.Rollback()
+			ws.clearTxLocked(true, wm.pool)
+		} else {
+			ws.clearTxLocked(false, nil)
 		}
 		ws.mu.Unlock()
 	}
@@ -358,15 +390,16 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 		return nil
 	}
 
-	// 手工事务：在当前事务中执行
+	// 手工事务：在当前事务中执行（Begin 用工作台 txCtx，语句用请求短超时 ctx）
 	if ws.Tx == nil {
 		// 第一条 SQL 创建事务；只读用户必须 Begin(readOnly=true)
-		tx, err := ws.Adapter.Begin(ctx, ws.ReadOnly)
+		tx, err := ws.beginManualTxLocked(ws.ReadOnly)
 		if err != nil {
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
 		if err := wm.pool.BeginTx(ws.ResourceID); err != nil {
 			_ = tx.Rollback()
+			ws.clearTxLocked(false, nil)
 			return &APIError{Code: "IMPORT_ACTIVE", Message: err.Error()}
 		}
 		ws.Tx = tx
@@ -418,14 +451,15 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 		return nil
 	}
 
-	// 手工事务
+	// 手工事务（Begin 用工作台 txCtx，语句用请求短超时 ctx）
 	if ws.Tx == nil {
-		tx, err := ws.Adapter.Begin(ctx, false)
+		tx, err := ws.beginManualTxLocked(false)
 		if err != nil {
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
 		if err := wm.pool.BeginTx(ws.ResourceID); err != nil {
 			_ = tx.Rollback()
+			ws.clearTxLocked(false, nil)
 			return &APIError{Code: "IMPORT_ACTIVE", Message: err.Error()}
 		}
 		ws.Tx = tx
@@ -452,13 +486,12 @@ func (wm *WorkspaceManager) CommitWorkspace(ws *Workspace) error {
 	if ws.Tx == nil {
 		return fmt.Errorf("无活动事务可提交")
 	}
-	if err := ws.Tx.Commit(); err != nil {
-		ws.TxState = TxFailed
+	err := ws.Tx.Commit()
+	// database/sql：Commit 返回后事务已结束（成功或失败），必须释放计数与 cancel，避免 activeTx 泄漏
+	ws.clearTxLocked(true, wm.pool)
+	if err != nil {
 		return fmt.Errorf("提交失败: %w", err)
 	}
-	ws.Tx = nil
-	ws.TxState = TxNone
-	wm.pool.EndTx(ws.ResourceID)
 	return nil
 }
 
@@ -473,12 +506,8 @@ func (wm *WorkspaceManager) RollbackWorkspace(ws *Workspace) error {
 	if ws.Tx == nil {
 		return nil // 无事务可回滚，幂等
 	}
-	if err := ws.Tx.Rollback(); err != nil {
-		// 回滚失败也清除状态（连接可能已断开）
-	}
-	ws.Tx = nil
-	ws.TxState = TxNone
-	wm.pool.EndTx(ws.ResourceID)
+	_ = ws.Tx.Rollback() // 回滚失败也清除状态（连接可能已断开）
+	ws.clearTxLocked(true, wm.pool)
 	return nil
 }
 
