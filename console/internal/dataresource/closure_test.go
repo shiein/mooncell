@@ -3,6 +3,8 @@ package dataresource
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -50,5 +52,20 @@ func TestExportSnapshotCSVUsesProvidedRows(t *testing.T) {
 	body := bytes.TrimPrefix(recorder.Body.Bytes(), []byte{0xEF, 0xBB, 0xBF})
 	if got := string(body); got != "id,name\n1,screen value\n" {
 		t.Fatalf("快照 CSV 内容不符: %q", got)
+	}
+}
+
+func TestWrapIfBodyStarted(t *testing.T) {
+	base := fmt.Errorf("scan failed")
+	if err := wrapIfBodyStarted(false, base); err != base {
+		t.Fatalf("body 未开始应返回原错误")
+	}
+	err := wrapIfBodyStarted(true, base)
+	var partial *ErrExportBodyStarted
+	if !errors.As(err, &partial) {
+		t.Fatalf("body 已开始应包装为 ErrExportBodyStarted, got %T", err)
+	}
+	if !errors.Is(err, base) {
+		t.Fatalf("应 Unwrap 到原错误")
 	}
 }

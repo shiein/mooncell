@@ -13,6 +13,7 @@ package dataresource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -406,10 +407,16 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 			if _, ok := err.(*ErrExportLimit); ok {
 				return
 			}
-			// 若尚未写入响应体，ExportCSV 会返回错误；已写头则无法改状态
-			if !headersSentHint(err) {
-				writeErr(w, http.StatusBadRequest, "EXPORT_ERROR", err.Error())
+			// 响应体已开始：禁止 writeErr JSON，否则会污染 CSV 文件
+			var bodyStarted *ErrExportBodyStarted
+			if errors.As(err, &bodyStarted) {
+				// 尽量截断连接，避免客户端以为下载完整成功
+				if rc := http.NewResponseController(w); rc != nil {
+					_ = rc.SetWriteDeadline(time.Now().Add(-time.Second))
+				}
+				return
 			}
+			writeErr(w, http.StatusBadRequest, "EXPORT_ERROR", err.Error())
 			return
 		}
 	case "xlsx":
@@ -424,11 +431,6 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusBadRequest, "BAD_FORMAT", "不支持的导出格式: "+body.Format)
 	}
-}
-
-// headersSentHint 预留：CSV 成功写头后的错误无法再 JSON 化。
-func headersSentHint(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "headers_sent")
 }
 
 // DeleteWorkspaceHandler 处理 DELETE /api/data-resources/{id}/workspaces/{workspaceId}

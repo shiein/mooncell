@@ -32,6 +32,36 @@ type ErrExportLimit struct {
 
 func (e *ErrExportLimit) Error() string { return e.Reason }
 
+// ErrExportBodyStarted 表示 CSV 响应体已开始写入后发生错误。
+// handler 不得再 writeErr JSON，否则会污染已发出的下载内容。
+type ErrExportBodyStarted struct {
+	Err error
+}
+
+func (e *ErrExportBodyStarted) Error() string {
+	if e == nil || e.Err == nil {
+		return "export response body already started"
+	}
+	return e.Err.Error()
+}
+
+func (e *ErrExportBodyStarted) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func wrapIfBodyStarted(bodyStarted bool, err error) error {
+	if err == nil {
+		return nil
+	}
+	if bodyStarted {
+		return &ErrExportBodyStarted{Err: err}
+	}
+	return err
+}
+
 const ExportSnapshotMaxRows = MaxLimit
 
 // prepareExportSQL 校验导出 SQL：单语句且必须为只读查询。
@@ -106,6 +136,7 @@ func snapshotCellString(v any) string {
 
 // ExportCSV 流式导出查询结果为 CSV。
 // 先成功 Begin/Query/Columns，再写响应头，避免失败时返回空 200 下载。
+// 一旦写出响应体，后续错误包装为 ErrExportBodyStarted，禁止 handler 再写 JSON。
 func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
 	if err := prepareExportSQL(sqlText); err != nil {
 		return err
@@ -134,16 +165,21 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.csv", time.Now().Format("20060102-150405")))
 
+	bodyStarted := false
 	// BOM for Excel UTF-8
-	n, _ := w.Write([]byte{0xEF, 0xBB, 0xBF})
+	n, err := w.Write([]byte{0xEF, 0xBB, 0xBF})
+	if err != nil {
+		return err
+	}
+	bodyStarted = true
 	approxBytes := n
 
 	cw := csv.NewWriter(w)
-	defer cw.Flush()
+	// 不 defer Flush：body 已开始后 Flush 失败也不得让 handler 写 JSON；成功路径末尾显式 Flush
 
 	// 写表头
 	if err := cw.Write(cols); err != nil {
-		return err
+		return wrapIfBodyStarted(bodyStarted, err)
 	}
 	for _, c := range cols {
 		approxBytes += len(c) + 1
@@ -154,7 +190,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 		if rowCount >= ExportMaxRows {
 			cw.Flush()
 			msg := "\n... 已达到最大导出行数限制 (" + strconv.Itoa(ExportMaxRows) + " 行)\n"
-			w.Write([]byte(msg))
+			_, _ = w.Write([]byte(msg))
 			return &ErrExportLimit{Reason: "已达到最大导出行数限制"}
 		}
 		values := make([]any, len(cols))
@@ -163,7 +199,8 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return err
+			_ = cw.Error()
+			return wrapIfBodyStarted(bodyStarted, err)
 		}
 		record := make([]string, len(cols))
 		rowBytes := 0
@@ -174,16 +211,23 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 		if approxBytes+rowBytes > ExportMaxBytes {
 			cw.Flush()
 			msg := fmt.Sprintf("\n... 已达到最大导出体积限制 (%d MB)\n", ExportMaxBytes>>20)
-			w.Write([]byte(msg))
+			_, _ = w.Write([]byte(msg))
 			return &ErrExportLimit{Reason: "已达到最大导出体积限制"}
 		}
 		if err := cw.Write(record); err != nil {
-			return err
+			return wrapIfBodyStarted(bodyStarted, err)
 		}
 		approxBytes += rowBytes
 		rowCount++
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return wrapIfBodyStarted(bodyStarted, err)
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		return wrapIfBodyStarted(bodyStarted, err)
+	}
+	return nil
 }
 
 // csvFormulaSafe 防止 Excel 将单元格当公式执行（以 = + - @ 开头）。
