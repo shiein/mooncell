@@ -3,6 +3,7 @@ package dataresource
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -88,6 +89,113 @@ func openTestSQLite(t *testing.T) (*sql.DB, *testSQLAdapter) {
 		t.Fatal(err)
 	}
 	return db, &testSQLAdapter{db: db}
+}
+
+// blockingAdapter 的 Query/Exec 阻塞直到 ctx 取消，用于测试 CancelWorkspaceStatement。
+type blockingAdapter struct {
+	started chan struct{}
+}
+
+type blockingTx struct{ started chan struct{} }
+
+func (t *blockingTx) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	select {
+	case <-t.started:
+	default:
+		close(t.started)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (t *blockingTx) Query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	select {
+	case <-t.started:
+	default:
+		close(t.started)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (t *blockingTx) QueryRow(ctx context.Context, query string, args ...any) *sql.Row {
+	return nil
+}
+func (t *blockingTx) Commit() error   { return nil }
+func (t *blockingTx) Rollback() error { return nil }
+
+func (a *blockingAdapter) Ping(ctx context.Context) (ServerInfo, error) {
+	return ServerInfo{}, nil
+}
+func (a *blockingAdapter) Begin(ctx context.Context, readOnly bool) (Transaction, error) {
+	return &blockingTx{started: a.started}, nil
+}
+func (a *blockingAdapter) Children(ctx context.Context, parent MetadataNode) ([]MetadataNode, error) {
+	return nil, nil
+}
+func (a *blockingAdapter) Describe(ctx context.Context, object MetadataNode) (ObjectStructure, error) {
+	return ObjectStructure{}, nil
+}
+func (a *blockingAdapter) DDL(ctx context.Context, obj MetadataNode) (string, error) {
+	return "", fmt.Errorf("n/a")
+}
+func (a *blockingAdapter) SQLTemplate(obj MetadataNode, operation string) (string, error) {
+	return "", fmt.Errorf("n/a")
+}
+func (a *blockingAdapter) PageSQL(query string, limit, offset int) (string, error) {
+	return query, nil
+}
+func (a *blockingAdapter) CountSQL(query string) (string, error) {
+	return "SELECT 0", nil
+}
+func (a *blockingAdapter) QuoteIdentifier(name string) string { return name }
+func (a *blockingAdapter) Placeholder(n int) string           { return "?" }
+func (a *blockingAdapter) NormalizeError(err error) DatabaseError {
+	return DatabaseError{Code: "DB_ERROR", Message: err.Error()}
+}
+func (a *blockingAdapter) Capabilities() Capabilities { return Capabilities{} }
+
+// TestCancelWorkspaceStatementUnblocksExecute 取消 API 不持 mu，能打断阻塞中的执行。
+func TestCancelWorkspaceStatementUnblocksExecute(t *testing.T) {
+	started := make(chan struct{})
+	adapter := &blockingAdapter{started: started}
+	pool := NewPoolManager(nil)
+	wm := NewWorkspaceManager(pool)
+	ws := wm.CreateWorkspace("res-cancel", "dave", adapter, false)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := wm.ExecuteInWorkspace(context.Background(), ws, `SELECT 1`, 10, 0)
+		done <- err
+	}()
+
+	// 等语句进入阻塞
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("语句未开始")
+	}
+
+	// cancel 不得与 Execute 死锁：不持 ws.mu
+	if !wm.CancelWorkspaceStatement(ws) {
+		t.Fatal("应触发 cancel")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("取消后应返回错误")
+		}
+		var de DatabaseError
+		if !errors.As(err, &de) || de.Code != "QUERY_CANCELED" {
+			t.Fatalf("期望 QUERY_CANCELED, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("取消后执行应迅速返回，仍阻塞说明 cancel 未生效")
+	}
+
+	// 无执行中语句时 cancel 返回 false
+	if wm.CancelWorkspaceStatement(ws) {
+		t.Fatal("无执行时应 canceled=false")
+	}
 }
 
 // TestManualTxSurvivesRequestContextCancel 锁死：

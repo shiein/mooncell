@@ -103,6 +103,20 @@ func (s *Service) PatchAutoCommit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// CancelWorkspaceHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/cancel
+// 取消当前正在执行的语句。不得获取 ws.mu（否则与 Execute 死锁）。
+func (s *Service) CancelWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
+	ws, _, ok := s.resolveWorkspaceForRequest(w, r)
+	if !ok {
+		return
+	}
+	canceled := s.workspaces.CancelWorkspaceStatement(ws)
+	writeOK(w, map[string]any{
+		"canceled": canceled,
+		// 执行中无法安全读 TxState（需 mu）；取消后前端以 execute 返回的 QUERY_CANCELED / txState 为准
+	})
+}
+
 // ExecuteInWorkspace 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/execute
 func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 	ws, mode, ok := s.resolveWorkspaceForRequest(w, r)

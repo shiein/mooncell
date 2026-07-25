@@ -99,6 +99,14 @@ export async function executeSQL(resourceId, workspaceId, { sql, limit, offset, 
   );
 }
 
+/** 取消工作台上正在执行的语句（服务端登记的 stmtCancel，不依赖仅断 HTTP） */
+export async function cancelWorkspaceSQL(resourceId, workspaceId) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/cancel`,
+    { method: 'POST' },
+  );
+}
+
 /** 结果区就地编辑：按主键批量 UPDATE/DELETE（仅单表且有主键） */
 export async function applyRowEdits(resourceId, workspaceId, payload) {
   return jsonFetch(

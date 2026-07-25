@@ -9,7 +9,7 @@ import {
   Btn, Icon, Spinner, EmptyState, Dialog, toast, Badge, Field, confirmDialog,
 } from '../components/primitives.jsx';
 import {
-  createWorkspace, deleteWorkspace, executeSQL, patchAutoCommit, applyRowEdits,
+  createWorkspace, deleteWorkspace, executeSQL, cancelWorkspaceSQL, patchAutoCommit, applyRowEdits,
   commitWorkspace, rollbackWorkspace, metadataChildren, metadataStructure, metadataDDL,
   sqlTemplate, listSavedSQL, createSavedSQL, updateSavedSQL, deleteSavedSQL,
   exportWorkspace, previewImport, selectImportSheet, executeImport, deleteImport,
@@ -1068,7 +1068,11 @@ function DataWorkspacePage({ resource, onBack }) {
             ) : null}
             <Btn size="sm" variant="primary" icon="play" disabled={busy || !wsId} onClick={() => runSQL(false, '', { resetPage: true })}>执行</Btn>
             <Btn size="sm" variant="ghost" icon="stop" disabled={!busy}
-              onClick={() => runControllerRef.current?.abort()}>取消</Btn>
+              onClick={() => {
+                // 先通知服务端取消语句（不持 ws.mu），再 abort 客户端请求
+                if (wsId) cancelWorkspaceSQL(resource.id, wsId).catch(() => {});
+                runControllerRef.current?.abort();
+              }}>取消</Btn>
             <Btn size="sm" variant="ghost" disabled={busy} onClick={toggleAC}>自动提交: {autoCommit ? '开' : '关'}</Btn>
             <Btn size="sm" variant="ghost" disabled={autoCommit || txState !== 'active'} onClick={doCommit}>提交</Btn>
             <Btn size="sm" variant="ghost" disabled={autoCommit || txState === 'none'} onClick={doRollback}>回滚</Btn>

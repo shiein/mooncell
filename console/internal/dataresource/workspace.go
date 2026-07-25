@@ -50,7 +50,38 @@ type Workspace struct {
 	LastSQL      string     // 最近一次成功的查询（供全量导出重放）
 	LastActivity time.Time  // 最近活动时间（用于超时回滚）
 	closed       bool       // 已失效/删除：持指针的迟到请求必须拒绝
-	mu           sync.Mutex // 串行化同一工作台的请求
+	mu           sync.Mutex // 串行化同一工作台的请求（执行/提交/回滚）
+	// stmtMu/stmtCancel：当前语句取消函数，与 mu 分离。
+	// Cancel 接口不得获取 mu，否则与正在执行的 Execute 死锁。
+	stmtMu     sync.Mutex
+	stmtCancel context.CancelFunc
+}
+
+// setStmtCancel 登记当前语句的 cancel（调用方持有或不持有 ws.mu 均可）。
+func (ws *Workspace) setStmtCancel(cancel context.CancelFunc) {
+	ws.stmtMu.Lock()
+	ws.stmtCancel = cancel
+	ws.stmtMu.Unlock()
+}
+
+// clearStmtCancel 清除登记（执行结束时）。
+func (ws *Workspace) clearStmtCancel() {
+	ws.stmtMu.Lock()
+	ws.stmtCancel = nil
+	ws.stmtMu.Unlock()
+}
+
+// cancelRunningStmt 取消当前正在执行的语句。不获取 ws.mu，可被 cancel API 安全调用。
+// 返回是否确实触发了 cancel（false 表示当前无执行中的语句）。
+func (ws *Workspace) cancelRunningStmt() bool {
+	ws.stmtMu.Lock()
+	cancel := ws.stmtCancel
+	ws.stmtMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 // beginManualTxLocked 开启工作台级手工事务（调用方须已持 ws.mu）。
@@ -289,8 +320,34 @@ func (wm *WorkspaceManager) CloseAll() {
 	}
 }
 
+// CancelWorkspaceStatement 取消工作台上正在执行的语句（不持 ws.mu）。
+func (wm *WorkspaceManager) CancelWorkspaceStatement(ws *Workspace) bool {
+	if ws == nil {
+		return false
+	}
+	return ws.cancelRunningStmt()
+}
+
+// mapStmtContextError 将语句 ctx 取消/超时映射为稳定 QUERY_CANCELED；其它错误走适配器归一化。
+func mapStmtContextError(adapter DataSourceAdapter, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return DatabaseError{Code: "QUERY_CANCELED", Message: "查询已取消"}.toError()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return DatabaseError{Code: "QUERY_CANCELED", Message: "查询超时"}.toError()
+	}
+	if adapter != nil {
+		return adapter.NormalizeError(err).toError()
+	}
+	return err
+}
+
 // ExecuteInWorkspace 在工作台中执行 SQL，处理自动提交和手工事务逻辑。
 // limit/offset 仅对 SELECT 生效：服务端隐式分页，不改写编辑器中的 SQL 文本。
+// 执行期间登记 stmtCancel，供 POST .../cancel 在不持 mu 的情况下取消语句。
 func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit, offset int) (*ExecutionResult, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -299,9 +356,13 @@ func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspac
 	}
 	ws.LastActivity = time.Now()
 
-	// 服务端执行期限，防止慢查询占满连接池
+	// 服务端执行期限 + 可被 CancelWorkspaceStatement 取消
 	qctx, cancel := context.WithTimeout(ctx, QueryTimeout)
-	defer cancel()
+	ws.setStmtCancel(cancel)
+	defer func() {
+		ws.clearStmtCancel()
+		cancel()
+	}()
 	ctx = qctx
 
 	// 校验单语句
@@ -372,6 +433,9 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 		// 自动提交：只读事务
 		tx, err := ws.Adapter.Begin(ctx, true)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return mapStmtContextError(ws.Adapter, err)
+			}
 			return fmt.Errorf("开启只读事务失败: %w", err)
 		}
 		defer tx.Rollback()
@@ -440,9 +504,15 @@ func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q inter
 	rows, err := q.Query(ctx, pageSQL)
 	if err == nil {
 		defer rows.Close()
-		return fillResult(rows, result, limit)
+		if err := fillResult(rows, result, limit); err != nil {
+			return mapStmtContextError(adapter, err)
+		}
+		return nil
 	}
 	pageErr := err
+	if errors.Is(pageErr, context.Canceled) || errors.Is(pageErr, context.DeadlineExceeded) {
+		return mapStmtContextError(adapter, pageErr)
+	}
 	if offset != 0 || !isDuplicateColumnPageError(pageErr) {
 		// 用户自带 LIMIT/FETCH 且包装后重名列：给明确文案
 		if isDuplicateColumnPageError(pageErr) {
@@ -451,16 +521,19 @@ func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q inter
 				Message: "该查询存在重复列名，无法自动分页；请显式指定列别名，或去掉 SQL 中的 LIMIT/FETCH/FOR UPDATE 后重试",
 			}.toError()
 		}
-		return adapter.NormalizeError(pageErr).toError()
+		return mapStmtContextError(adapter, pageErr)
 	}
 	// 仅 offset=0 的重名列：流式读 limit+1，避免全量拉取后丢弃
 	raw := strings.TrimRight(strings.TrimSpace(sqlText), ";")
 	rows2, err2 := q.Query(ctx, raw)
 	if err2 != nil {
-		return adapter.NormalizeError(pageErr).toError()
+		return mapStmtContextError(adapter, pageErr)
 	}
 	defer rows2.Close()
-	return fillResultStream(rows2, result, limit, 0)
+	if err := fillResultStream(rows2, result, limit, 0); err != nil {
+		return mapStmtContextError(adapter, err)
+	}
+	return nil
 }
 
 // isDuplicateColumnPageError 识别 MySQL 1060 / 派生表重名列等包装失败。
@@ -498,12 +571,15 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 		// 自动提交：独立事务
 		tx, err := ws.Adapter.Begin(ctx, false)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return mapStmtContextError(ws.Adapter, err)
+			}
 			return fmt.Errorf("开启事务失败: %w", err)
 		}
 		res, err := tx.Exec(ctx, sqlText)
 		if err != nil {
-			tx.Rollback()
-			return ws.Adapter.NormalizeError(err).toError()
+			_ = tx.Rollback()
+			return mapStmtContextError(ws.Adapter, err)
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("提交失败: %w", err)
@@ -530,7 +606,7 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 	res, err := ws.Tx.Exec(ctx, sqlText)
 	if err != nil {
 		ws.TxState = TxFailed
-		return ws.Adapter.NormalizeError(err).toError()
+		return mapStmtContextError(ws.Adapter, err)
 	}
 	n, _ := res.RowsAffected()
 	result.AffectedRows = n
