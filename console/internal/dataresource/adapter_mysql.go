@@ -225,6 +225,9 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 			DefaultValue: defVal.String, Comment: comment.String,
 		})
 	}
+	if err := colRows.Err(); err != nil {
+		return structure, fmt.Errorf("读取字段失败: %w", err)
+	}
 	// 约束（主键/唯一/外键）及列：key_column_usage 提供列序
 	conRows, err := a.db.QueryContext(ctx, `
 		SELECT tc.constraint_name, tc.constraint_type, kcu.column_name, kcu.ordinal_position
@@ -237,34 +240,40 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 		WHERE tc.table_schema = ? AND tc.table_name = ?
 		  AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
 		ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position`, obj.Schema, obj.Name)
-	if err == nil {
-		type conAcc struct {
-			name, typ string
-			cols      []string
+	if err != nil {
+		return structure, fmt.Errorf("查询约束失败: %w", err)
+	}
+	type conAcc struct {
+		name, typ string
+		cols      []string
+	}
+	order := []string{}
+	byName := map[string]*conAcc{}
+	for conRows.Next() {
+		var name, conType, col string
+		var ord int
+		if err := conRows.Scan(&name, &conType, &col, &ord); err != nil {
+			conRows.Close()
+			return structure, fmt.Errorf("读取约束失败: %w", err)
 		}
-		order := []string{}
-		byName := map[string]*conAcc{}
-		for conRows.Next() {
-			var name, conType, col string
-			var ord int
-			if err := conRows.Scan(&name, &conType, &col, &ord); err != nil {
-				continue
-			}
-			acc, ok := byName[name]
-			if !ok {
-				acc = &conAcc{name: name, typ: normalizeConstraintType(conType)}
-				byName[name] = acc
-				order = append(order, name)
-			}
-			acc.cols = append(acc.cols, col)
+		acc, ok := byName[name]
+		if !ok {
+			acc = &conAcc{name: name, typ: normalizeConstraintType(conType)}
+			byName[name] = acc
+			order = append(order, name)
 		}
+		acc.cols = append(acc.cols, col)
+	}
+	if err := conRows.Err(); err != nil {
 		conRows.Close()
-		for _, name := range order {
-			acc := byName[name]
-			structure.Constraints = append(structure.Constraints, ConstraintInfo{
-				Name: acc.name, Type: acc.typ, Columns: acc.cols,
-			})
-		}
+		return structure, fmt.Errorf("读取约束失败: %w", err)
+	}
+	conRows.Close()
+	for _, name := range order {
+		acc := byName[name]
+		structure.Constraints = append(structure.Constraints, ConstraintInfo{
+			Name: acc.name, Type: acc.typ, Columns: acc.cols,
+		})
 	}
 	// 索引（MySQL 8+ 函数索引 column_name 可能为 NULL，须用 NullString）
 	idxRows, err := a.db.QueryContext(ctx, `
@@ -272,31 +281,37 @@ func (a *mysqlAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectSt
 		FROM information_schema.statistics
 		WHERE table_schema = ? AND table_name = ?
 		ORDER BY index_name, seq_in_index`, obj.Schema, obj.Name)
-	if err == nil {
-		idxMap := map[string]*IndexInfo{}
-		for idxRows.Next() {
-			var idxName string
-			var colName sql.NullString
-			var nonUnique int
-			if err := idxRows.Scan(&idxName, &colName, &nonUnique); err != nil {
-				continue
-			}
-			ii, ok := idxMap[idxName]
-			if !ok {
-				ii = &IndexInfo{Name: idxName, Unique: nonUnique == 0}
-				idxMap[idxName] = ii
-			}
-			if colName.Valid && colName.String != "" {
-				ii.Columns = append(ii.Columns, colName.String)
-			} else {
-				// 表达式/函数索引列无物理列名
-				ii.Columns = append(ii.Columns, "(expression)")
-			}
+	if err != nil {
+		return structure, fmt.Errorf("查询索引失败: %w", err)
+	}
+	idxMap := map[string]*IndexInfo{}
+	for idxRows.Next() {
+		var idxName string
+		var colName sql.NullString
+		var nonUnique int
+		if err := idxRows.Scan(&idxName, &colName, &nonUnique); err != nil {
+			idxRows.Close()
+			return structure, fmt.Errorf("读取索引失败: %w", err)
 		}
+		ii, ok := idxMap[idxName]
+		if !ok {
+			ii = &IndexInfo{Name: idxName, Unique: nonUnique == 0}
+			idxMap[idxName] = ii
+		}
+		if colName.Valid && colName.String != "" {
+			ii.Columns = append(ii.Columns, colName.String)
+		} else {
+			// 表达式/函数索引列无物理列名
+			ii.Columns = append(ii.Columns, "(expression)")
+		}
+	}
+	if err := idxRows.Err(); err != nil {
 		idxRows.Close()
-		for _, ii := range idxMap {
-			structure.Indexes = append(structure.Indexes, *ii)
-		}
+		return structure, fmt.Errorf("读取索引失败: %w", err)
+	}
+	idxRows.Close()
+	for _, ii := range idxMap {
+		structure.Indexes = append(structure.Indexes, *ii)
 	}
 	return structure, nil
 }

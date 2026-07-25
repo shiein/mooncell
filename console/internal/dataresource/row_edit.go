@@ -10,10 +10,10 @@ import (
 
 // RowEditRequest 是批量行编辑请求。
 type RowEditRequest struct {
-	Schema string          `json:"schema"`
-	Table  string          `json:"table"`
-	Updates []RowUpdateOp  `json:"updates"`
-	Deletes []RowDeleteOp  `json:"deletes"`
+	Schema  string        `json:"schema"`
+	Table   string        `json:"table"`
+	Updates []RowUpdateOp `json:"updates"`
+	Deletes []RowDeleteOp `json:"deletes"`
 }
 
 // RowUpdateOp 以主键定位一行并更新非主键列。
@@ -45,6 +45,11 @@ const RowEditMaxOps = 500
 // ApplyRowEdits 在适配器上执行批量 UPDATE/DELETE（独立事务，自动提交）。
 // primaryKeys 必须由服务端从 Describe 重新读取，不得信任客户端。
 func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table string, primaryKeys []string, req RowEditRequest) (*RowEditResult, error) {
+	return applyRowEditsGuarded(ctx, adapter, schema, table, primaryKeys, req, nil)
+}
+
+// applyRowEditsGuarded 在提交前执行 guard；handler 用它阻止已失效工作台提交。
+func applyRowEditsGuarded(ctx context.Context, adapter DataSourceAdapter, schema, table string, primaryKeys []string, req RowEditRequest, guard func() error) (*RowEditResult, error) {
 	if table == "" {
 		return nil, fmt.Errorf("表名不能为空")
 	}
@@ -71,11 +76,6 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 	if !sameStringSet(serverPKs, primaryKeys) {
 		// 以服务端为准，但要求客户端声明的 PK 集合一致，避免指错行
 		return nil, fmt.Errorf("主键信息不一致，请重新查询后再编辑")
-	}
-	colSet := map[string]bool{}
-	for _, c := range structure.Columns {
-		colSet[c.Name] = true
-		colSet[strings.ToLower(c.Name)] = true
 	}
 	pkSet := map[string]bool{}
 	for _, pk := range serverPKs {
@@ -115,30 +115,35 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 			val any
 		}
 		var oldConds []oldCond
+		setCols := map[string]bool{}
 		for col, val := range up.Set {
 			col = strings.TrimSpace(col)
-			if col == "" || pkSet[col] || pkSet[strings.ToLower(col)] {
+			real, err := resolveColumnName(structure, col)
+			if err != nil {
+				return nil, fmt.Errorf("第 %d 条更新: %w", i+1, err)
+			}
+			if col == "" || pkSet[real] || pkSet[strings.ToLower(real)] {
 				return nil, fmt.Errorf("不允许通过就地编辑修改主键列: %s", col)
 			}
-			if !colSet[col] && !colSet[strings.ToLower(col)] {
-				return nil, fmt.Errorf("未知列: %s", col)
+			if setCols[real] {
+				return nil, fmt.Errorf("第 %d 条更新重复指定列: %s", i+1, real)
 			}
+			setCols[real] = true
 			nv, err := normalizeEditValue(val)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 条更新列 %s: %w", i+1, col, err)
 			}
-			real := resolveColumnName(structure, col)
 			setParts = append(setParts, adapter.QuoteIdentifier(real)+" = "+nextPH())
 			setArgs = append(setArgs, nv)
-			if up.Old != nil {
-				if ov, ok := lookupKey(up.Old, col); ok {
-					onv, err := normalizeEditValue(ov)
-					if err != nil {
-						return nil, fmt.Errorf("第 %d 条更新列 %s 原值: %w", i+1, col, err)
-					}
-					oldConds = append(oldConds, oldCond{col: real, val: onv})
-				}
+			ov, ok := lookupKey(up.Old, real)
+			if !ok {
+				return nil, fmt.Errorf("第 %d 条更新缺少列 %s 的原值，请重新查询后再编辑", i+1, real)
 			}
+			onv, err := normalizeEditValue(ov)
+			if err != nil {
+				return nil, fmt.Errorf("第 %d 条更新列 %s 原值: %w", i+1, col, err)
+			}
+			oldConds = append(oldConds, oldCond{col: real, val: onv})
 		}
 		whereSQL, whereArgs, err := buildPKWhere(adapter, serverPKs, up.Keys, &ph)
 		if err != nil {
@@ -184,25 +189,25 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 条删除: %w", i+1, err)
 		}
-		// 乐观条件：非主键列原值（与 UPDATE 一致）
-		for col, val := range del.Old {
-			col = strings.TrimSpace(col)
-			if col == "" || pkSet[col] || pkSet[strings.ToLower(col)] {
+		// 乐观条件必须覆盖所有非主键列；缺列会把并发修改漏掉，必须 fail-closed。
+		for _, column := range structure.Columns {
+			col := column.Name
+			if pkSet[col] || pkSet[strings.ToLower(col)] {
 				continue
 			}
-			if !colSet[col] && !colSet[strings.ToLower(col)] {
-				return nil, fmt.Errorf("第 %d 条删除: 未知列 %s", i+1, col)
+			val, ok := lookupKey(del.Old, col)
+			if !ok {
+				return nil, fmt.Errorf("第 %d 条删除缺少列 %s 的原值，请重新查询后再删除", i+1, col)
 			}
 			nv, err := normalizeEditValue(val)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 条删除列 %s: %w", i+1, col, err)
 			}
-			real := resolveColumnName(structure, col)
 			if nv == nil {
-				whereSQL += " AND " + adapter.QuoteIdentifier(real) + " IS NULL"
+				whereSQL += " AND " + adapter.QuoteIdentifier(col) + " IS NULL"
 			} else {
 				ph++
-				whereSQL += " AND " + adapter.QuoteIdentifier(real) + " = " + adapter.Placeholder(ph)
+				whereSQL += " AND " + adapter.QuoteIdentifier(col) + " = " + adapter.Placeholder(ph)
 				whereArgs = append(whereArgs, nv)
 			}
 		}
@@ -218,6 +223,14 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 		deleted += int(n)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if guard != nil {
+		if err := guard(); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("提交失败: %w", err)
 	}
@@ -264,21 +277,39 @@ func lookupKey(keys map[string]any, name string) (any, bool) {
 	if v, ok := keys[name]; ok {
 		return v, true
 	}
+	var value any
+	found := false
 	for k, v := range keys {
 		if strings.EqualFold(k, name) {
-			return v, true
+			if found {
+				return nil, false
+			}
+			value = v
+			found = true
 		}
 	}
-	return nil, false
+	return value, found
 }
 
-func resolveColumnName(structure ObjectStructure, name string) string {
+func resolveColumnName(structure ObjectStructure, name string) (string, error) {
 	for _, c := range structure.Columns {
-		if c.Name == name || strings.EqualFold(c.Name, name) {
-			return c.Name
+		if c.Name == name {
+			return c.Name, nil
 		}
 	}
-	return name
+	match := ""
+	for _, c := range structure.Columns {
+		if strings.EqualFold(c.Name, name) {
+			if match != "" && match != c.Name {
+				return "", fmt.Errorf("列名大小写不明确: %s", name)
+			}
+			match = c.Name
+		}
+	}
+	if match == "" {
+		return "", fmt.Errorf("未知列: %s", name)
+	}
+	return match, nil
 }
 
 func normalizeEditValue(v any) (any, error) {

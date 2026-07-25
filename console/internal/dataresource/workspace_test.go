@@ -20,6 +20,19 @@ type testSQLAdapter struct {
 	db *sql.DB
 }
 
+type editableTestAdapter struct {
+	*testSQLAdapter
+}
+
+func (a *editableTestAdapter) Describe(ctx context.Context, object MetadataNode) (ObjectStructure, error) {
+	return ObjectStructure{
+		Columns: []ColumnInfo{{Name: "id"}, {Name: "name", IsNullable: true}},
+		Constraints: []ConstraintInfo{{
+			Name: "pk_items", Type: "primary", Columns: []string{"id"},
+		}},
+	}, nil
+}
+
 type testSQLTx struct{ tx *sql.Tx }
 
 func (t *testSQLTx) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -285,6 +298,91 @@ func TestDeleteWorkspaceIfIdleRechecksCurrentActivity(t *testing.T) {
 	}
 	if _, ok := wm.GetWorkspace(ws.ID); ok {
 		t.Fatal("空闲工作台删除后不应仍在 manager 中")
+	}
+}
+
+func TestPoolOperationBlocksImportAndExclusive(t *testing.T) {
+	pool := NewPoolManager(nil)
+	if !pool.TryBeginOperation("res-op") || !pool.TryBeginOperation("res-op") {
+		t.Fatal("普通资源操作之间应允许并发")
+	}
+	if pool.TryBeginImport("res-op") {
+		t.Fatal("活动 SQL 期间不得开始导入")
+	}
+	if pool.TryBeginExclusive("res-op") {
+		t.Fatal("活动 SQL 期间不得更新或删除资源")
+	}
+	pool.EndOperation("res-op")
+	pool.EndOperation("res-op")
+	if !pool.TryBeginExclusive("res-op") {
+		t.Fatal("普通操作结束后应允许配置变更")
+	}
+	if pool.TryBeginOperation("res-op") {
+		t.Fatal("配置变更期间不得开始普通资源操作")
+	}
+	pool.EndExclusive("res-op")
+	if !pool.TryBeginImport("res-op") {
+		t.Fatal("配置变更结束后应允许导入")
+	}
+	if pool.TryBeginOperation("res-op") {
+		t.Fatal("导入期间不得开始普通资源操作")
+	}
+	pool.EndImport("res-op")
+	if pool.IsBusy("res-op") {
+		t.Fatal("所有占用释放后资源不应仍 busy")
+	}
+}
+
+func TestApplyRowEditsRequiresCompleteOptimisticValues(t *testing.T) {
+	db, base := openTestSQLite(t)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO items (id, name) VALUES (1, 'old')`); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &editableTestAdapter{testSQLAdapter: base}
+
+	_, err := ApplyRowEdits(context.Background(), adapter, "", "items", []string{"id"}, RowEditRequest{
+		Deletes: []RowDeleteOp{{Keys: map[string]any{"id": 1}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "缺少列 name 的原值") {
+		t.Fatalf("删除缺少完整原值应被拒绝: %v", err)
+	}
+
+	_, err = ApplyRowEdits(context.Background(), adapter, "", "items", []string{"id"}, RowEditRequest{
+		Updates: []RowUpdateOp{{
+			Keys: map[string]any{"id": 1},
+			Set:  map[string]any{"name": "new"},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "缺少列 name 的原值") {
+		t.Fatalf("更新缺少原值应被拒绝: %v", err)
+	}
+}
+
+func TestApplyRowEditsGuardRollsBack(t *testing.T) {
+	db, base := openTestSQLite(t)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO items (id, name) VALUES (1, 'old')`); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &editableTestAdapter{testSQLAdapter: base}
+	guardErr := errors.New("workspace invalidated")
+	_, err := applyRowEditsGuarded(context.Background(), adapter, "", "items", []string{"id"}, RowEditRequest{
+		Updates: []RowUpdateOp{{
+			Keys: map[string]any{"id": 1},
+			Set:  map[string]any{"name": "new"},
+			Old:  map[string]any{"name": "old"},
+		}},
+	}, func() error { return guardErr })
+	if !errors.Is(err, guardErr) {
+		t.Fatalf("提交守卫错误未返回: %v", err)
+	}
+	var name string
+	if err := db.QueryRow(`SELECT name FROM items WHERE id=1`).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "old" {
+		t.Fatalf("守卫拒绝提交后数据仍被修改: %q", name)
 	}
 }
 

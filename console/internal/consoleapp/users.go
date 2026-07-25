@@ -97,12 +97,16 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		grants = &g
 	}
-	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, a.sessionUser(r)); err != nil {
+	var beforeCommit func()
+	if grants != nil {
+		beforeCommit = func() {
+			// 所有授权校验和写入已成功后、事务提交前，使旧授权的在途写失效。
+			a.rollbackRevokedDataResourceTx(target, oldGrants, *grants)
+		}
+	}
+	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, a.sessionUser(r), beforeCommit); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新用户失败: " + err.Error()})
 		return
-	}
-	if grants != nil {
-		a.rollbackRevokedDataResourceTx(target, oldGrants, *grants)
 	}
 	a.store.appendAudit(a.sessionUser(r), "更新用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -154,9 +158,10 @@ func normalizeAppIDs(ids []string) []string {
 }
 
 // rollbackRevokedDataResourceTx 比较写库前的旧授权与新授权：
-// - 资源被完全撤销：回滚事务并删除工作台
-// - access_mode 任意变化（write→read 降级或 read→write 升级）：同样失效
-//   降级避免可写事务残留；升级避免工作台创建时固化的 ReadOnly 粘滞导致已授权写仍 403
+//   - 资源被完全撤销：回滚事务并删除工作台
+//   - access_mode 任意变化（write→read 降级或 read→write 升级）：同样失效
+//     降级避免可写事务残留；升级避免工作台创建时固化的 ReadOnly 粘滞导致已授权写仍 403
+//
 // 设计文档：撤销或降级授权后，立即回滚该用户在对应资源上的活动事务并使工作台失效。
 func (a *api) rollbackRevokedDataResourceTx(username string, oldGrants, newGrants []dataresource.DataResourceGrant) {
 	if a.dataResSvc == nil {

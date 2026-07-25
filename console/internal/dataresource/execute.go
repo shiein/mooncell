@@ -232,4 +232,3 @@ func (de DatabaseError) toError() error {
 	return e
 }
 
-

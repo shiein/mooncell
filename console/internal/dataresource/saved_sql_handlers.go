@@ -1,10 +1,11 @@
 // 保存 SQL API handlers：个人 SQL 的增删改查。
 //
 // 设计文档第四节「保存 SQL」：
-//   GET    /api/data-resources/{id}/saved-sql
-//   POST   /api/data-resources/{id}/saved-sql
-//   PUT    /api/data-resources/{id}/saved-sql/{sqlId}
-//   DELETE /api/data-resources/{id}/saved-sql/{sqlId}
+//
+//	GET    /api/data-resources/{id}/saved-sql
+//	POST   /api/data-resources/{id}/saved-sql
+//	PUT    /api/data-resources/{id}/saved-sql/{sqlId}
+//	DELETE /api/data-resources/{id}/saved-sql/{sqlId}
 //
 // 服务端始终以当前登录用户作为所有者，不接受请求体中的用户名。
 // 每个用户只能查看、修改、删除自己的 SQL。
@@ -26,7 +27,11 @@ func (s *Service) ListSavedSQLHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	// 校验资源访问权限
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return
@@ -50,7 +55,11 @@ func (s *Service) CreateSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return
@@ -97,7 +106,11 @@ func (s *Service) UpdateSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	resourceID := r.PathValue("id")
-	mode, _ := UserAccessMode(s.db, user, role, resourceID)
+	mode, err := UserAccessMode(s.db, user, role, resourceID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return
@@ -144,7 +157,11 @@ func (s *Service) DeleteSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	resourceID := r.PathValue("id")
-	mode, _ := UserAccessMode(s.db, user, role, resourceID)
+	mode, err := UserAccessMode(s.db, user, role, resourceID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return

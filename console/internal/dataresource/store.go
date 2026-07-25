@@ -608,7 +608,24 @@ func ValidateInput(input *DataResourceInput) error {
 	}
 	// 达梦：实例内只有 schema/用户模式两层，无独立「库」；库名字段可空（用 schema 或用户名）
 	if input.DBType == DriverDM {
-		// 允许 DatabaseName 与 DefaultSchema 都空：驱动默认以用户名为 schema
+		// 官方驱动按第一个 ":" 拆 user/password，且 query 不做 URL 解码。
+		if strings.Contains(input.Username, ":") {
+			return errors.New("达梦用户名不能包含冒号")
+		}
+		if strings.Contains(input.Host, "@") {
+			return errors.New("达梦主机不能包含 @")
+		}
+		schema := input.DefaultSchema
+		if schema == "" {
+			schema = input.DatabaseName
+		}
+		if schema == "" {
+			schema = input.Username
+		}
+		if strings.ContainsAny(schema, "?&") {
+			return errors.New("达梦 schema 不能包含 ? 或 &")
+		}
+		// 允许 DatabaseName 与 DefaultSchema 都空：驱动默认以用户名为 schema。
 	} else if input.DatabaseName == "" {
 		return errors.New("数据库名不能为空")
 	}

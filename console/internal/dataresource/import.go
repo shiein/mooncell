@@ -14,12 +14,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xuri/excelize/v2"
@@ -78,7 +81,29 @@ type ImportSession struct {
 	Columns    []string   // 文件列名（来自表头）
 	CreatedAt  time.Time
 	// inUse 为 true 时表示正在 execute，禁止并发二次执行（由 importMu 保护）。
-	inUse bool
+	inUse  bool
+	cancel context.CancelFunc // execute 的取消函数（由 importMu 保护）
+	// invalidated + commitMu 建立失效与事务提交的确定顺序：
+	// commit 先拿锁则提交发生在失效前；失效先拿锁则后续提交必须拒绝。
+	invalidated atomic.Bool
+	commitMu    sync.Mutex
+}
+
+var errImportInvalidated = errors.New("导入会话已失效")
+
+func (s *ImportSession) commitIfValid(commit func() error) error {
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+	if s.invalidated.Load() {
+		return errImportInvalidated
+	}
+	return commit()
+}
+
+func (s *ImportSession) invalidate() {
+	s.commitMu.Lock()
+	s.invalidated.Store(true)
+	s.commitMu.Unlock()
 }
 
 // ImportPreviewResult 是预览返回。
@@ -108,7 +133,11 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return
@@ -168,7 +197,12 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+multipartMem)
 	if err := r.ParseMultipartForm(multipartMem); err != nil {
 		releaseReservation("")
-		writeErr(w, http.StatusBadRequest, "FILE_TOO_LARGE", "文件过大或格式错误")
+		status := http.StatusBadRequest
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErr(w, status, "FILE_TOO_LARGE", "文件过大或格式错误")
 		return
 	}
 
@@ -208,13 +242,24 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "TMP_ERROR", "创建临时文件失败")
 		return
 	}
-	if _, err := io.Copy(tmpFile, file); err != nil {
+	n, err := io.Copy(tmpFile, io.LimitReader(file, maxBytes+1))
+	if err != nil {
 		tmpFile.Close()
 		releaseReservation(tmpPath)
 		writeErr(w, http.StatusInternalServerError, "TMP_ERROR", "保存临时文件失败")
 		return
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		releaseReservation(tmpPath)
+		writeErr(w, http.StatusInternalServerError, "TMP_ERROR", "保存临时文件失败")
+		return
+	}
+	if n > maxBytes {
+		releaseReservation(tmpPath)
+		writeErr(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE",
+			fmt.Sprintf("文件大小不能超过 %d MB", maxBytes>>20))
+		return
+	}
 
 	// 解析预览
 	session := &ImportSession{
@@ -396,7 +441,11 @@ func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := r.PathValue("id")
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode != "admin" && mode != AccessWrite {
 		writeErr(w, http.StatusForbidden, "READ_ONLY", "只读授权不允许导入")
 		return
@@ -431,6 +480,11 @@ func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusConflict, "IMPORT_IN_PROGRESS", "该导入会话正在执行中")
 		return
 	}
+	if session.invalidated.Load() {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusConflict, "IMPORT_INVALIDATED", errImportInvalidated.Error())
+		return
+	}
 	session.inUse = true
 	s.importMu.Unlock()
 
@@ -443,7 +497,16 @@ func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Reques
 
 	s.importMu.Lock()
 	session.inUse = false
+	invalidated := session.invalidated.Load()
+	if invalidated {
+		delete(s.importSessions, importID)
+	}
 	s.importMu.Unlock()
+	if invalidated {
+		os.Remove(session.FilePath)
+		writeErr(w, http.StatusConflict, "IMPORT_INVALIDATED", errImportInvalidated.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "PARSE_ERROR", err.Error())
 		return
@@ -462,7 +525,11 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	importID := r.PathValue("importId")
 
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return
@@ -485,23 +552,37 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "IMPORT_IN_PROGRESS", "该导入会话正在执行中")
 		return
 	}
+	if session.invalidated.Load() {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusConflict, "IMPORT_INVALIDATED", errImportInvalidated.Error())
+		return
+	}
 	session.inUse = true
 	s.importMu.Unlock()
-	// 失败可重试：清除 inUse；成功则 removeImportSession
-	releaseInUse := true
+	// 失败可重试；成功或失效则销毁会话。
+	removeOnReturn := false
 	defer func() {
-		if releaseInUse {
-			s.importMu.Lock()
-			if session != nil {
-				session.inUse = false
+		var path string
+		s.importMu.Lock()
+		if session != nil {
+			session.cancel = nil
+			session.inUse = false
+			if removeOnReturn || session.invalidated.Load() {
+				if current, exists := s.importSessions[importID]; exists && current == session {
+					delete(s.importSessions, importID)
+				}
+				path = session.FilePath
 			}
-			s.importMu.Unlock()
+		}
+		s.importMu.Unlock()
+		if path != "" {
+			os.Remove(path)
 		}
 	}()
 
 	// 与手工事务互斥：原子占用导入槽，堵住 HasActiveTx 检查与 Begin 之间的 TOCTOU
 	if !s.pools.TryBeginImport(id) {
-		writeErr(w, http.StatusConflict, "TX_ACTIVE", "存在活动手工事务，请先提交或回滚后再导入")
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源正在执行 SQL、配置变更或存在活动事务，请稍后再导入")
 		return
 	}
 	defer s.pools.EndImport(id)
@@ -521,7 +602,11 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取适配器
-	res, found, _ := GetDataResource(s.db, id)
+	res, found, err := GetDataResource(s.db, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源失败")
+		return
+	}
 	if !found {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
@@ -539,7 +624,26 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 
 	ictx, cancel := context.WithTimeout(r.Context(), ImportTimeout)
 	defer cancel()
-	result, err := executeImport(ictx, adapter, session, body.TableName, body.Schema, body.ColumnMapping, s.excelOpenOptions())
+	s.importMu.Lock()
+	if session.invalidated.Load() {
+		s.importMu.Unlock()
+		writeErr(w, http.StatusConflict, "IMPORT_INVALIDATED", errImportInvalidated.Error())
+		return
+	}
+	session.cancel = cancel
+	s.importMu.Unlock()
+
+	commitGuard := func(commit func() error) error {
+		return session.commitIfValid(commit)
+	}
+	result, err := executeImportGuarded(ictx, adapter, session, body.TableName, body.Schema,
+		body.ColumnMapping, s.excelOpenOptions(), commitGuard)
+	// commitGuard 已确定提交与失效的先后；仅未成功提交时按“已失效”返回。
+	if session.invalidated.Load() && (err != nil || result == nil || result.Error != "") {
+		s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, "失败·失效")
+		writeErr(w, http.StatusConflict, "IMPORT_INVALIDATED", errImportInvalidated.Error())
+		return
+	}
 	if err != nil {
 		s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, "失败")
 		writeErr(w, http.StatusInternalServerError, "IMPORT_ERROR", err.Error())
@@ -557,15 +661,18 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, fmt.Sprintf("成功·%d行", result.ImportedRows))
-	// 成功：不再释放 inUse，直接销毁会话
-	releaseInUse = false
-	s.removeImportSession(importID)
+	removeOnReturn = true
 	writeOK(w, result)
 }
 
 // executeImport 执行导入：校验目标表/列来自元数据，参数化 INSERT 在同一事务内执行。
 // xlsxOpts 控制 XLSX 解压上限（与 importMaxMB 配置一致）；CSV 路径忽略该参数。
 func executeImport(ctx context.Context, adapter DataSourceAdapter, session *ImportSession, tableName, schema string, mapping []string, xlsxOpts excelize.Options) (*ImportExecuteResult, error) {
+	return executeImportGuarded(ctx, adapter, session, tableName, schema, mapping, xlsxOpts, nil)
+}
+
+// executeImportGuarded 在提交点执行 commitGuard，使授权/资源失效与 Commit 严格排序。
+func executeImportGuarded(ctx context.Context, adapter DataSourceAdapter, session *ImportSession, tableName, schema string, mapping []string, xlsxOpts excelize.Options, commitGuard func(func() error) error) (*ImportExecuteResult, error) {
 	start := time.Now()
 	result := &ImportExecuteResult{}
 
@@ -632,6 +739,12 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 		result.Error = fmt.Sprintf("开启事务失败: %v", err)
 		return result, nil
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	imported := 0
 	rowNum := 1 // 1-based 含表头；数据行从 2 起
@@ -675,10 +788,22 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 		return result, nil
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := ctx.Err(); err != nil {
+		_ = tx.Rollback()
+		result.Error = err.Error()
+		return result, nil
+	}
+	commit := tx.Commit
+	if commitGuard != nil {
+		err = commitGuard(commit)
+	} else {
+		err = commit()
+	}
+	if err != nil {
 		result.Error = fmt.Sprintf("提交失败: %v", err)
 		return result, nil
 	}
+	committed = true
 
 	result.ImportedRows = imported
 	result.DurationMs = time.Since(start).Milliseconds()
@@ -875,6 +1000,50 @@ func (s *Service) cleanupExpiredImports() {
 	cleanupOrphanImportFiles(ImportTempTimeout)
 }
 
+// invalidateImports 使匹配导入不可再执行，并取消在途 execute。
+// commitMu 保证：已进入 Commit 的事务先完成；否则 invalidated 会让提交守卫拒绝。
+func (s *Service) invalidateImports(match func(*ImportSession) bool) {
+	if match == nil {
+		return
+	}
+	s.importMu.Lock()
+	var sessions []*ImportSession
+	var paths []string
+	for id, session := range s.importSessions {
+		if !match(session) {
+			continue
+		}
+		if !session.inUse {
+			delete(s.importSessions, id)
+			paths = append(paths, session.FilePath)
+		}
+		sessions = append(sessions, session)
+	}
+	s.importMu.Unlock()
+
+	for _, session := range sessions {
+		// 先与提交点排序并标记，再取消长查询/流读取。
+		session.invalidate()
+		s.importMu.Lock()
+		cancel := session.cancel
+		s.importMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		s.importMu.Lock()
+		if current, exists := s.importSessions[session.ID]; exists && current == session && !session.inUse {
+			delete(s.importSessions, session.ID)
+			paths = append(paths, session.FilePath)
+		}
+		s.importMu.Unlock()
+	}
+	for _, path := range paths {
+		if path != "" {
+			os.Remove(path)
+		}
+	}
+}
+
 // cleanupOrphanImportFiles 删除 mooncell-import 目录中超过 maxAge 的 mc-import-* 临时文件。
 func cleanupOrphanImportFiles(maxAge time.Duration) {
 	dir, err := importDir()
@@ -904,17 +1073,30 @@ func cleanupOrphanImportFiles(maxAge time.Duration) {
 	}
 }
 
-// cleanupAllImportSessions 关闭时删除内存会话登记的临时文件并扫盘。
+// cleanupAllImportSessions 关闭时取消会话并删除本进程登记的临时文件。
+// 不清理整个共享临时目录，避免误删另一 Mooncell 进程正在使用的文件。
 func (s *Service) cleanupAllImportSessions() {
 	s.importMu.Lock()
+	sessions := make([]*ImportSession, 0, len(s.importSessions))
 	paths := make([]string, 0, len(s.importSessions))
 	for id, session := range s.importSessions {
+		sessions = append(sessions, session)
 		paths = append(paths, session.FilePath)
 		delete(s.importSessions, id)
 	}
 	s.importMu.Unlock()
-	for _, p := range paths {
-		os.Remove(p)
+	for _, session := range sessions {
+		session.invalidate()
+		s.importMu.Lock()
+		cancel := session.cancel
+		s.importMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	}
-	cleanupOrphanImportFiles(0) // 关闭时清全部前缀文件
+	for _, p := range paths {
+		if p != "" {
+			os.Remove(p)
+		}
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -58,12 +59,30 @@ func (e *ErrExportBodyStarted) Unwrap() error {
 	return e.Err
 }
 
-func wrapIfBodyStarted(bodyStarted bool, err error) error {
-	if err == nil {
-		return nil
+var (
+	exportCSVSem         = make(chan struct{}, 2)
+	errCSVExportMaxBytes = errors.New("CSV export byte limit exceeded")
+)
+
+// byteLimitWriter 按实际写出的 CSV 字节计数（包含 BOM、引号转义和换行）。
+type byteLimitWriter struct {
+	w       io.Writer
+	max     int64
+	written int64
+}
+
+func (w *byteLimitWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.max-w.written {
+		return 0, errCSVExportMaxBytes
 	}
-	if bodyStarted {
-		return &ErrExportBodyStarted{Err: err}
+	n, err := w.w.Write(p)
+	w.written += int64(n)
+	return n, err
+}
+
+func normalizeCSVWriteError(err error) error {
+	if errors.Is(err, errCSVExportMaxBytes) {
+		return &ErrExportLimit{Reason: fmt.Sprintf("已达到最大导出体积限制 (%d MB)", ExportMaxBytes>>20)}
 	}
 	return err
 }
@@ -84,6 +103,14 @@ func prepareExportSQL(sqlText string) error {
 func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
 	if err := prepareExportSQL(sqlText); err != nil {
 		return err
+	}
+	select {
+	case exportCSVSem <- struct{}{}:
+		defer func() { <-exportCSVSem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return fmt.Errorf("当前导出任务过多，请稍后再试")
 	}
 
 	tx, err := adapter.Begin(ctx, true)
@@ -114,17 +141,14 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 		os.Remove(tmpPath)
 	}()
 
+	limited := &byteLimitWriter{w: tmp, max: ExportMaxBytes}
 	// BOM for Excel UTF-8
-	if _, err := tmp.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-		return err
+	if _, err := limited.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		return normalizeCSVWriteError(err)
 	}
-	approxBytes := 3
-	cw := csv.NewWriter(tmp)
+	cw := csv.NewWriter(limited)
 	if err := cw.Write(cols); err != nil {
-		return err
-	}
-	for _, c := range cols {
-		approxBytes += len(c) + 1
+		return normalizeCSVWriteError(err)
 	}
 
 	rowCount := 0
@@ -141,18 +165,12 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 			return err
 		}
 		record := make([]string, len(cols))
-		rowBytes := 0
 		for i, v := range values {
 			record[i] = csvFormulaSafe(valueToCSV(v, typeNames[i]))
-			rowBytes += len(record[i]) + 1
-		}
-		if approxBytes+rowBytes > ExportMaxBytes {
-			return &ErrExportLimit{Reason: fmt.Sprintf("已达到最大导出体积限制 (%d MB)", ExportMaxBytes>>20)}
 		}
 		if err := cw.Write(record); err != nil {
-			return err
+			return normalizeCSVWriteError(err)
 		}
-		approxBytes += rowBytes
 		rowCount++
 	}
 	if err := rows.Err(); err != nil {
@@ -160,10 +178,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
+		return normalizeCSVWriteError(err)
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return err

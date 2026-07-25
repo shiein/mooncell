@@ -1,12 +1,13 @@
 package dataresource
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"io"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 
@@ -140,17 +141,121 @@ func TestNewImportCSVReaderSharedConfig(t *testing.T) {
 	}
 }
 
-func TestWrapIfBodyStarted(t *testing.T) {
-	base := fmt.Errorf("scan failed")
-	if err := wrapIfBodyStarted(false, base); err != base {
-		t.Fatalf("body 未开始应返回原错误")
+func TestByteLimitWriterCountsActualBytes(t *testing.T) {
+	var dst bytes.Buffer
+	w := &byteLimitWriter{w: &dst, max: 5}
+	if n, err := w.Write([]byte("12345")); err != nil || n != 5 {
+		t.Fatalf("写入上限内数据失败: n=%d err=%v", n, err)
 	}
-	err := wrapIfBodyStarted(true, base)
-	var partial *ErrExportBodyStarted
-	if !errors.As(err, &partial) {
-		t.Fatalf("body 已开始应包装为 ErrExportBodyStarted, got %T", err)
+	if n, err := w.Write([]byte("6")); !errors.Is(err, errCSVExportMaxBytes) || n != 0 {
+		t.Fatalf("超过上限必须拒绝且不部分写入: n=%d err=%v", n, err)
 	}
-	if !errors.Is(err, base) {
-		t.Fatalf("应 Unwrap 到原错误")
+	if got := dst.String(); got != "12345" {
+		t.Fatalf("超过上限后内容被污染: %q", got)
+	}
+}
+
+func TestInvalidateImportsCancelsActiveAndRemovesIdle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	active := &ImportSession{
+		ID: "active", ResourceID: "r1", Username: "alice",
+		inUse: true, cancel: cancel,
+	}
+	idle := &ImportSession{ID: "idle", ResourceID: "r1", Username: "alice"}
+	other := &ImportSession{ID: "other", ResourceID: "r2", Username: "alice"}
+	svc := &Service{importSessions: map[string]*ImportSession{
+		active.ID: active,
+		idle.ID:   idle,
+		other.ID:  other,
+	}}
+
+	svc.invalidateImports(func(session *ImportSession) bool {
+		return session.ResourceID == "r1"
+	})
+	if !active.invalidated.Load() || !idle.invalidated.Load() {
+		t.Fatal("匹配资源的导入会话应全部失效")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("活动导入未被取消")
+	}
+	if _, ok := svc.importSessions[idle.ID]; ok {
+		t.Fatal("空闲导入会话应立即移除")
+	}
+	if _, ok := svc.importSessions[active.ID]; !ok {
+		t.Fatal("活动会话应保留到执行 defer 清理")
+	}
+	if _, ok := svc.importSessions[other.ID]; !ok {
+		t.Fatal("其它资源会话不应被影响")
+	}
+}
+
+func TestImportCommitAndInvalidationAreOrdered(t *testing.T) {
+	session := &ImportSession{}
+	session.invalidate()
+	called := false
+	if err := session.commitIfValid(func() error {
+		called = true
+		return nil
+	}); !errors.Is(err, errImportInvalidated) || called {
+		t.Fatalf("已失效会话不得进入提交: called=%v err=%v", called, err)
+	}
+
+	session = &ImportSession{}
+	commitStarted := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	commitDone := make(chan error, 1)
+	go func() {
+		commitDone <- session.commitIfValid(func() error {
+			close(commitStarted)
+			<-releaseCommit
+			return nil
+		})
+	}()
+	<-commitStarted
+	invalidateDone := make(chan struct{})
+	go func() {
+		session.invalidate()
+		close(invalidateDone)
+	}()
+	select {
+	case <-invalidateDone:
+		t.Fatal("提交进行中时失效不得越过提交点")
+	default:
+	}
+	close(releaseCommit)
+	if err := <-commitDone; err != nil {
+		t.Fatalf("先进入的提交应正常完成: %v", err)
+	}
+	<-invalidateDone
+	if !session.invalidated.Load() {
+		t.Fatal("提交完成后会话应被标记失效")
+	}
+}
+
+func TestInvalidatedImportRollsBackBeforeCommit(t *testing.T) {
+	db, base := openTestSQLite(t)
+	defer db.Close()
+	adapter := &editableTestAdapter{testSQLAdapter: base}
+	path := t.TempDir() + "/import.csv"
+	if err := os.WriteFile(path, []byte("id,name\n1,alice\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &ImportSession{
+		Format: "csv", FilePath: path, Columns: []string{"id", "name"},
+	}
+	session.invalidate()
+	result, err := executeImportGuarded(context.Background(), adapter, session, "items", "",
+		[]string{"id", "name"}, excelize.Options{}, session.commitIfValid)
+	if err != nil || result == nil || !strings.Contains(result.Error, errImportInvalidated.Error()) {
+		t.Fatalf("失效导入应在提交点失败: result=%+v err=%v", result, err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM items`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("提交守卫拒绝后导入仍落库: %d", count)
 	}
 }

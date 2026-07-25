@@ -22,8 +22,14 @@ func TestDSNBuilders(t *testing.T) {
 	if !strings.Contains(my, "u:secret@tcp(h:5432)/d") {
 		t.Errorf("mysqlDSN 不符: %s", my)
 	}
+	r.Host = "2001:db8::1"
+	myIPv6 := BuildDSN(r, "secret")
+	if !strings.Contains(myIPv6, "@tcp([2001:db8::1]:5432)/d") {
+		t.Errorf("mysqlDSN IPv6 地址必须带方括号: %s", myIPv6)
+	}
 
 	r.DBType = DriverDM
+	r.Host = "h"
 	r.DefaultSchema = "ADMIN" // 保留字：驱动 set schema "ADMIN"；且不得 URL 编码引号
 	dm := BuildDSN(r, "secret")
 	if !strings.Contains(dm, "dm://u:secret@h:5432") {
@@ -38,8 +44,14 @@ func TestDSNBuilders(t *testing.T) {
 	if !strings.Contains(dmApp, `?schema="APP"`) {
 		t.Errorf("dmDSN APP 也应加引号: %s", dmApp)
 	}
+	r.Host = "2001:db8::1"
+	dmIPv6 := BuildDSN(r, "secret")
+	if !strings.Contains(dmIPv6, "@[2001:db8::1]:5432") {
+		t.Errorf("dmDSN IPv6 地址必须带方括号: %s", dmIPv6)
+	}
 
 	r.DBType = DriverKingbase
+	r.Host = "h"
 	kb := BuildDSN(r, "secret")
 	if !strings.Contains(kb, "host='h'") {
 		t.Errorf("kingbase DSN 应兼容 PG 格式: %s", kb)

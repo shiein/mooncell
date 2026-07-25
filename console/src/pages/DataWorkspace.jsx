@@ -554,6 +554,11 @@ function DataWorkspacePage({ resource, onBack }) {
   };
 
   const markDeleteRow = (rowIndex) => {
+    const row = result?.rows?.[rowIndex] || [];
+    if (row.some(cellIsBinary)) {
+      toast('该行含二进制列，无法构造完整乐观删除条件；请重新查询后使用带版本条件的 SQL 删除', { tone: 'warn' });
+      return;
+    }
     beginEditRow(rowIndex);
     setDeletedRows((prev) => new Set(prev).add(rowIndex));
   };

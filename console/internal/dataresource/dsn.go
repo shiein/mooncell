@@ -6,6 +6,8 @@ package dataresource
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
@@ -54,7 +56,7 @@ func mysqlDSN(r DataResource, password string) string {
 	cfg.User = r.Username
 	cfg.Passwd = password
 	cfg.Net = "tcp"
-	cfg.Addr = fmt.Sprintf("%s:%d", r.Host, r.Port)
+	cfg.Addr = net.JoinHostPort(strings.Trim(r.Host, "[]"), strconv.Itoa(r.Port))
 	cfg.DBName = r.DatabaseName
 	cfg.ParseTime = true
 	// 默认关闭客户端拼参：走二进制协议预编译绑定，避免扩大转义边界依赖。
@@ -99,12 +101,14 @@ func quoteDMSchemaIdent(name string) string {
 // 官方驱动 parseDSN（dm@v1.8.20）：
 //   - userinfo 用 LastIndex("@") + SplitN(":", 2)，且 **不做 URL 解码**；
 //   - query 同样不解码。
+//
 // 因此用户名/密码不得用 url.UserPassword（会变成 %40 等字面量导致认证失败）；
 // schema 不能走 url.Values.Encode。密码可含 @（LastIndex 切 host）；
-// 用户名不得含 ":"/"@"（驱动分割语义限制，校验在 ValidateInput 侧未强制）。
+// 用户名不得含 ":"；schema 不得含 "?" 或 "&"（ValidateInput 已 fail-closed）。
 func dmDSN(r DataResource, password string) string {
 	// 手动拼接 userinfo，保持凭据原样
-	base := fmt.Sprintf("dm://%s:%s@%s:%d", r.Username, password, r.Host, r.Port)
+	addr := net.JoinHostPort(strings.Trim(r.Host, "[]"), strconv.Itoa(r.Port))
+	base := fmt.Sprintf("dm://%s:%s@%s", r.Username, password, addr)
 	schema := quoteDMSchemaIdent(dmSchema(r))
 	if schema == "" {
 		return base

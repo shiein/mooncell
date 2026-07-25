@@ -304,6 +304,10 @@ func TestValidateInput(t *testing.T) {
 		{"DM拒绝require", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "d", Username: "u", SSLMode: "require"}, false},
 		{"DM允许disable", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "d", Username: "u", SSLMode: "disable"}, true},
 		{"DM无库名仅用户", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, Username: "SYSDBA", SSLMode: "disable"}, true},
+		{"DM用户名含冒号", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, Username: "u:x", SSLMode: "disable"}, false},
+		{"DM主机含分隔符", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h@x", Port: 5236, Username: "u", SSLMode: "disable"}, false},
+		{"DM schema 含问号", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DefaultSchema: "APP?x", Username: "u", SSLMode: "disable"}, false},
+		{"DM schema 含与号", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "APP&x", Username: "u", SSLMode: "disable"}, false},
 	}
 	for _, c := range cases {
 		in := c.input

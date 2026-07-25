@@ -76,12 +76,13 @@ func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Requ
 
 // CreateWorkspace 处理 POST /api/data-resources/{id}/workspaces
 func (s *Service) CreateWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
-	adapter, mode, ok := s.getAdapterForRequest(w, r)
+	id := r.PathValue("id")
+	adapter, mode, release, ok := s.getAdapterForOperation(w, r)
 	if !ok {
 		return
 	}
+	defer release()
 	user, _, _ := userFromCtx(r)
-	id := r.PathValue("id")
 	// 仅 AccessRead 标记为只读工作台；admin/write 可写
 	ws := s.workspaces.CreateWorkspace(id, user, adapter, mode == AccessRead)
 	writeOK(w, map[string]any{
@@ -184,7 +185,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 				writeErrTx(w, http.StatusForbidden, apiErr.Code, apiErr.Message, txState)
 				return
 			}
-			if apiErr.Code == "IMPORT_ACTIVE" {
+			if apiErr.Code == "IMPORT_ACTIVE" || apiErr.Code == "RESOURCE_BUSY" {
 				writeErrTx(w, http.StatusConflict, apiErr.Code, apiErr.Message, txState)
 				return
 			}
@@ -236,18 +237,28 @@ func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText
 		result.Editable = &EditableInfo{Reason: "已关闭自动提交，请使用 SQL 编辑或先开启自动提交后再就地编辑"}
 		return
 	}
+	if ws.isClosed() || !s.pools.TryBeginOperation(ws.ResourceID) {
+		return
+	}
+	defer s.pools.EndOperation(ws.ResourceID)
 	target, ok := DetectEditableSelect(sqlText)
 	if !ok {
 		return
 	}
 	schema := target.Schema
 	if schema == "" {
-		if res, found, _ := GetDataResource(s.db, ws.ResourceID); found {
+		res, found, err := GetDataResource(s.db, ws.ResourceID)
+		if err != nil {
+			return
+		}
+		if found {
 			schema = BoundSchema(res)
 		}
 	}
 	obj := MetadataNode{Kind: NodeTable, Schema: schema, Name: target.Table}
-	structure, err := ws.Adapter.Describe(ctx, obj)
+	mctx, cancel := context.WithTimeout(ctx, MetadataTimeout)
+	defer cancel()
+	structure, err := ws.Adapter.Describe(mctx, obj)
 	if err != nil {
 		return
 	}
@@ -298,19 +309,6 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 重新读取主键，不信任客户端传入的 PK 列表作为权威
-	obj := MetadataNode{Kind: NodeTable, Schema: body.Schema, Name: body.Table}
-	structure, err := ws.Adapter.Describe(r.Context(), obj)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "NOT_A_TABLE", "无法读取表结构，仅支持单表结果编辑")
-		return
-	}
-	pks := primaryKeyColumns(structure)
-	if len(pks) == 0 {
-		writeErr(w, http.StatusBadRequest, "NO_PRIMARY_KEY", "该表没有主键，无法安全地修改或删除行")
-		return
-	}
-
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	if err := ws.ensureOpenLocked(); err != nil {
@@ -336,8 +334,31 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 	ws.LastActivity = time.Now()
 
 	ectx, cancel := context.WithTimeout(r.Context(), QueryTimeout)
-	defer cancel()
-	result, err := ApplyRowEdits(ectx, ws.Adapter, body.Schema, body.Table, pks, body)
+	ws.setStmtCancel(cancel)
+	defer func() {
+		ws.clearStmtCancel()
+		cancel()
+	}()
+	// invalidation 可能发生在第一次 closed 检查与 cancel 登记之间；登记后必须复核。
+	if err := ws.ensureOpenLocked(); err != nil {
+		writeErr(w, http.StatusGone, "WORKSPACE_CLOSED", err.Error())
+		return
+	}
+
+	// 重新读取主键，不信任客户端传入的 PK 列表作为权威。
+	obj := MetadataNode{Kind: NodeTable, Schema: body.Schema, Name: body.Table}
+	structure, err := ws.Adapter.Describe(ectx, obj)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "NOT_A_TABLE", "无法读取表结构，仅支持单表结果编辑")
+		return
+	}
+	pks := primaryKeyColumns(structure)
+	if len(pks) == 0 {
+		writeErr(w, http.StatusBadRequest, "NO_PRIMARY_KEY", "该表没有主键，无法安全地修改或删除行")
+		return
+	}
+
+	result, err := applyRowEditsGuarded(ectx, ws.Adapter, body.Schema, body.Table, pks, body, ws.ensureOpenLocked)
 	if err != nil {
 		// 审计不落库原始错误文本
 		s.auditLog(user, "就地编辑", body.Schema+"."+body.Table, "失败")
@@ -396,6 +417,12 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.pools.TryBeginOperation(ws.ResourceID) {
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源正在导入或更新，请稍后再导出")
+		return
+	}
+	defer s.pools.EndOperation(ws.ResourceID)
+
 	var body struct {
 		SQL    string `json:"sql"`    // 指定导出 SQL；空则用最近一次成功查询
 		Format string `json:"format"` // csv 或 xlsx

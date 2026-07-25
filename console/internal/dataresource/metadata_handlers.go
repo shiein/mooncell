@@ -1,10 +1,11 @@
 // 元数据 API handlers：元数据树、表结构、DDL、SQL 模板。
 //
 // 设计文档第三节「元数据」：
-//   GET  /api/data-resources/{id}/metadata/children?parentId=
-//   GET  /api/data-resources/{id}/metadata/structure?nodeId=
-//   GET  /api/data-resources/{id}/metadata/ddl?nodeId=
-//   POST /api/data-resources/{id}/metadata/sql-template
+//
+//	GET  /api/data-resources/{id}/metadata/children?parentId=
+//	GET  /api/data-resources/{id}/metadata/structure?nodeId=
+//	GET  /api/data-resources/{id}/metadata/ddl?nodeId=
+//	POST /api/data-resources/{id}/metadata/sql-template
 //
 // nodeId 视为不可信输入，服务端解码后仍重新校验资源、类型和标识符。
 package dataresource
@@ -20,10 +21,11 @@ import (
 // ResourceCapabilities 处理 GET /api/data-resources/{id}/capabilities
 // 供前端关闭不支持的菜单（DDL/导入等），避免空结果伪装成功。
 func (s *Service) ResourceCapabilities(w http.ResponseWriter, r *http.Request) {
-	adapter, _, ok := s.getAdapterForRequest(w, r)
+	adapter, _, release, ok := s.getAdapterForOperation(w, r)
 	if !ok {
 		return
 	}
+	defer release()
 	writeOK(w, adapter.Capabilities())
 }
 
@@ -37,11 +39,19 @@ func (s *Service) getAdapterForRequest(w http.ResponseWriter, r *http.Request) (
 	}
 	id := r.PathValue("id")
 	res, found, err := GetDataResource(s.db, id)
-	if err != nil || !found {
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源失败")
+		return nil, "", false
+	}
+	if !found {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return nil, "", false
 	}
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return nil, "", false
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return nil, "", false
@@ -60,12 +70,29 @@ func (s *Service) getAdapterForRequest(w http.ResponseWriter, r *http.Request) (
 	return adapter, mode, true
 }
 
+// getAdapterForOperation 在适配器使用期间持有普通资源操作槽，
+// 防止配置更新/删除关闭正在使用的连接池。
+func (s *Service) getAdapterForOperation(w http.ResponseWriter, r *http.Request) (DataSourceAdapter, string, func(), bool) {
+	id := r.PathValue("id")
+	if !s.pools.TryBeginOperation(id) {
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源正在导入或更新，请稍后再试")
+		return nil, "", nil, false
+	}
+	adapter, mode, ok := s.getAdapterForRequest(w, r)
+	if !ok {
+		s.pools.EndOperation(id)
+		return nil, "", nil, false
+	}
+	return adapter, mode, func() { s.pools.EndOperation(id) }, true
+}
+
 // MetadataChildren 处理 GET /api/data-resources/{id}/metadata/children?parentId=
 func (s *Service) MetadataChildren(w http.ResponseWriter, r *http.Request) {
-	adapter, _, ok := s.getAdapterForRequest(w, r)
+	adapter, _, release, ok := s.getAdapterForOperation(w, r)
 	if !ok {
 		return
 	}
+	defer release()
 	parentID := r.URL.Query().Get("parentId")
 	var parent MetadataNode
 	if parentID == "" {
@@ -93,10 +120,11 @@ func (s *Service) MetadataChildren(w http.ResponseWriter, r *http.Request) {
 
 // MetadataStructure 处理 GET /api/data-resources/{id}/metadata/structure?nodeId=
 func (s *Service) MetadataStructure(w http.ResponseWriter, r *http.Request) {
-	adapter, _, ok := s.getAdapterForRequest(w, r)
+	adapter, _, release, ok := s.getAdapterForOperation(w, r)
 	if !ok {
 		return
 	}
+	defer release()
 	nodeID := r.URL.Query().Get("nodeId")
 	if nodeID == "" {
 		writeErr(w, http.StatusBadRequest, "BAD_NODE_ID", "缺少 nodeId")
@@ -119,10 +147,11 @@ func (s *Service) MetadataStructure(w http.ResponseWriter, r *http.Request) {
 
 // MetadataDDL 处理 GET /api/data-resources/{id}/metadata/ddl?nodeId=
 func (s *Service) MetadataDDL(w http.ResponseWriter, r *http.Request) {
-	adapter, _, ok := s.getAdapterForRequest(w, r)
+	adapter, _, release, ok := s.getAdapterForOperation(w, r)
 	if !ok {
 		return
 	}
+	defer release()
 	nodeID := r.URL.Query().Get("nodeId")
 	if nodeID == "" {
 		writeErr(w, http.StatusBadRequest, "BAD_NODE_ID", "缺少 nodeId")
@@ -145,10 +174,11 @@ func (s *Service) MetadataDDL(w http.ResponseWriter, r *http.Request) {
 
 // MetadataSQLTemplate 处理 POST /api/data-resources/{id}/metadata/sql-template
 func (s *Service) MetadataSQLTemplate(w http.ResponseWriter, r *http.Request) {
-	adapter, mode, ok := s.getAdapterForRequest(w, r)
+	adapter, mode, release, ok := s.getAdapterForOperation(w, r)
 	if !ok {
 		return
 	}
+	defer release()
 	var body struct {
 		NodeID    string `json:"nodeId"`
 		Operation string `json:"operation"` // SELECT/INSERT/UPDATE/DELETE

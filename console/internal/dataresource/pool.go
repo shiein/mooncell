@@ -8,10 +8,12 @@
 //
 // 资源级占用（同一把 mu）：
 //   - activeTx：手工事务
+//   - activeOps：正在执行的 SQL / 工作台创建
 //   - importing：导入执行
 //   - exclusive：配置更新/删除
 //
-// 三者互斥，在同一锁下竞争，避免 TOCTOU。
+// 导入、配置变更与 activeTx/activeOps 互斥；普通 activeOps 之间可并发。
+// 所有占用在同一锁下竞争，避免 TOCTOU。
 package dataresource
 
 import (
@@ -27,6 +29,8 @@ type PoolManager struct {
 	pools map[string]*sql.DB // resourceID → *sql.DB
 	// activeTx 记录每个资源是否有活动手工事务（ref count）。
 	activeTx map[string]int
+	// activeOps 记录资源上正在执行的普通操作（自动 SQL、工作台创建等）。
+	activeOps map[string]int
 	// importing 记录每个资源上正在执行的导入占用（ref count）。
 	importing map[string]int
 	// exclusive 配置变更占用（更新/删除资源），与事务、导入互斥。
@@ -39,6 +43,7 @@ func NewPoolManager(credKey *CredentialKey) *PoolManager {
 	return &PoolManager{
 		pools:     map[string]*sql.DB{},
 		activeTx:  map[string]int{},
+		activeOps: map[string]int{},
 		importing: map[string]int{},
 		exclusive: map[string]int{},
 		credKey:   credKey,
@@ -108,7 +113,31 @@ func (pm *PoolManager) IsBusy(resourceID string) bool {
 }
 
 func (pm *PoolManager) isBusyLocked(resourceID string) bool {
-	return pm.activeTx[resourceID] > 0 || pm.importing[resourceID] > 0 || pm.exclusive[resourceID] > 0
+	return pm.activeTx[resourceID] > 0 || pm.activeOps[resourceID] > 0 ||
+		pm.importing[resourceID] > 0 || pm.exclusive[resourceID] > 0
+}
+
+// TryBeginOperation 占用普通资源操作槽。普通操作之间可并发，但不得与导入或配置变更交错。
+func (pm *PoolManager) TryBeginOperation(resourceID string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.importing[resourceID] > 0 || pm.exclusive[resourceID] > 0 {
+		return false
+	}
+	pm.activeOps[resourceID]++
+	return true
+}
+
+// EndOperation 释放普通资源操作槽。
+func (pm *PoolManager) EndOperation(resourceID string) {
+	pm.mu.Lock()
+	if pm.activeOps[resourceID] > 0 {
+		pm.activeOps[resourceID]--
+		if pm.activeOps[resourceID] == 0 {
+			delete(pm.activeOps, resourceID)
+		}
+	}
+	pm.mu.Unlock()
 }
 
 // BeginTx 增加活动事务计数。若资源正在导入或配置变更则失败。
@@ -134,7 +163,7 @@ func (pm *PoolManager) EndTx(resourceID string) {
 	pm.mu.Unlock()
 }
 
-// TryBeginImport 在无活动手工事务、无其他导入且无配置变更时原子占用导入/写槽。
+// TryBeginImport 在无活动 SQL/手工事务、无其他导入且无配置变更时原子占用导入/写槽。
 // 同一资源同时只允许一个导入或就地编辑占用（importing 计数），避免与写操作并发。
 func (pm *PoolManager) TryBeginImport(resourceID string) bool {
 	pm.mu.Lock()
@@ -158,7 +187,7 @@ func (pm *PoolManager) EndImport(resourceID string) {
 	pm.mu.Unlock()
 }
 
-// TryBeginExclusive 配置更新/删除的互斥占用：要求无事务、无导入、无其他 exclusive。
+// TryBeginExclusive 配置更新/删除的互斥占用：要求无活动操作、事务、导入或其他 exclusive。
 func (pm *PoolManager) TryBeginExclusive(resourceID string) bool {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()

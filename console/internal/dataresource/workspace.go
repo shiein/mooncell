@@ -48,8 +48,8 @@ type Workspace struct {
 	txCtx        context.Context
 	txCancel     context.CancelFunc
 	Adapter      DataSourceAdapter
-	LastSQL      string     // 最近一次成功的查询（供全量导出重放）
-	LastActivity time.Time  // 最近活动时间（用于超时回滚）
+	LastSQL      string    // 最近一次成功的查询（供全量导出重放）
+	LastActivity time.Time // 最近活动时间（用于超时回滚）
 	// closed 用 atomic：失效路径必须先标记 closed 并 cancel 语句，再等 ws.mu，
 	// 否则在途 Execute 持锁时 Invalidate 会卡在 mu 上，执行完仍可能提交。
 	closed atomic.Bool
@@ -195,7 +195,7 @@ func (wm *WorkspaceManager) GetWorkspace(id string) (*Workspace, bool) {
 }
 
 // DeleteWorkspace 删除工作台。有活动事务时回滚。
-// 顺序：map 移除 → cancel 在途语句 → 无锁标记 closed → 再取 mu 回滚。
+// 顺序：锁内标记 closed 并移出 map → cancel 在途语句 → 再取 mu 回滚。
 // 禁止「先等 mu 再 closed」，否则在途 Execute 持锁期间仍可完整提交。
 func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	wm.mu.Lock()
@@ -204,20 +204,45 @@ func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 		wm.mu.Unlock()
 		return
 	}
+	ws.closed.Store(true)
 	delete(wm.workspaces, id)
 	wm.mu.Unlock()
 
 	ws.cancelRunningStmt()
-	ws.closed.Store(true)
+	wm.finishInvalidation(ws)
+}
 
+// finishInvalidation 等待在途请求退出并回滚手工事务。
+func (wm *WorkspaceManager) finishInvalidation(ws *Workspace) {
 	ws.mu.Lock()
+	defer ws.mu.Unlock()
 	if ws.Tx != nil {
 		_ = ws.Tx.Rollback()
 		ws.clearTxLocked(true, wm.pool)
-	} else {
-		ws.clearTxLocked(false, nil)
+		return
 	}
-	ws.mu.Unlock()
+	ws.clearTxLocked(false, nil)
+}
+
+// invalidateMatching 在 manager 锁内一次性标记并移除匹配工作台，
+// 避免逐个 DeleteWorkspace 留下尚未 closed 的可执行窗口。
+func (wm *WorkspaceManager) invalidateMatching(match func(*Workspace) bool) {
+	wm.mu.Lock()
+	var list []*Workspace
+	for id, ws := range wm.workspaces {
+		if match(ws) {
+			ws.closed.Store(true)
+			delete(wm.workspaces, id)
+			list = append(list, ws)
+		}
+	}
+	wm.mu.Unlock()
+	for _, ws := range list {
+		ws.cancelRunningStmt()
+	}
+	for _, ws := range list {
+		wm.finishInvalidation(ws)
+	}
 }
 
 // RollbackUserTx 回滚用户在某资源上的所有活动事务（撤权/退出时调用）。
@@ -243,48 +268,24 @@ func (wm *WorkspaceManager) RollbackUserTx(username, resourceID string) {
 // InvalidateUserResource 回滚并删除用户在某资源上的全部工作台（撤销/降级授权时调用）。
 // 设计：撤权后立即回滚活动事务并使工作台失效。
 func (wm *WorkspaceManager) InvalidateUserResource(username, resourceID string) {
-	wm.mu.Lock()
-	var ids []string
-	for id, ws := range wm.workspaces {
-		if ws.Username == username && ws.ResourceID == resourceID {
-			ids = append(ids, id)
-		}
-	}
-	wm.mu.Unlock()
-	for _, id := range ids {
-		wm.DeleteWorkspace(id)
-	}
+	wm.invalidateMatching(func(ws *Workspace) bool {
+		return ws.Username == username && ws.ResourceID == resourceID
+	})
 }
 
 // InvalidateAllForUser 回滚并删除某用户的全部工作台（退出登录/删用户/会话失效时调用）。
 // 设计：退出登录、会话失效不得提交未完成事务。
 func (wm *WorkspaceManager) InvalidateAllForUser(username string) {
-	wm.mu.Lock()
-	var ids []string
-	for id, ws := range wm.workspaces {
-		if ws.Username == username {
-			ids = append(ids, id)
-		}
-	}
-	wm.mu.Unlock()
-	for _, id := range ids {
-		wm.DeleteWorkspace(id)
-	}
+	wm.invalidateMatching(func(ws *Workspace) bool {
+		return ws.Username == username
+	})
 }
 
 // InvalidateResource 回滚并删除某资源上的全部工作台（资源更新/删除时调用）。
 func (wm *WorkspaceManager) InvalidateResource(resourceID string) {
-	wm.mu.Lock()
-	var ids []string
-	for id, ws := range wm.workspaces {
-		if ws.ResourceID == resourceID {
-			ids = append(ids, id)
-		}
-	}
-	wm.mu.Unlock()
-	for _, id := range ids {
-		wm.DeleteWorkspace(id)
-	}
+	wm.invalidateMatching(func(ws *Workspace) bool {
+		return ws.ResourceID == resourceID
+	})
 }
 
 // CleanupIdle 回滚超时手工事务，并删除长期无活动的空工作台。由后台定期调用。
@@ -345,21 +346,16 @@ func (wm *WorkspaceManager) CloseAll() {
 	wm.mu.Lock()
 	list := make([]*Workspace, 0, len(wm.workspaces))
 	for _, ws := range wm.workspaces {
+		ws.closed.Store(true)
 		list = append(list, ws)
 	}
 	wm.workspaces = map[string]*Workspace{}
 	wm.mu.Unlock()
 	for _, ws := range list {
 		ws.cancelRunningStmt()
-		ws.closed.Store(true)
-		ws.mu.Lock()
-		if ws.Tx != nil {
-			_ = ws.Tx.Rollback()
-			ws.clearTxLocked(true, wm.pool)
-		} else {
-			ws.clearTxLocked(false, nil)
-		}
-		ws.mu.Unlock()
+	}
+	for _, ws := range list {
+		wm.finishInvalidation(ws)
 	}
 }
 
@@ -392,6 +388,11 @@ func mapStmtContextError(adapter DataSourceAdapter, err error) error {
 // limit/offset 仅对 SELECT 生效：服务端隐式分页，不改写编辑器中的 SQL 文本。
 // 执行期间登记 stmtCancel，供 POST .../cancel 在不持 mu 的情况下取消语句。
 func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit, offset int) (*ExecutionResult, error) {
+	if !wm.pool.TryBeginOperation(ws.ResourceID) {
+		return nil, &APIError{Code: "RESOURCE_BUSY", Message: "资源正在导入或更新，请稍后再执行"}
+	}
+	defer wm.pool.EndOperation(ws.ResourceID)
+
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	if err := ws.ensureOpenLocked(); err != nil {

@@ -17,14 +17,14 @@ type AuditFunc func(user, action, target, result string)
 
 // Service 持有数据资源模块的运行时依赖。
 type Service struct {
-	db            *sql.DB
-	credKey       *CredentialKey
-	pools         *PoolManager
-	workspaces    *WorkspaceManager
-	importMu      sync.Mutex
+	db             *sql.DB
+	credKey        *CredentialKey
+	pools          *PoolManager
+	workspaces     *WorkspaceManager
+	importMu       sync.Mutex
 	importSessions map[string]*ImportSession
-	importMaxMB   int
-	audit         AuditFunc
+	importMaxMB    int
+	audit          AuditFunc
 }
 
 // NewService 创建数据资源服务。credKey 不可为 nil（由 consoleapp 启动时保证）。
@@ -80,13 +80,13 @@ func (s *Service) DB() *sql.DB { return s.db }
 
 // Close 关闭所有工作台和外部数据库连接池（Console 退出时调用）。
 func (s *Service) Close() {
+	s.cleanupAllImportSessions()
 	if s.workspaces != nil {
 		s.workspaces.CloseAll()
 	}
 	if s.pools != nil {
 		s.pools.CloseAll()
 	}
-	s.cleanupAllImportSessions()
 }
 
 // CleanupOrphanImportsOnStart 启动时清理遗留导入临时文件（重启后 map 为空）。
@@ -111,6 +111,9 @@ func (s *Service) RollbackUserTx(username, resourceID string) {
 
 // InvalidateUserResource 回滚并删除用户在某资源上的全部工作台（撤销/降级授权时调用）。
 func (s *Service) InvalidateUserResource(username, resourceID string) {
+	s.invalidateImports(func(session *ImportSession) bool {
+		return session.Username == username && session.ResourceID == resourceID
+	})
 	if s.workspaces != nil {
 		s.workspaces.InvalidateUserResource(username, resourceID)
 	}
@@ -118,6 +121,9 @@ func (s *Service) InvalidateUserResource(username, resourceID string) {
 
 // InvalidateAllForUser 回滚并删除某用户的全部工作台（退出登录/删用户时调用）。
 func (s *Service) InvalidateAllForUser(username string) {
+	s.invalidateImports(func(session *ImportSession) bool {
+		return session.Username == username
+	})
 	if s.workspaces != nil {
 		s.workspaces.InvalidateAllForUser(username)
 	}
@@ -125,6 +131,9 @@ func (s *Service) InvalidateAllForUser(username string) {
 
 // InvalidateResource 回滚并删除某资源上的全部工作台（资源更新/删除时调用）。
 func (s *Service) InvalidateResource(resourceID string) {
+	s.invalidateImports(func(session *ImportSession) bool {
+		return session.ResourceID == resourceID
+	})
 	if s.workspaces != nil {
 		s.workspaces.InvalidateResource(resourceID)
 	}

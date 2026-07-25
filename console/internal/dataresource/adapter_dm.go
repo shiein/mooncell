@@ -208,6 +208,9 @@ func (a *dmAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 			DefaultValue: defVal.String,
 		})
 	}
+	if err := colRows.Err(); err != nil {
+		return structure, fmt.Errorf("读取字段失败: %w", err)
+	}
 
 	// 主键/唯一/外键：all_constraints + all_cons_columns（Oracle 兼容视图）
 	conRows, err := a.db.QueryContext(ctx, `
@@ -218,34 +221,40 @@ func (a *dmAdapter) Describe(ctx context.Context, obj MetadataNode) (ObjectStruc
 		WHERE c.owner = ? AND c.table_name = ?
 		  AND c.constraint_type IN ('P', 'U', 'R')
 		ORDER BY c.constraint_type, c.constraint_name, cc.position`, obj.Schema, obj.Name)
-	if err == nil {
-		type acc struct {
-			name, typ string
-			cols      []string
+	if err != nil {
+		return structure, fmt.Errorf("查询约束失败: %w", err)
+	}
+	type acc struct {
+		name, typ string
+		cols      []string
+	}
+	order := []string{}
+	byName := map[string]*acc{}
+	for conRows.Next() {
+		var name, ctype, col string
+		var pos sql.NullInt64
+		if err := conRows.Scan(&name, &ctype, &col, &pos); err != nil {
+			conRows.Close()
+			return structure, fmt.Errorf("读取约束失败: %w", err)
 		}
-		order := []string{}
-		byName := map[string]*acc{}
-		for conRows.Next() {
-			var name, ctype, col string
-			var pos sql.NullInt64
-			if err := conRows.Scan(&name, &ctype, &col, &pos); err != nil {
-				continue
-			}
-			a2, ok := byName[name]
-			if !ok {
-				a2 = &acc{name: name, typ: normalizeConstraintType(ctype)}
-				byName[name] = a2
-				order = append(order, name)
-			}
-			a2.cols = append(a2.cols, col)
+		a2, ok := byName[name]
+		if !ok {
+			a2 = &acc{name: name, typ: normalizeConstraintType(ctype)}
+			byName[name] = a2
+			order = append(order, name)
 		}
+		a2.cols = append(a2.cols, col)
+	}
+	if err := conRows.Err(); err != nil {
 		conRows.Close()
-		for _, name := range order {
-			ac := byName[name]
-			structure.Constraints = append(structure.Constraints, ConstraintInfo{
-				Name: ac.name, Type: ac.typ, Columns: ac.cols,
-			})
-		}
+		return structure, fmt.Errorf("读取约束失败: %w", err)
+	}
+	conRows.Close()
+	for _, name := range order {
+		ac := byName[name]
+		structure.Constraints = append(structure.Constraints, ConstraintInfo{
+			Name: ac.name, Type: ac.typ, Columns: ac.cols,
+		})
 	}
 	return structure, nil
 }

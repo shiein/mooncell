@@ -496,7 +496,7 @@ func (s *Store) deleteUser(username string) (bool, error) {
 
 // updateUserBundle 在同一 SQLite 事务中更新口令(可选)、应用授权(可选)与数据资源授权(可选)。
 // 任一失败整单回滚，避免半成品。
-func (s *Store) updateUserBundle(username, password string, appIDs *[]string, grants *[]dataresource.DataResourceGrant, grantedBy string) error {
+func (s *Store) updateUserBundle(username, password string, appIDs *[]string, grants *[]dataresource.DataResourceGrant, grantedBy string, beforeCommit func()) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -534,6 +534,9 @@ func (s *Store) updateUserBundle(username, password string, appIDs *[]string, gr
 		if err := dataresource.SetUserGrantsTx(tx, username, *grants, grantedBy); err != nil {
 			return err
 		}
+	}
+	if beforeCommit != nil {
+		beforeCommit()
 	}
 	return tx.Commit()
 }

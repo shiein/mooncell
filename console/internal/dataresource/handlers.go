@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -117,7 +118,11 @@ func (s *Service) ListResources(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]DataResourceOut, 0, len(resources))
 	for _, res := range resources {
-		mode, _ := UserAccessMode(s.db, user, role, res.ID)
+		mode, err := UserAccessMode(s.db, user, role, res.ID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+			return
+		}
 		out = append(out, toOut(res, mode))
 	}
 	writeOK(w, map[string]any{"resources": out})
@@ -169,7 +174,11 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 创建后自动测连并落库 last_test_status（授权 read 依赖 ok；对话框测试不写库）
-	res = s.persistConnectionTest(res, input.Password)
+	res, err = s.persistConnectionTest(res, input.Password)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "资源已创建，但保存连接测试状态失败")
+		return
+	}
 	s.auditLog(user, "创建数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
@@ -191,7 +200,11 @@ func (s *Service) GetResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return
@@ -222,7 +235,7 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 	}
 	// 与导入/手工事务互斥：同一锁下占用 exclusive，避免 TOCTOU
 	if !s.pools.TryBeginExclusive(id) {
-		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源存在活动事务或正在导入，请稍后再更新")
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源正在执行 SQL、导入或存在活动事务，请稍后再更新")
 		return
 	}
 	defer s.pools.EndExclusive(id)
@@ -257,19 +270,27 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 	}
 	// defaultSchema（含达梦 DSN）变化也必须关池；仅 auth 变化才清测试态/重测
 	if poolChanged {
-		s.workspaces.InvalidateResource(id)
+		s.InvalidateResource(id)
 		s.pools.CloseDB(id)
 	}
-	res, _, _ := GetDataResource(s.db, id)
+	res, found, err := GetDataResource(s.db, id)
+	if err != nil || !found {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新后读取资源失败")
+		return
+	}
 	if authChanged {
 		password := input.Password
 		if password == "" {
-			if p, err := s.credKey.Decrypt(res.CredentialCipher); err == nil {
-				password = p
+			password, err = s.credKey.Decrypt(res.CredentialCipher)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "DECRYPT_ERROR", "凭据解密失败")
+				return
 			}
 		}
-		if password != "" {
-			res = s.persistConnectionTest(res, password)
+		res, err = s.persistConnectionTest(res, password)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "DB_ERROR", "资源已更新，但保存连接测试状态失败")
+			return
 		}
 	}
 	s.auditLog(user, "更新数据资源", res.Name, "成功")
@@ -277,18 +298,20 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 }
 
 // persistConnectionTest 对资源跑一次连接测试并写入 last_test_status/at，返回刷新后的资源视图。
-func (s *Service) persistConnectionTest(res DataResource, password string) DataResource {
+func (s *Service) persistConnectionTest(res DataResource, password string) (DataResource, error) {
 	result := TestConnection(res, password)
 	status := result.PersistStatus()
 	if err := UpdateTestStatus(s.db, res.ID, status); err != nil {
-		return res
+		return res, err
 	}
-	if updated, found, err := GetDataResource(s.db, res.ID); err == nil && found {
-		return updated
+	updated, found, err := GetDataResource(s.db, res.ID)
+	if err != nil {
+		return res, err
 	}
-	res.LastTestStatus = status
-	res.LastTestAt = time.Now().UnixMilli()
-	return res
+	if !found {
+		return res, fmt.Errorf("资源不存在")
+	}
+	return updated, nil
 }
 
 // DeleteResource 处理 DELETE /api/data-resources/{id}（仅 admin）。
@@ -315,7 +338,7 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 	}
 	// 与导入/手工事务互斥
 	if !s.pools.TryBeginExclusive(id) {
-		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源存在活动事务或正在导入，请稍后再删除")
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源正在执行 SQL、导入或存在活动事务，请稍后再删除")
 		return
 	}
 	defer s.pools.EndExclusive(id)
@@ -337,7 +360,7 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 失效工作台并关闭连接池
-	s.workspaces.InvalidateResource(id)
+	s.InvalidateResource(id)
 	s.pools.CloseDB(id)
 	s.auditLog(user, "删除数据资源", res.Name, "成功")
 	writeOK(w, map[string]bool{"ok": true})
