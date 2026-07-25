@@ -24,12 +24,12 @@ const EDITOR_MAX = 560;
 const RESULT_PAGE_SIZE = 100;
 const RESULT_EXPAND_MAX = 10000;
 
-/** 公式注入防护（与后端 csvFormulaSafe 一致：= @ 必防；+/- 仅非数字时加前缀） */
+/** 公式注入防护：与后端 csvFormulaSafe 保持一致。 */
 function csvFormulaSafe(s) {
   if (s == null || s === '') return '';
   const str = String(s);
   const c = str[0];
-  if (c === '=' || c === '@') return `'${str}`;
+  if (['=', '@', '\t', '\r', '\n', '＝', '＋', '－', '＠'].includes(c)) return `'${str}`;
   if (c === '+' || c === '-') {
     if (Number.isFinite(Number(str))) return str;
     return `'${str}`;

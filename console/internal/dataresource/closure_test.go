@@ -2,9 +2,11 @@ package dataresource
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -57,6 +59,36 @@ func TestCSVFormulaSafePreservesNumbers(t *testing.T) {
 	}
 	if got := csvFormulaSafe("+profit"); got != "'+profit" {
 		t.Fatalf("非数字 + 应加前缀: %q", got)
+	}
+	for _, s := range []string{"+Inf", "-Inf", "\t=1+2", "\r=1+2", "\n=1+2", "＝1+2", "＋cmd", "－cmd", "＠cmd"} {
+		if got := csvFormulaSafe(s); got != "'"+s {
+			t.Fatalf("危险前缀 %q 应加前缀, got %q", s, got)
+		}
+	}
+}
+
+func TestValueToXLSXPreservesHighPrecisionNumbers(t *testing.T) {
+	const preciseDecimal = "12345678901234567890.12"
+	if got := valueToXLSX([]byte(preciseDecimal), "DECIMAL(22,2)"); got != preciseDecimal {
+		t.Fatalf("高精度 DECIMAL 必须按文本保真, got %#v", got)
+	}
+	if got := valueToXLSX([]byte("12345.67"), "NUMERIC"); got != float64(12345.67) {
+		t.Fatalf("安全范围 NUMERIC 应保留原生数值, got %#v", got)
+	}
+
+	const largeID int64 = 9_007_199_254_740_991
+	if got := valueToXLSX(largeID, "BIGINT"); got != "9007199254740991" {
+		t.Fatalf("大整数 ID 必须按文本保真, got %#v", got)
+	}
+	if got := valueToXLSX(sql.NullInt64{Int64: largeID, Valid: true}, "BIGINT"); got != "9007199254740991" {
+		t.Fatalf("NullInt64 大整数必须按文本保真, got %#v", got)
+	}
+	bigID, ok := new(big.Int).SetString("123456789012345678901234567890", 10)
+	if !ok {
+		t.Fatal("构造 big.Int 失败")
+	}
+	if got := valueToXLSX(bigID, "NUMERIC"); got != bigID.String() {
+		t.Fatalf("big.Int 必须按文本保真, got %#v", got)
 	}
 }
 

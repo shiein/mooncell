@@ -3,8 +3,11 @@ package dataresource
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +198,93 @@ func TestCancelWorkspaceStatementUnblocksExecute(t *testing.T) {
 	// 无执行中语句时 cancel 返回 false
 	if wm.CancelWorkspaceStatement(ws) {
 		t.Fatal("无执行时应 canceled=false")
+	}
+}
+
+// TestCancelWorkspaceHandlerUnblocksExecute 覆盖真实 handler 链路：
+// 鉴权/path 校验不得获取正在执行语句持有的 ws.mu。
+func TestCancelWorkspaceHandlerUnblocksExecute(t *testing.T) {
+	started := make(chan struct{})
+	adapter := &blockingAdapter{started: started}
+	pool := NewPoolManager(nil)
+	wm := NewWorkspaceManager(pool)
+	svc := &Service{db: testDB(t), pools: pool, workspaces: wm}
+	ws := wm.CreateWorkspace("res-handler-cancel", "admin", adapter, false)
+
+	executeDone := make(chan error, 1)
+	go func() {
+		_, err := wm.ExecuteInWorkspace(context.Background(), ws, `SELECT 1`, 10, 0)
+		executeDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("语句未开始")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/data-resources/res-handler-cancel/workspaces/"+ws.ID+"/cancel", nil)
+	req.SetPathValue("id", "res-handler-cancel")
+	req.SetPathValue("workspaceId", ws.ID)
+	req = WithUser(req, "admin", "admin")
+	rec := httptest.NewRecorder()
+	handlerDone := make(chan struct{})
+	go func() {
+		svc.CancelWorkspaceHandler(rec, req)
+		close(handlerDone)
+	}()
+
+	select {
+	case <-handlerDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("cancel handler 被 ws.mu 阻塞")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Canceled bool `json:"canceled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Canceled {
+		t.Fatalf("cancel handler 未触发取消: %s", rec.Body.String())
+	}
+
+	select {
+	case err := <-executeDone:
+		var de DatabaseError
+		if !errors.As(err, &de) || de.Code != "QUERY_CANCELED" {
+			t.Fatalf("期望 QUERY_CANCELED, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler 取消后执行仍未结束")
+	}
+}
+
+func TestDeleteWorkspaceIfIdleRechecksCurrentActivity(t *testing.T) {
+	wm := NewWorkspaceManager(NewPoolManager(nil))
+	ws := wm.CreateWorkspace("res-idle", "alice", &blockingAdapter{started: make(chan struct{})}, false)
+	now := time.Now()
+
+	ws.mu.Lock()
+	ws.LastActivity = now
+	ws.mu.Unlock()
+	if wm.deleteWorkspaceIfIdle(ws, now) {
+		t.Fatal("刚恢复活动的工作台不得按旧清理结论删除")
+	}
+	if got, ok := wm.GetWorkspace(ws.ID); !ok || got != ws {
+		t.Fatal("活跃工作台应仍在 manager 中")
+	}
+
+	ws.mu.Lock()
+	ws.LastActivity = now.Add(-workspaceIdleTimeout - time.Minute)
+	ws.mu.Unlock()
+	if !wm.deleteWorkspaceIfIdle(ws, now) {
+		t.Fatal("确实空闲的工作台应被删除")
+	}
+	if _, ok := wm.GetWorkspace(ws.ID); ok {
+		t.Fatal("空闲工作台删除后不应仍在 manager 中")
 	}
 }
 

@@ -13,9 +13,11 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // 导出常量。
@@ -173,16 +175,18 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 
 // csvFormulaSafe 防止 Excel 将单元格当公式执行。
 // = @ 始终加前缀；+ - 仅当整串不能解析为数字时加前缀（避免金额/差值等负数被写成文本）。
+// 同时覆盖 Tab/CR/LF 与常见全角公式起始符。
 func csvFormulaSafe(s string) string {
 	if s == "" {
 		return s
 	}
-	switch s[0] {
-	case '=', '@':
+	first, _ := utf8.DecodeRuneInString(s)
+	switch first {
+	case '=', '@', '\t', '\r', '\n', '＝', '＋', '－', '＠':
 		return "'" + s
 	case '+', '-':
 		// 纯数字（含小数、科学计数）保留原样，便于 Excel/pandas 按数值读
-		if _, err := strconv.ParseFloat(s, 64); err == nil {
+		if n, err := strconv.ParseFloat(s, 64); err == nil && !math.IsInf(n, 0) && !math.IsNaN(n) {
 			return s
 		}
 		return "'" + s

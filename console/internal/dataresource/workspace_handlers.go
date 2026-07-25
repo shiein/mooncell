@@ -25,9 +25,10 @@ func canWriteAccess(mode string) bool {
 	return mode == "admin" || mode == AccessWrite
 }
 
-// resolveWorkspaceForRequest 校验工作台存在、归属当前用户、path 资源 id 与工作台一致，
-// 且用户对该资源仍有授权（mode != ""）。撤权后 mode 为空，所有工作台操作立即拒绝。
-func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Request) (*Workspace, string, bool) {
+// resolveWorkspaceAccess 校验工作台存在、归属当前用户、path 资源 id 与工作台一致，
+// 且用户对该资源仍有授权（mode != ""）。refreshReadOnly 仅供普通工作台操作使用；
+// cancel 路径必须传 false，避免等待正在执行语句持有的 ws.mu。
+func (s *Service) resolveWorkspaceAccess(w http.ResponseWriter, r *http.Request, refreshReadOnly bool) (*Workspace, string, bool) {
 	wsID := r.PathValue("workspaceId")
 	ws, ok := s.workspaces.GetWorkspace(wsID)
 	if !ok {
@@ -49,18 +50,28 @@ func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "工作台不存在")
 		return nil, "", false
 	}
-	mode, _ := UserAccessMode(s.db, user, role, id)
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return nil, "", false
+	}
 	if mode == "" {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return nil, "", false
 	}
-	// 以最新授权刷新只读标志，避免授权升级后仍沿用创建时的 ReadOnly 快照。
-	// 授权变更主路径会 Invalidate 工作台；此处为防御性同步。
-	wantRO := !canWriteAccess(mode)
-	ws.mu.Lock()
-	ws.ReadOnly = wantRO
-	ws.mu.Unlock()
+	if refreshReadOnly {
+		// 以最新授权刷新只读标志，避免授权升级后仍沿用创建时的 ReadOnly 快照。
+		// 授权变更主路径会 Invalidate 工作台；此处为防御性同步。
+		wantRO := !canWriteAccess(mode)
+		ws.mu.Lock()
+		ws.ReadOnly = wantRO
+		ws.mu.Unlock()
+	}
 	return ws, mode, true
+}
+
+func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Request) (*Workspace, string, bool) {
+	return s.resolveWorkspaceAccess(w, r, true)
 }
 
 // CreateWorkspace 处理 POST /api/data-resources/{id}/workspaces
@@ -106,7 +117,8 @@ func (s *Service) PatchAutoCommit(w http.ResponseWriter, r *http.Request) {
 // CancelWorkspaceHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/cancel
 // 取消当前正在执行的语句。不得获取 ws.mu（否则与 Execute 死锁）。
 func (s *Service) CancelWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
-	ws, _, ok := s.resolveWorkspaceForRequest(w, r)
+	// cancel 专用解析不得获取 ws.mu；ExecuteInWorkspace 在数据库调用期间持有该锁。
+	ws, _, ok := s.resolveWorkspaceAccess(w, r, false)
 	if !ok {
 		return
 	}
@@ -128,7 +140,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 	var body struct {
 		SQL       string `json:"sql"`
 		Limit     int    `json:"limit,omitempty"`
-		Offset    int    `json:"offset,omitempty"` // 隐式分页偏移，不改写 SQL
+		Offset    int    `json:"offset,omitempty"`    // 隐式分页偏移，不改写 SQL
 		Confirmed bool   `json:"confirmed,omitempty"` // 危险 SQL 二次确认
 	}
 	if err := jsonDecodeBody(w, r, &body); err != nil {

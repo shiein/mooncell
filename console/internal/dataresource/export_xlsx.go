@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -130,40 +131,34 @@ func valueToXLSX(v any, dbTypeName string) interface{} {
 	case bool:
 		return val
 	case int:
-		return int64(val)
+		return excelSafeInt64(int64(val))
 	case int8:
-		return int64(val)
+		return excelSafeInt64(int64(val))
 	case int16:
-		return int64(val)
+		return excelSafeInt64(int64(val))
 	case int32:
-		return int64(val)
+		return excelSafeInt64(int64(val))
 	case int64:
-		return val
+		return excelSafeInt64(val)
 	case uint:
-		return float64(val)
+		return excelSafeUint64(uint64(val))
 	case uint8:
-		return int64(val)
+		return excelSafeUint64(uint64(val))
 	case uint16:
-		return int64(val)
+		return excelSafeUint64(uint64(val))
 	case uint32:
-		return int64(val)
+		return excelSafeUint64(uint64(val))
 	case uint64:
-		// 超出 float 精确范围时退回字符串
-		if val > 1<<53 {
-			return fmt.Sprintf("%d", val)
-		}
-		return float64(val)
+		return excelSafeUint64(val)
 	case float32:
 		return float64(val)
 	case float64:
 		return val
 	case []byte:
 		if isTextualDBType(dbTypeName) || (!isBinaryDBType(dbTypeName) && isLikelyUTF8Text(val)) {
-			// DECIMAL/NUMERIC 常以 []byte 返回，尽量写为数字
+			// DECIMAL/NUMERIC 常以 []byte 返回；仅在 Excel 15 位有效数字范围内写为数字。
 			if isNumericDBType(dbTypeName) {
-				if f, err := strconv.ParseFloat(string(val), 64); err == nil {
-					return f
-				}
+				return excelNumericText(string(val))
 			}
 			return string(val)
 		}
@@ -179,15 +174,14 @@ func valueToXLSX(v any, dbTypeName string) interface{} {
 			return nil
 		}
 		if val.IsInt64() {
-			return val.Int64()
+			return excelSafeInt64(val.Int64())
 		}
 		return val.String()
 	case *big.Float:
 		if val == nil {
 			return nil
 		}
-		f, _ := val.Float64()
-		return f
+		return excelNumericText(val.Text('g', -1))
 	case sql.NullString:
 		if val.Valid {
 			return val.String
@@ -195,7 +189,7 @@ func valueToXLSX(v any, dbTypeName string) interface{} {
 		return nil
 	case sql.NullInt64:
 		if val.Valid {
-			return val.Int64
+			return excelSafeInt64(val.Int64)
 		}
 		return nil
 	case sql.NullFloat64:
@@ -216,6 +210,56 @@ func valueToXLSX(v any, dbTypeName string) interface{} {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// Excel 对数值只保留 15 位有效数字。超过该边界的整数按文本写出，
+// 避免主键、流水号等在打开工作簿时被静默改写。
+const excelMaxExactInteger uint64 = 999_999_999_999_999
+
+func excelSafeInt64(v int64) interface{} {
+	if v > int64(excelMaxExactInteger) || v < -int64(excelMaxExactInteger) {
+		return strconv.FormatInt(v, 10)
+	}
+	return v
+}
+
+func excelSafeUint64(v uint64) interface{} {
+	if v > excelMaxExactInteger {
+		return strconv.FormatUint(v, 10)
+	}
+	return int64(v)
+}
+
+// excelNumericText 将精度在 Excel 安全范围内的 DECIMAL/NUMERIC 写为原生数值；
+// 超过 15 位有效数字或无法可靠解析时保留原始文本。
+func excelNumericText(s string) interface{} {
+	if decimalSignificantDigits(s) > 15 {
+		return s
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return s
+	}
+	return f
+}
+
+func decimalSignificantDigits(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if s[0] == '+' || s[0] == '-' {
+		s = s[1:]
+	}
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.ReplaceAll(s, ".", "")
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return 1
+	}
+	return len(s)
 }
 
 func isNumericDBType(dbTypeName string) bool {

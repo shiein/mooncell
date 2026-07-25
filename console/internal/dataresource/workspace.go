@@ -34,13 +34,13 @@ const (
 
 // Workspace 是一个工作台的内存状态。
 type Workspace struct {
-	ID           string
-	ResourceID   string
-	Username     string
-	AutoCommit   bool
-	ReadOnly     bool // 用户对该资源为 read 授权时为 true；手工事务必须以只读事务创建
-	TxState      TxState
-	Tx           Transaction // 活动事务（nil 表示无）
+	ID         string
+	ResourceID string
+	Username   string
+	AutoCommit bool
+	ReadOnly   bool // 用户对该资源为 read 授权时为 true；手工事务必须以只读事务创建
+	TxState    TxState
+	Tx         Transaction // 活动事务（nil 表示无）
 	// txCtx/txCancel：手工事务生命周期与单次 HTTP 请求解耦。
 	// database/sql 的 BeginTx(ctx) 在 ctx 取消时会主动 rollback；若用请求 ctx 开启事务，
 	// 请求结束后 defer cancel 会静默毁掉 ws.Tx，导致「执行成功但提交已回滚」。
@@ -277,7 +277,6 @@ func (wm *WorkspaceManager) CleanupIdle() int {
 
 	now := time.Now()
 	n := 0
-	var toDelete []string
 	for _, ws := range candidates {
 		ws.mu.Lock()
 		if ws.Tx != nil && now.Sub(ws.LastActivity) > txIdleTimeout {
@@ -285,17 +284,38 @@ func (wm *WorkspaceManager) CleanupIdle() int {
 			ws.clearTxLocked(true, wm.pool)
 			n++
 		}
-		// 无事务且长时间无活动：删除工作台对象（浏览器直关时前端未必调 delete）
-		if ws.Tx == nil && now.Sub(ws.LastActivity) > workspaceIdleTimeout {
-			toDelete = append(toDelete, ws.ID)
-		}
 		ws.mu.Unlock()
-	}
-	for _, id := range toDelete {
-		wm.DeleteWorkspace(id)
-		n++
+		// 删除前在同一工作台锁下重新核对状态，避免检查后有请求恢复活动却仍被删除。
+		if wm.deleteWorkspaceIfIdle(ws, now) {
+			n++
+		}
 	}
 	return n
+}
+
+// deleteWorkspaceIfIdle 仅在工作台仍是 map 中同一对象、无事务且确实空闲时删除。
+// 先取 ws.mu：已拿到工作台指针但尚未执行的请求，要么先刷新 LastActivity，
+// 要么在删除后通过 closed 检查失败，不能出现“执行成功后被旧清理结论删除”。
+func (wm *WorkspaceManager) deleteWorkspaceIfIdle(ws *Workspace, now time.Time) bool {
+	if ws == nil {
+		return false
+	}
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if ws.closed || ws.Tx != nil || now.Sub(ws.LastActivity) <= workspaceIdleTimeout {
+		return false
+	}
+
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	current, ok := wm.workspaces[ws.ID]
+	if !ok || current != ws {
+		return false
+	}
+	delete(wm.workspaces, ws.ID)
+	ws.closed = true
+	ws.clearTxLocked(false, nil)
+	return true
 }
 
 // CloseAll 关闭所有工作台（Console 退出时）。
