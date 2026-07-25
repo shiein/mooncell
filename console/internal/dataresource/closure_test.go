@@ -38,6 +38,28 @@ func TestExecuteImportRejectsInvalidMappingsBeforeDatabaseAccess(t *testing.T) {
 	}
 }
 
+func TestCSVFormulaSafePreservesNumbers(t *testing.T) {
+	// 负数/正数/小数：不得加 '
+	for _, s := range []string{"-5", "-3.14", "+2", "1e-3", "0"} {
+		if got := csvFormulaSafe(s); got != s {
+			t.Fatalf("csvFormulaSafe(%q)=%q, want unchanged", s, got)
+		}
+	}
+	// 公式与危险前缀
+	if got := csvFormulaSafe("=1+2"); got != "'=1+2" {
+		t.Fatalf("= 应加前缀: %q", got)
+	}
+	if got := csvFormulaSafe("@cmd"); got != "'@cmd" {
+		t.Fatalf("@ 应加前缀: %q", got)
+	}
+	if got := csvFormulaSafe("- not a number"); got != "'- not a number" {
+		t.Fatalf("非数字 - 应加前缀: %q", got)
+	}
+	if got := csvFormulaSafe("+profit"); got != "'+profit" {
+		t.Fatalf("非数字 + 应加前缀: %q", got)
+	}
+}
+
 func TestImportCellValueEmptyToNull(t *testing.T) {
 	if v := importCellValue("", true); v != nil {
 		t.Fatalf("可空列空串应绑定 NULL, got %#v", v)

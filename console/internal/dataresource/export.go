@@ -171,13 +171,20 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	return nil
 }
 
-// csvFormulaSafe 防止 Excel 将单元格当公式执行（以 = + - @ 开头）。
+// csvFormulaSafe 防止 Excel 将单元格当公式执行。
+// = @ 始终加前缀；+ - 仅当整串不能解析为数字时加前缀（避免金额/差值等负数被写成文本）。
 func csvFormulaSafe(s string) string {
 	if s == "" {
 		return s
 	}
 	switch s[0] {
-	case '=', '+', '-', '@':
+	case '=', '@':
+		return "'" + s
+	case '+', '-':
+		// 纯数字（含小数、科学计数）保留原样，便于 Excel/pandas 按数值读
+		if _, err := strconv.ParseFloat(s, 64); err == nil {
+			return s
+		}
 		return "'" + s
 	}
 	return s

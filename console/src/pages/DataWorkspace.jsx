@@ -24,12 +24,16 @@ const EDITOR_MAX = 560;
 const RESULT_PAGE_SIZE = 100;
 const RESULT_EXPAND_MAX = 10000;
 
-/** 公式注入防护（与后端 csvFormulaSafe 一致） */
+/** 公式注入防护（与后端 csvFormulaSafe 一致：= @ 必防；+/- 仅非数字时加前缀） */
 function csvFormulaSafe(s) {
   if (s == null || s === '') return '';
   const str = String(s);
   const c = str[0];
-  if (c === '=' || c === '+' || c === '-' || c === '@') return `'${str}`;
+  if (c === '=' || c === '@') return `'${str}`;
+  if (c === '+' || c === '-') {
+    if (Number.isFinite(Number(str))) return str;
+    return `'${str}`;
+  }
   return str;
 }
 
@@ -1055,11 +1059,6 @@ function DataWorkspacePage({ resource, onBack }) {
         )}
 
         <main className="dr-main-pane">
-          {(resource.dbType === 'pgx' || resource.dbType === 'kingbase') ? (
-            <div className="dr-inline-status" style={{ marginBottom: 6, opacity: 0.85 }}>
-              PostgreSQL/Kingbase 可见范围为整个数据库的所有 schema；实际权限由数据库账号决定。推荐资源使用只读账号作为第三层保护。
-            </div>
-          ) : null}
           <div className="card dr-toolbar">
             {treeCollapsed ? (
               <React.Fragment>
