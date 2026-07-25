@@ -181,9 +181,10 @@ func ListDataResources(db *sql.DB) ([]DataResource, error) {
 	return out, rows.Err()
 }
 
-// connectionFieldsChanged 连接相关字段是否变化（密码单独由 credentialCipher 非空表示）。
-// name/defaultSchema 变更不触发撤权。
-func connectionFieldsChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
+// authAffectingChanged 是否影响「只读事务实测 + read 授权」有效性。
+// 不含 name、defaultSchema：改显示名/默认模式不撤权。
+// 密码由 credentialCipher 非空表示。
+func authAffectingChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
 	if credentialCipher != "" {
 		return true
 	}
@@ -195,8 +196,23 @@ func connectionFieldsChanged(prev DataResource, input DataResourceInput, credent
 		prev.SSLMode != input.SSLMode
 }
 
+// poolAffectingChanged 是否必须关闭连接池并失效工作台。
+// 达梦 defaultSchema 写入 DSN（SET SCHEMA），变更后旧连接仍绑在旧模式；
+// 元数据树按新 owner 查、执行却打到旧模式 → 必须重建池。
+func poolAffectingChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
+	if authAffectingChanged(prev, input, credentialCipher) {
+		return true
+	}
+	return prev.DefaultSchema != input.DefaultSchema
+}
+
+// connectionFieldsChanged 兼容旧名：等同 authAffectingChanged。
+func connectionFieldsChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
+	return authAffectingChanged(prev, input, credentialCipher)
+}
+
 // UpdateDataResource 更新资源。credentialCipher 为空表示保留原密码。
-// 仅当连接相关字段变化时清空 last_test_status 并撤销 read 授权；纯改名/改默认 schema 不动授权。
+// 仅 authAffecting 变化时清空 last_test_status 并撤销 read；defaultSchema 单独变化不撤权。
 func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, credentialCipher string, prev DataResource) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -204,9 +220,9 @@ func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, credenti
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	connChanged := connectionFieldsChanged(prev, input, credentialCipher)
+	authChanged := authAffectingChanged(prev, input, credentialCipher)
 	if credentialCipher != "" {
-		if connChanged {
+		if authChanged {
 			_, err = tx.Exec(`UPDATE data_resources SET
 				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
 				credential_cipher=?, ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
@@ -222,7 +238,7 @@ func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, credenti
 				input.Username, credentialCipher, input.SSLMode, now, id)
 		}
 	} else {
-		if connChanged {
+		if authChanged {
 			_, err = tx.Exec(`UPDATE data_resources SET
 				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
 				ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
@@ -241,8 +257,8 @@ func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, credenti
 	if err != nil {
 		return err
 	}
-	// 仅连接目标/凭据变化时：旧 read 授权不得沿用
-	if connChanged {
+	// 仅目标库/凭据变化时：旧 read 授权不得沿用
+	if authChanged {
 		if _, err := tx.Exec(`DELETE FROM data_resource_grants WHERE resource_id = ? AND access_mode = ?`,
 			id, AccessRead); err != nil {
 			return err

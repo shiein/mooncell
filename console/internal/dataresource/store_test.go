@@ -256,6 +256,40 @@ func TestSavedSQLUserIsolation(t *testing.T) {
 	}
 }
 
+func TestAuthVsPoolAffectingChanged(t *testing.T) {
+	prev := DataResource{
+		DBType: DriverDM, Host: "h", Port: 5236, DatabaseName: "", DefaultSchema: "OLD",
+		Username: "u", SSLMode: "disable",
+	}
+	// 仅改 defaultSchema：不撤权，但要重建池
+	in := DataResourceInput{
+		Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DefaultSchema: "NEW",
+		Username: "u", SSLMode: "disable",
+	}
+	if authAffectingChanged(prev, in, "") {
+		t.Fatal("仅改 defaultSchema 不应 authAffecting")
+	}
+	if !poolAffectingChanged(prev, in, "") {
+		t.Fatal("仅改 defaultSchema 应对达梦 poolAffecting（DSN schema）")
+	}
+	// 改 host：两者皆 true
+	in2 := in
+	in2.Host = "h2"
+	in2.DefaultSchema = "OLD"
+	if !authAffectingChanged(prev, in2, "") || !poolAffectingChanged(prev, in2, "") {
+		t.Fatal("改 host 应同时影响 auth 与 pool")
+	}
+	// 纯改名
+	in3 := DataResourceInput{
+		Name: "R2", DBType: prev.DBType, Host: prev.Host, Port: prev.Port,
+		DatabaseName: prev.DatabaseName, DefaultSchema: prev.DefaultSchema,
+		Username: prev.Username, SSLMode: prev.SSLMode,
+	}
+	if authAffectingChanged(prev, in3, "") || poolAffectingChanged(prev, in3, "") {
+		t.Fatal("纯改名不应影响 auth/pool")
+	}
+}
+
 func TestValidateInput(t *testing.T) {
 	cases := []struct {
 		name  string

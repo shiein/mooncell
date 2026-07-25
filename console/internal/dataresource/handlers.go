@@ -237,7 +237,8 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	connChanged := connectionFieldsChanged(prev, input, cipher)
+	authChanged := authAffectingChanged(prev, input, cipher)
+	poolChanged := poolAffectingChanged(prev, input, cipher)
 	if err := UpdateDataResource(s.db, id, input, cipher, prev); err != nil {
 		if isUniqueConstraint(err) {
 			writeErr(w, http.StatusConflict, "NAME_DUPLICATE", "资源名称已存在")
@@ -246,13 +247,13 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新资源失败")
 		return
 	}
-	// 连接目标/凭据变化：关闭旧池、失效工作台、重测并写回 last_test_status
-	if connChanged {
+	// defaultSchema（含达梦 DSN）变化也必须关池；仅 auth 变化才清测试态/重测
+	if poolChanged {
 		s.workspaces.InvalidateResource(id)
 		s.pools.CloseDB(id)
 	}
 	res, _, _ := GetDataResource(s.db, id)
-	if connChanged {
+	if authChanged {
 		password := input.Password
 		if password == "" {
 			if p, err := s.credKey.Decrypt(res.CredentialCipher); err == nil {
