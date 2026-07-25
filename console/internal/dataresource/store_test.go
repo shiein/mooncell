@@ -272,9 +272,18 @@ func TestValidateInput(t *testing.T) {
 		{"DM无库名仅用户", DataResourceInput{Name: "R", DBType: DriverDM, Host: "h", Port: 5236, Username: "SYSDBA", SSLMode: "disable"}, true},
 	}
 	for _, c := range cases {
-		err := ValidateInput(c.input)
+		in := c.input
+		err := ValidateInput(&in)
 		if (err == nil) != c.ok {
 			t.Errorf("%s: 期望 ok=%v,实际 err=%v", c.name, c.ok, err)
 		}
+	}
+	// Trim 必须回写
+	pad := DataResourceInput{Name: "  R  ", DBType: DriverPostgreSQL, Host: " h ", Port: 5432, DatabaseName: " d ", Username: " u ", SSLMode: "disable"}
+	if err := ValidateInput(&pad); err != nil {
+		t.Fatal(err)
+	}
+	if pad.Name != "R" || pad.Host != "h" || pad.DatabaseName != "d" || pad.Username != "u" {
+		t.Fatalf("ValidateInput 应 Trim 字段: %+v", pad)
 	}
 }

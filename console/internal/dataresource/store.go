@@ -235,7 +235,9 @@ func DeleteDataResource(db *sql.DB, id string) error {
 	return tx.Commit()
 }
 
-// UpdateTestStatus 更新资源的最近测试状态（无 CAS，仅供测试辅助）。
+// UpdateTestStatus 更新资源的最近测试状态（无 CAS）。
+// 用于创建/更新资源后的 persistConnectionTest；不与 updated_at 做乐观锁。
+// 配置变更与测试结果的竞态请用 UpdateTestStatusAndRevokeRead（带 expectedUpdatedAt）。
 func UpdateTestStatus(db *sql.DB, id, status string) error {
 	_, err := db.Exec("UPDATE data_resources SET last_test_status=?, last_test_at=? WHERE id=?",
 		status, time.Now().UnixMilli(), id)
@@ -523,31 +525,40 @@ func DeleteSavedSQL(db *sql.DB, id, username, resourceID string) error {
 
 // --- 校验工具 ---
 
-// ValidateInput 校验 DataResourceInput 的基本合法性。
-func ValidateInput(input DataResourceInput) error {
+// ValidateInput 校验并规范化 DataResourceInput（Trim 名称/主机/库/用户/schema）。
+// 必须传入指针，否则 Trim 无法回写调用方。
+func ValidateInput(input *DataResourceInput) error {
+	if input == nil {
+		return errors.New("请求体不能为空")
+	}
 	input.Name = strings.TrimSpace(input.Name)
+	input.Host = strings.TrimSpace(input.Host)
+	input.DatabaseName = strings.TrimSpace(input.DatabaseName)
+	input.DefaultSchema = strings.TrimSpace(input.DefaultSchema)
+	input.Username = strings.TrimSpace(input.Username)
+	input.SSLMode = strings.TrimSpace(input.SSLMode)
+	if input.SSLMode == "" {
+		input.SSLMode = "disable"
+	}
 	if input.Name == "" {
 		return errors.New("名称不能为空")
 	}
 	if !validDBType(input.DBType) {
 		return fmt.Errorf("不支持的数据库类型: %s", input.DBType)
 	}
-	if strings.TrimSpace(input.Host) == "" {
+	if input.Host == "" {
 		return errors.New("主机不能为空")
 	}
 	if input.Port <= 0 || input.Port > 65535 {
 		return errors.New("端口必须在 1-65535 范围内")
 	}
-	if strings.TrimSpace(input.Username) == "" {
+	if input.Username == "" {
 		return errors.New("用户名不能为空")
 	}
 	// 达梦：实例内只有 schema/用户模式两层，无独立「库」；库名字段可空（用 schema 或用户名）
 	if input.DBType == DriverDM {
-		if strings.TrimSpace(input.DatabaseName) == "" &&
-			strings.TrimSpace(input.DefaultSchema) == "" {
-			// 允许都空：驱动默认以用户名为 schema
-		}
-	} else if strings.TrimSpace(input.DatabaseName) == "" {
+		// 允许 DatabaseName 与 DefaultSchema 都空：驱动默认以用户名为 schema
+	} else if input.DatabaseName == "" {
 		return errors.New("数据库名不能为空")
 	}
 	if !validSSLMode(input.SSLMode) {

@@ -131,7 +131,7 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
-	if err := ValidateInput(input); err != nil {
+	if err := ValidateInput(&input); err != nil {
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
@@ -146,7 +146,7 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UnixMilli()
 	res := DataResource{
-		ID: newID(), Name: strings.TrimSpace(input.Name), DBType: input.DBType,
+		ID: newID(), Name: input.Name, DBType: input.DBType,
 		Host: input.Host, Port: input.Port, DatabaseName: input.DatabaseName,
 		DefaultSchema: input.DefaultSchema, Username: input.Username,
 		CredentialCipher: cipher, SSLMode: input.SSLMode,
@@ -224,7 +224,7 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
-	if err := ValidateInput(input); err != nil {
+	if err := ValidateInput(&input); err != nil {
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
@@ -346,7 +346,7 @@ func (s *Service) TestConnectionHandler(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
-	if err := ValidateInput(input); err != nil {
+	if err := ValidateInput(&input); err != nil {
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
@@ -392,7 +392,7 @@ func (s *Service) TestResourceDraftHandler(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
-	if err := ValidateInput(input); err != nil {
+	if err := ValidateInput(&input); err != nil {
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
