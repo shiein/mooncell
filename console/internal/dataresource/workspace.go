@@ -14,10 +14,13 @@ package dataresource
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // TxState 事务状态。
@@ -51,10 +54,13 @@ type Workspace struct {
 }
 
 // beginManualTxLocked 开启工作台级手工事务（调用方须已持 ws.mu）。
-// Begin 使用独立于请求的 txCtx；单条语句仍用调用方传入的短超时 ctx。
+// Begin 使用独立于请求的 txCtx（无绝对超时）；空闲回收由 CleanupIdle 按 LastActivity 判断。
+// 单条语句仍用调用方传入的短超时 ctx。
 func (ws *Workspace) beginManualTxLocked(readOnly bool) (Transaction, error) {
-	// 与空闲回滚窗口对齐，防止 goroutine/连接无限挂起
-	ctx, cancel := context.WithTimeout(context.Background(), txIdleTimeout)
+	// WithCancel 而非 WithTimeout：避免「活动事务在 15min 绝对上限被静默回滚，
+	// 但 LastActivity 仍新鲜导致 CleanupIdle 永不回收、资源长期 RESOURCE_BUSY」。
+	// cancel 仅在 Commit/Rollback/DeleteWorkspace/CleanupIdle/CloseAll 调用。
+	ctx, cancel := context.WithCancel(context.Background())
 	tx, err := ws.Adapter.Begin(ctx, readOnly)
 	if err != nil {
 		cancel()
@@ -409,7 +415,8 @@ func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Wor
 }
 
 // queryPageIntoResult 执行分页查询并填充 result。
-// 优先 PageSQL；若包装失败（如 MySQL 派生表重名列）则对原文流式跳过 offset、读取 limit。
+// 优先 PageSQL。仅当识别为派生表重名列（MySQL 1060 等）且 offset==0 时流式兜底；
+// 其它失败直接返回，避免语法/权限错误二次打库，或大 offset 拖死连接池。
 func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q interface {
 	Query(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }, sqlText string, limit, offset int, result *ExecutionResult) error {
@@ -423,17 +430,49 @@ func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q inter
 		return fillResult(rows, result, limit)
 	}
 	pageErr := err
-	// 流式兜底：不改写用户 SQL（大 offset 成本高，仅作包装失败时的正确性回退）
+	if offset != 0 || !isDuplicateColumnPageError(pageErr) {
+		// 用户自带 LIMIT/FETCH 且包装后重名列：给明确文案
+		if isDuplicateColumnPageError(pageErr) {
+			return DatabaseError{
+				Code:    "DUPLICATE_COLUMN",
+				Message: "该查询存在重复列名，无法自动分页；请显式指定列别名，或去掉 SQL 中的 LIMIT/FETCH/FOR UPDATE 后重试",
+			}.toError()
+		}
+		return adapter.NormalizeError(pageErr).toError()
+	}
+	// 仅 offset=0 的重名列：流式读 limit+1，避免全量拉取后丢弃
 	raw := strings.TrimRight(strings.TrimSpace(sqlText), ";")
 	rows2, err2 := q.Query(ctx, raw)
 	if err2 != nil {
 		return adapter.NormalizeError(pageErr).toError()
 	}
 	defer rows2.Close()
-	if err := fillResultStream(rows2, result, limit, offset); err != nil {
-		return err
+	return fillResultStream(rows2, result, limit, 0)
+}
+
+// isDuplicateColumnPageError 识别 MySQL 1060 / 派生表重名列等包装失败。
+func isDuplicateColumnPageError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return nil
+	// go-sql-driver/mysql 错误号
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) && myErr != nil && myErr.Number == 1060 {
+		return true
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "duplicate column") || strings.Contains(lower, "error 1060") {
+		return true
+	}
+	// 达梦/Oracle 常见「列名重复 / 歧义」
+	if strings.Contains(lower, "ambiguous") {
+		return true
+	}
+	if strings.Contains(msg, "列名") && (strings.Contains(msg, "重复") || strings.Contains(msg, "歧义")) {
+		return true
+	}
+	return false
 }
 
 // executeWriteInWorkspace 执行写操作。
