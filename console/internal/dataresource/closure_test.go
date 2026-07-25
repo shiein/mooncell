@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -52,6 +53,54 @@ func TestExportSnapshotCSVUsesProvidedRows(t *testing.T) {
 	body := bytes.TrimPrefix(recorder.Body.Bytes(), []byte{0xEF, 0xBB, 0xBF})
 	if got := string(body); got != "id,name\n1,screen value\n" {
 		t.Fatalf("快照 CSV 内容不符: %q", got)
+	}
+}
+
+func TestImportCellValueEmptyToNull(t *testing.T) {
+	if v := importCellValue("", true); v != nil {
+		t.Fatalf("可空列空串应绑定 NULL, got %#v", v)
+	}
+	if v := importCellValue("", false); v != "" {
+		t.Fatalf("不可空列空串应保留空串, got %#v", v)
+	}
+	if v := importCellValue("x", true); v != "x" {
+		t.Fatalf("非空串应原样绑定, got %#v", v)
+	}
+}
+
+func TestNewImportCSVReaderSharedConfig(t *testing.T) {
+	// 含不规范引号：预览与执行必须都能解析且切分一致
+	raw := "a,b\n1,\"he said \"\"hi\"\" ok\"\n"
+	r1 := newImportCSVReader(strings.NewReader(raw))
+	r2 := newImportCSVReader(strings.NewReader(raw))
+	var rows1, rows2 [][]string
+	for {
+		row, err := r1.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows1 = append(rows1, append([]string(nil), row...))
+	}
+	for {
+		row, err := r2.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows2 = append(rows2, append([]string(nil), row...))
+	}
+	if len(rows1) != len(rows2) {
+		t.Fatalf("行数不一致 %d vs %d", len(rows1), len(rows2))
+	}
+	for i := range rows1 {
+		if strings.Join(rows1[i], "|") != strings.Join(rows2[i], "|") {
+			t.Fatalf("行 %d 切分不一致: %v vs %v", i, rows1[i], rows2[i])
+		}
 	}
 }
 

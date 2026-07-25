@@ -11,6 +11,7 @@
 package dataresource
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"fmt"
@@ -258,15 +259,7 @@ func parseCSVPreview(session *ImportSession) (*ImportPreviewResult, error) {
 		return nil, fmt.Errorf("打开文件失败: %w", err)
 	}
 	defer f.Close()
-	// 跳过 BOM
-	bom := make([]byte, 3)
-	n, _ := f.Read(bom)
-	if n < 3 || bom[0] != 0xEF || bom[1] != 0xBB || bom[2] != 0xBF {
-		f.Seek(0, io.SeekStart)
-	}
-
-	reader := csv.NewReader(f)
-	reader.FieldsPerRecord = -1 // 允许行宽不一致；上限见 importMaxFieldsPerRow
+	reader := newImportCSVReader(f)
 	var preview [][]string
 	for i := 0; i <= ImportPreviewRows; i++ {
 		row, err := reader.Read()
@@ -292,6 +285,41 @@ func parseCSVPreview(session *ImportSession) (*ImportPreviewResult, error) {
 		Columns:  preview[0],
 		Preview:  preview,
 	}, nil
+}
+
+// newImportCSVReader 预览与执行共用的 CSV 解析配置，避免字段切分不一致导致列映射错位。
+func newImportCSVReader(r io.Reader) *csv.Reader {
+	// 跳过 UTF-8 BOM（若有）
+	br := &bomSkipReader{r: r}
+	reader := csv.NewReader(br)
+	reader.LazyQuotes = true
+	reader.ReuseRecord = false
+	reader.FieldsPerRecord = -1 // 允许行宽不一致；上限见 importMaxFieldsPerRow
+	return reader
+}
+
+// bomSkipReader 在首次读时跳过 UTF-8 BOM。
+type bomSkipReader struct {
+	r       io.Reader
+	checked bool
+}
+
+func (b *bomSkipReader) Read(p []byte) (int, error) {
+	if !b.checked {
+		b.checked = true
+		var bom [3]byte
+		n, err := io.ReadFull(b.r, bom[:])
+		switch {
+		case n == 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF:
+			// 已跳过 BOM
+		case n > 0:
+			// 非 BOM：把已读字节拼回后续读取
+			b.r = io.MultiReader(bytes.NewReader(bom[:n]), b.r)
+		case err != nil && err != io.EOF && err != io.ErrUnexpectedEOF:
+			return 0, err
+		}
+	}
+	return b.r.Read(p)
 }
 
 func (s *Service) openXLSX(path string) (*excelize.File, error) {
@@ -561,7 +589,7 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 	}
 
 	// 设计：动态对象名只能来自已读取的元数据——Describe 校验表与列存在
-	resolvedCols, err := validateImportTarget(ctx, adapter, schema, tableName, targetCols)
+	resolvedCols, nullableByCol, err := validateImportTarget(ctx, adapter, schema, tableName, targetCols)
 	if err != nil {
 		result.Error = err.Error()
 		return result, nil
@@ -612,7 +640,8 @@ func executeImport(ctx context.Context, adapter DataSourceAdapter, session *Impo
 				continue
 			}
 			if j < len(row) {
-				args = append(args, row[j])
+				// 空单元格与短行缺列统一为 NULL（可空列）；避免 "" 写入 integer/date 必败
+				args = append(args, importCellValue(row[j], nullableByCol[col]))
 			} else {
 				args = append(args, nil)
 			}
@@ -658,19 +687,22 @@ type importRowError struct {
 func (e *importRowError) Error() string { return e.msg }
 
 // validateImportTarget 通过 Describe 确认表存在，且映射列均在表结构中。
-func validateImportTarget(ctx context.Context, adapter DataSourceAdapter, schema, tableName string, targetCols []string) ([]string, error) {
+// 返回解析后的真实列名，以及列名 → 是否可空（用于空单元格转 NULL）。
+func validateImportTarget(ctx context.Context, adapter DataSourceAdapter, schema, tableName string, targetCols []string) ([]string, map[string]bool, error) {
 	obj := MetadataNode{Kind: NodeTable, Schema: schema, Name: tableName}
 	structure, err := adapter.Describe(ctx, obj)
 	if err != nil {
-		return nil, fmt.Errorf("无法读取目标表结构: %w", err)
+		return nil, nil, fmt.Errorf("无法读取目标表结构: %w", err)
 	}
 	if len(structure.Columns) == 0 {
-		return nil, fmt.Errorf("目标表不存在或无字段: %s", tableName)
+		return nil, nil, fmt.Errorf("目标表不存在或无字段: %s", tableName)
 	}
 	exact := map[string]string{} // lower -> actual
+	nullable := map[string]bool{}
 	for _, c := range structure.Columns {
 		exact[c.Name] = c.Name
 		exact[strings.ToLower(c.Name)] = c.Name
+		nullable[c.Name] = c.IsNullable
 	}
 	resolved := make([]string, 0, len(targetCols))
 	for _, col := range targetCols {
@@ -682,9 +714,18 @@ func validateImportTarget(ctx context.Context, adapter DataSourceAdapter, schema
 			resolved = append(resolved, actual)
 			continue
 		}
-		return nil, fmt.Errorf("目标表不存在列: %s", col)
+		return nil, nil, fmt.Errorf("目标表不存在列: %s", col)
 	}
-	return resolved, nil
+	return resolved, nullable, nil
+}
+
+// importCellValue 将 CSV/XLSX 单元格转为绑定参数。
+// 空串且列可空 → NULL（与短行缺列语义一致）；不可空列保留 "" 由数据库约束决定成败。
+func importCellValue(cell string, nullable bool) any {
+	if cell == "" && nullable {
+		return nil
+	}
+	return cell
 }
 
 // streamImportRows 逐行回调文件内容；CSV 与 XLSX 均流式读取，避免整表入内存。
@@ -704,15 +745,7 @@ func streamCSVRows(path string, fn func(row []string, isHeader bool) error) erro
 		return err
 	}
 	defer f.Close()
-	bom := make([]byte, 3)
-	n, _ := f.Read(bom)
-	if n < 3 || bom[0] != 0xEF || bom[1] != 0xBB || bom[2] != 0xBF {
-		f.Seek(0, io.SeekStart)
-	}
-	reader := csv.NewReader(f)
-	reader.LazyQuotes = true
-	reader.ReuseRecord = false
-	reader.FieldsPerRecord = -1
+	reader := newImportCSVReader(f)
 	first := true
 	for {
 		row, err := reader.Read()
