@@ -103,8 +103,11 @@ type WorkspaceManager struct {
 	pool       *PoolManager
 }
 
-// 事务超时时间。
+// 事务空闲超时：超过则回滚手工事务。
 const txIdleTimeout = 15 * time.Minute
+
+// 工作台对象空闲超时：无活动事务且超过该时间则删除（防浏览器直接关闭导致泄漏）。
+const workspaceIdleTimeout = 1 * time.Hour
 
 // NewWorkspaceManager 创建工作台管理器。
 func NewWorkspaceManager(pool *PoolManager) *WorkspaceManager {
@@ -231,7 +234,8 @@ func (wm *WorkspaceManager) InvalidateResource(resourceID string) {
 	}
 }
 
-// CleanupIdle 回滚超时的手工事务。由后台定期调用。
+// CleanupIdle 回滚超时手工事务，并删除长期无活动的空工作台。由后台定期调用。
+// 返回值：回滚的事务数 + 删除的空闲工作台数（便于日志观测）。
 func (wm *WorkspaceManager) CleanupIdle() int {
 	wm.mu.Lock()
 	candidates := make([]*Workspace, 0, len(wm.workspaces))
@@ -241,17 +245,26 @@ func (wm *WorkspaceManager) CleanupIdle() int {
 	wm.mu.Unlock()
 
 	now := time.Now()
-	rolledBack := 0
+	n := 0
+	var toDelete []string
 	for _, ws := range candidates {
 		ws.mu.Lock()
 		if ws.Tx != nil && now.Sub(ws.LastActivity) > txIdleTimeout {
 			_ = ws.Tx.Rollback()
 			ws.clearTxLocked(true, wm.pool)
-			rolledBack++
+			n++
+		}
+		// 无事务且长时间无活动：删除工作台对象（浏览器直关时前端未必调 delete）
+		if ws.Tx == nil && now.Sub(ws.LastActivity) > workspaceIdleTimeout {
+			toDelete = append(toDelete, ws.ID)
 		}
 		ws.mu.Unlock()
 	}
-	return rolledBack
+	for _, id := range toDelete {
+		wm.DeleteWorkspace(id)
+		n++
+	}
+	return n
 }
 
 // CloseAll 关闭所有工作台（Console 退出时）。

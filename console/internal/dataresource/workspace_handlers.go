@@ -160,7 +160,8 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 			writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
 			return
 		}
-		if de, ok := err.(DatabaseError); ok {
+		var de DatabaseError
+		if errors.As(err, &de) && de.Code != "" {
 			s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败·"+de.Code, 0)
 			status := http.StatusBadRequest
 			switch de.Code {
