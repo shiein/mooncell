@@ -78,6 +78,7 @@ func Run(distFS fs.FS, version string, args []string) {
 	defer dataResSvc.Close()
 	a.dataResSvc = dataResSvc
 	dataResSvc.SetImportMaxMB(cfg.DataResource.ImportMaxMB)
+	dataResSvc.CleanupOrphanImportsOnStart()
 	// 注入审计回调：复用现有审计系统，数据资源操作也写入审计日志。
 	dataResSvc.SetAuditFunc(func(user, action, target, result string) {
 		a.store.appendAudit(user, action, "数据资源·"+target, result)

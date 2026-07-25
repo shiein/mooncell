@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -49,8 +50,10 @@ type Workspace struct {
 	Adapter      DataSourceAdapter
 	LastSQL      string     // 最近一次成功的查询（供全量导出重放）
 	LastActivity time.Time  // 最近活动时间（用于超时回滚）
-	closed       bool       // 已失效/删除：持指针的迟到请求必须拒绝
-	mu           sync.Mutex // 串行化同一工作台的请求（执行/提交/回滚）
+	// closed 用 atomic：失效路径必须先标记 closed 并 cancel 语句，再等 ws.mu，
+	// 否则在途 Execute 持锁时 Invalidate 会卡在 mu 上，执行完仍可能提交。
+	closed atomic.Bool
+	mu     sync.Mutex // 串行化同一工作台的请求（执行/提交/回滚）
 	// stmtMu/stmtCancel：当前语句取消函数，与 mu 分离。
 	// Cancel 接口不得获取 mu，否则与正在执行的 Execute 死锁。
 	stmtMu     sync.Mutex
@@ -120,11 +123,27 @@ func (ws *Workspace) clearTxLocked(endPool bool, pool *PoolManager) {
 // errWorkspaceClosed 工作台已从管理器移除或被失效。
 var errWorkspaceClosed = fmt.Errorf("工作台已关闭或失效")
 
+func (ws *Workspace) isClosed() bool {
+	return ws.closed.Load()
+}
+
 func (ws *Workspace) ensureOpenLocked() error {
-	if ws.closed {
+	if ws.closed.Load() {
 		return errWorkspaceClosed
 	}
 	return nil
+}
+
+// workspaceStateSnapshot 锁内快照，避免 handler 解锁后读 AutoCommit/TxState 的 data race。
+type workspaceStateSnapshot struct {
+	AutoCommit bool
+	TxState    TxState
+}
+
+func (ws *Workspace) snapshotState() workspaceStateSnapshot {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return workspaceStateSnapshot{AutoCommit: ws.AutoCommit, TxState: ws.TxState}
 }
 
 // WorkspaceManager 管理所有工作台。
@@ -176,7 +195,8 @@ func (wm *WorkspaceManager) GetWorkspace(id string) (*Workspace, bool) {
 }
 
 // DeleteWorkspace 删除工作台。有活动事务时回滚。
-// 先标记 closed，再从 map 移除，最后在 ws.mu 下回滚，避免已取指针的请求在失效后仍 BeginTx。
+// 顺序：map 移除 → cancel 在途语句 → 无锁标记 closed → 再取 mu 回滚。
+// 禁止「先等 mu 再 closed」，否则在途 Execute 持锁期间仍可完整提交。
 func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	wm.mu.Lock()
 	ws, ok := wm.workspaces[id]
@@ -187,8 +207,10 @@ func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	delete(wm.workspaces, id)
 	wm.mu.Unlock()
 
+	ws.cancelRunningStmt()
+	ws.closed.Store(true)
+
 	ws.mu.Lock()
-	ws.closed = true
 	if ws.Tx != nil {
 		_ = ws.Tx.Rollback()
 		ws.clearTxLocked(true, wm.pool)
@@ -302,7 +324,7 @@ func (wm *WorkspaceManager) deleteWorkspaceIfIdle(ws *Workspace, now time.Time) 
 	}
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
-	if ws.closed || ws.Tx != nil || now.Sub(ws.LastActivity) <= workspaceIdleTimeout {
+	if ws.closed.Load() || ws.Tx != nil || now.Sub(ws.LastActivity) <= workspaceIdleTimeout {
 		return false
 	}
 
@@ -313,7 +335,7 @@ func (wm *WorkspaceManager) deleteWorkspaceIfIdle(ws *Workspace, now time.Time) 
 		return false
 	}
 	delete(wm.workspaces, ws.ID)
-	ws.closed = true
+	ws.closed.Store(true)
 	ws.clearTxLocked(false, nil)
 	return true
 }
@@ -328,8 +350,9 @@ func (wm *WorkspaceManager) CloseAll() {
 	wm.workspaces = map[string]*Workspace{}
 	wm.mu.Unlock()
 	for _, ws := range list {
+		ws.cancelRunningStmt()
+		ws.closed.Store(true)
 		ws.mu.Lock()
-		ws.closed = true
 		if ws.Tx != nil {
 			_ = ws.Tx.Rollback()
 			ws.clearTxLocked(true, wm.pool)
@@ -601,6 +624,11 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 			_ = tx.Rollback()
 			return mapStmtContextError(ws.Adapter, err)
 		}
+		// 失效路径可能已 closed：禁止提交在途自动提交写
+		if ws.isClosed() {
+			_ = tx.Rollback()
+			return &APIError{Code: "WORKSPACE_CLOSED", Message: errWorkspaceClosed.Error()}
+		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("提交失败: %w", err)
 		}
@@ -633,56 +661,60 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 	return nil
 }
 
-// CommitWorkspace 提交工作台的活动事务。
-func (wm *WorkspaceManager) CommitWorkspace(ws *Workspace) error {
+// CommitWorkspace 提交工作台的活动事务。返回锁内状态快照（供响应，避免解锁后读竞争）。
+func (wm *WorkspaceManager) CommitWorkspace(ws *Workspace) (workspaceStateSnapshot, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	snap := workspaceStateSnapshot{AutoCommit: ws.AutoCommit, TxState: ws.TxState}
 	if err := ws.ensureOpenLocked(); err != nil {
-		return err
+		return snap, err
 	}
 	ws.LastActivity = time.Now()
 	if ws.Tx == nil {
-		return fmt.Errorf("无活动事务可提交")
+		return snap, fmt.Errorf("无活动事务可提交")
 	}
 	err := ws.Tx.Commit()
-	// database/sql：Commit 返回后事务已结束（成功或失败），必须释放计数与 cancel，避免 activeTx 泄漏
+	// database/sql：Commit 返回后事务已结束（成功或失败），必须释放计数与 cancel
 	ws.clearTxLocked(true, wm.pool)
+	snap = workspaceStateSnapshot{AutoCommit: ws.AutoCommit, TxState: ws.TxState}
 	if err != nil {
-		return fmt.Errorf("提交失败: %w", err)
+		return snap, fmt.Errorf("提交失败: %w", err)
 	}
-	return nil
+	return snap, nil
 }
 
 // RollbackWorkspace 回滚工作台的活动事务。
-func (wm *WorkspaceManager) RollbackWorkspace(ws *Workspace) error {
+func (wm *WorkspaceManager) RollbackWorkspace(ws *Workspace) (workspaceStateSnapshot, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	snap := workspaceStateSnapshot{AutoCommit: ws.AutoCommit, TxState: ws.TxState}
 	if err := ws.ensureOpenLocked(); err != nil {
-		return err
+		return snap, err
 	}
 	ws.LastActivity = time.Now()
 	if ws.Tx == nil {
-		return nil // 无事务可回滚，幂等
+		return snap, nil // 无事务可回滚，幂等
 	}
 	_ = ws.Tx.Rollback() // 回滚失败也清除状态（连接可能已断开）
 	ws.clearTxLocked(true, wm.pool)
-	return nil
+	return workspaceStateSnapshot{AutoCommit: ws.AutoCommit, TxState: ws.TxState}, nil
 }
 
 // SetAutoCommit 设置自动提交模式。
 // 活动事务未处理前不能重新开启自动提交。
-func (wm *WorkspaceManager) SetAutoCommit(ws *Workspace, autoCommit bool) error {
+func (wm *WorkspaceManager) SetAutoCommit(ws *Workspace, autoCommit bool) (workspaceStateSnapshot, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
+	snap := workspaceStateSnapshot{AutoCommit: ws.AutoCommit, TxState: ws.TxState}
 	if err := ws.ensureOpenLocked(); err != nil {
-		return err
+		return snap, err
 	}
 	ws.LastActivity = time.Now()
 	if autoCommit && ws.Tx != nil {
-		return fmt.Errorf("存在活动事务，不能开启自动提交，请先提交或回滚")
+		return snap, fmt.Errorf("存在活动事务，不能开启自动提交，请先提交或回滚")
 	}
 	ws.AutoCommit = autoCommit
-	return nil
+	return workspaceStateSnapshot{AutoCommit: ws.AutoCommit, TxState: ws.TxState}, nil
 }
 
 // fillResult 从已分页的 rows 填充 ExecutionResult（PageSQL 已含 LIMIT/OFFSET）。

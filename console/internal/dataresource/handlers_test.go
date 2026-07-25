@@ -70,9 +70,12 @@ func TestDSNSpecialChars(t *testing.T) {
 
 	r.DBType = DriverDM
 	dm := BuildDSN(r, "p@ss:word")
-	// URL 编码后 host 前的 @ 仍是 userinfo 分隔，密码中的 @ 被编码
-	if !strings.HasPrefix(dm, "dm://") || !strings.Contains(dm, "@h:5432") || strings.Contains(dm, "p@ss") {
-		t.Errorf("dmDSN 特殊字符不符: %s", dm)
+	// 驱动不解码：密码必须原样（含 @）；LastIndex("@") 仍能切到 host
+	if !strings.HasPrefix(dm, "dm://") || !strings.Contains(dm, "u:p@ss:word@h:5432") {
+		t.Errorf("dmDSN 特殊字符应保持原样: %s", dm)
+	}
+	if strings.Contains(dm, "%40") || strings.Contains(dm, "%3A") {
+		t.Errorf("dmDSN 不得 URL 编码凭据: %s", dm)
 	}
 }
 

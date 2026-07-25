@@ -132,40 +132,43 @@ func (a *pgAdapter) listViews(ctx context.Context, schema string) ([]MetadataNod
 		SELECT table_name FROM information_schema.views
 		WHERE table_schema = $1
 		ORDER BY table_name`, schema)
-	if err == nil {
-		for viewRows.Next() {
-			var name string
-			if err := viewRows.Scan(&name); err != nil {
-				viewRows.Close()
-				return nil, err
-			}
-			n := MetadataNode{Kind: NodeView, Schema: schema, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		viewRows.Close()
-		if err := viewRows.Err(); err != nil {
+	if err != nil {
+		return nil, fmt.Errorf("查询视图失败: %w", err)
+	}
+	for viewRows.Next() {
+		var name string
+		if err := viewRows.Scan(&name); err != nil {
+			viewRows.Close()
 			return nil, err
 		}
+		n := MetadataNode{Kind: NodeView, Schema: schema, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
+	}
+	viewRows.Close()
+	if err := viewRows.Err(); err != nil {
+		return nil, err
 	}
 	matRows, err := a.db.QueryContext(ctx, `
 		SELECT matviewname FROM pg_matviews WHERE schemaname = $1
 		ORDER BY matviewname`, schema)
-	if err == nil {
-		for matRows.Next() {
-			var name string
-			if err := matRows.Scan(&name); err != nil {
-				matRows.Close()
-				return nil, err
-			}
-			n := MetadataNode{Kind: NodeMatView, Schema: schema, Name: name}
-			n.ID = n.EncodeID()
-			out = append(out, n)
-		}
-		matRows.Close()
-		if err := matRows.Err(); err != nil {
+	if err != nil {
+		// 无 matviews 权限时仍返回普通视图，但附错误会被上层吞；此处返回明确错误
+		return nil, fmt.Errorf("查询物化视图失败: %w", err)
+	}
+	for matRows.Next() {
+		var name string
+		if err := matRows.Scan(&name); err != nil {
+			matRows.Close()
 			return nil, err
 		}
+		n := MetadataNode{Kind: NodeMatView, Schema: schema, Name: name}
+		n.ID = n.EncodeID()
+		out = append(out, n)
+	}
+	matRows.Close()
+	if err := matRows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

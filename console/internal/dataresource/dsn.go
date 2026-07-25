@@ -6,7 +6,6 @@ package dataresource
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
@@ -97,17 +96,15 @@ func quoteDMSchemaIdent(name string) string {
 
 // dmDSN 构建达梦 DM 的 DSN：dm://user:pass@host:port?schema=…。
 //
-// 注意：官方驱动 parseDSN 对 query 值不做 URL 解码（直接 Split 赋值），
-// 因此 schema 不能走 url.Values.Encode（会把 "ADMIN" 编成 %22ADMIN%22，
-// 最终执行 set schema %22ADMIN%22 触发 -2007）。schema 段须原样拼接；
-// 标识符用双引号包裹以兼容 ADMIN 等保留字。
+// 官方驱动 parseDSN（dm@v1.8.20）：
+//   - userinfo 用 LastIndex("@") + SplitN(":", 2)，且 **不做 URL 解码**；
+//   - query 同样不解码。
+// 因此用户名/密码不得用 url.UserPassword（会变成 %40 等字面量导致认证失败）；
+// schema 不能走 url.Values.Encode。密码可含 @（LastIndex 切 host）；
+// 用户名不得含 ":"/"@"（驱动分割语义限制，校验在 ValidateInput 侧未强制）。
 func dmDSN(r DataResource, password string) string {
-	u := &url.URL{
-		Scheme: "dm",
-		User:   url.UserPassword(r.Username, password),
-		Host:   fmt.Sprintf("%s:%d", r.Host, r.Port),
-	}
-	base := u.String()
+	// 手动拼接 userinfo，保持凭据原样
+	base := fmt.Sprintf("dm://%s:%s@%s:%d", r.Username, password, r.Host, r.Port)
 	schema := quoteDMSchemaIdent(dmSchema(r))
 	if schema == "" {
 		return base

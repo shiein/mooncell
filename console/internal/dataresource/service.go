@@ -86,6 +86,12 @@ func (s *Service) Close() {
 	if s.pools != nil {
 		s.pools.CloseAll()
 	}
+	s.cleanupAllImportSessions()
+}
+
+// CleanupOrphanImportsOnStart 启动时清理遗留导入临时文件（重启后 map 为空）。
+func (s *Service) CleanupOrphanImportsOnStart() {
+	cleanupOrphanImportFiles(ImportTempTimeout)
 }
 
 // CleanupIdle 回滚超时的手工事务。由后台定期调用。

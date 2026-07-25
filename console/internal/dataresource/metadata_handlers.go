@@ -10,6 +10,7 @@
 package dataresource
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,7 +78,9 @@ func (s *Service) MetadataChildren(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	children, err := adapter.Children(r.Context(), parent)
+	ctx, cancel := context.WithTimeout(r.Context(), MetadataTimeout)
+	defer cancel()
+	children, err := adapter.Children(ctx, parent)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "METADATA_ERROR", sanitizeErrMsg(err.Error()))
 		return
@@ -104,7 +107,9 @@ func (s *Service) MetadataStructure(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_NODE_ID", "无效的节点 ID")
 		return
 	}
-	structure, err := adapter.Describe(r.Context(), node)
+	ctx, cancel := context.WithTimeout(r.Context(), MetadataTimeout)
+	defer cancel()
+	structure, err := adapter.Describe(ctx, node)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "METADATA_ERROR", sanitizeErrMsg(err.Error()))
 		return
@@ -128,7 +133,9 @@ func (s *Service) MetadataDDL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_NODE_ID", "无效的节点 ID")
 		return
 	}
-	ddl, err := adapter.DDL(r.Context(), node)
+	ctx, cancel := context.WithTimeout(r.Context(), MetadataTimeout)
+	defer cancel()
+	ddl, err := adapter.DDL(ctx, node)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DDL_ERROR", sanitizeErrMsg(err.Error()))
 		return

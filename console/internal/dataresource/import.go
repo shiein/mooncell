@@ -158,13 +158,15 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 解析 multipart 表单
+	// 解析 multipart：总大小受 MaxBytesReader 限制；内存阈值仅数 MB，大文件落盘，
+	// 避免 maxMemory=文件上限时 20 会话 × 100MB 堆占用。
 	maxBytes := int64(s.importMaxMB) << 20
 	if maxBytes <= 0 {
 		maxBytes = 100 << 20
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	if err := r.ParseMultipartForm(maxBytes); err != nil {
+	const multipartMem = 8 << 20 // 8MB：表单字段与小文件进内存，大文件走临时盘
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+multipartMem)
+	if err := r.ParseMultipartForm(multipartMem); err != nil {
 		releaseReservation("")
 		writeErr(w, http.StatusBadRequest, "FILE_TOO_LARGE", "文件过大或格式错误")
 		return
@@ -869,4 +871,50 @@ func (s *Service) cleanupExpiredImports() {
 	for _, path := range expiredPaths {
 		os.Remove(path)
 	}
+	// 扫私有目录：重启后 map 为空，仍清除过期 mc-import-* 文件
+	cleanupOrphanImportFiles(ImportTempTimeout)
+}
+
+// cleanupOrphanImportFiles 删除 mooncell-import 目录中超过 maxAge 的 mc-import-* 临时文件。
+func cleanupOrphanImportFiles(maxAge time.Duration) {
+	dir, err := importDir()
+	if err != nil {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "mc-import-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
+
+// cleanupAllImportSessions 关闭时删除内存会话登记的临时文件并扫盘。
+func (s *Service) cleanupAllImportSessions() {
+	s.importMu.Lock()
+	paths := make([]string, 0, len(s.importSessions))
+	for id, session := range s.importSessions {
+		paths = append(paths, session.FilePath)
+		delete(s.importSessions, id)
+	}
+	s.importMu.Unlock()
+	for _, p := range paths {
+		os.Remove(p)
+	}
+	cleanupOrphanImportFiles(0) // 关闭时清全部前缀文件
 }

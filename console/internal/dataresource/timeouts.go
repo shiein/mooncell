@@ -12,4 +12,6 @@ const (
 	ExportTimeout = 5 * time.Minute
 	// ImportTimeout 导入执行上限。
 	ImportTimeout = 10 * time.Minute
+	// MetadataTimeout 元数据树/结构/DDL/模板查询上限。
+	MetadataTimeout = 30 * time.Second
 )

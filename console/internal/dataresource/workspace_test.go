@@ -298,7 +298,7 @@ func TestManualTxSurvivesRequestContextCancel(t *testing.T) {
 	pool := NewPoolManager(nil)
 	wm := NewWorkspaceManager(pool)
 	ws := wm.CreateWorkspace("res-1", "alice", adapter, false)
-	if err := wm.SetAutoCommit(ws, false); err != nil {
+	if _, err := wm.SetAutoCommit(ws, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -317,7 +317,7 @@ func TestManualTxSurvivesRequestContextCancel(t *testing.T) {
 	}
 
 	// 跨「请求」提交
-	if err := wm.CommitWorkspace(ws); err != nil {
+	if _, err := wm.CommitWorkspace(ws); err != nil {
 		t.Fatalf("提交失败（请求结束后事务应仍可用）: %v", err)
 	}
 
@@ -341,7 +341,7 @@ func TestManualTxRollbackReleasesBusy(t *testing.T) {
 	pool := NewPoolManager(nil)
 	wm := NewWorkspaceManager(pool)
 	ws := wm.CreateWorkspace("res-2", "bob", adapter, false)
-	_ = wm.SetAutoCommit(ws, false)
+	_, _ = wm.SetAutoCommit(ws, false)
 
 	reqCtx, cancel := context.WithCancel(context.Background())
 	if _, err := wm.ExecuteInWorkspace(reqCtx, ws, `INSERT INTO items (id, name) VALUES (2, 'b')`, 0, 0); err != nil {
@@ -350,7 +350,7 @@ func TestManualTxRollbackReleasesBusy(t *testing.T) {
 	}
 	cancel()
 
-	if err := wm.RollbackWorkspace(ws); err != nil {
+	if _, err := wm.RollbackWorkspace(ws); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -371,7 +371,7 @@ func TestRequestCancelDoesNotKillManualTx(t *testing.T) {
 	pool := NewPoolManager(nil)
 	wm := NewWorkspaceManager(pool)
 	ws := wm.CreateWorkspace("res-3", "carol", adapter, false)
-	_ = wm.SetAutoCommit(ws, false)
+	_, _ = wm.SetAutoCommit(ws, false)
 
 	// 第一条写入成功
 	ctx1, c1 := context.WithTimeout(context.Background(), QueryTimeout)
@@ -389,7 +389,7 @@ func TestRequestCancelDoesNotKillManualTx(t *testing.T) {
 
 	// 无论第二条是否失败，提交应至少保留已成功且未回滚的写入
 	// 若 tx 绑了请求 ctx，此处会报 already rolled back
-	if err := wm.CommitWorkspace(ws); err != nil {
+	if _, err := wm.CommitWorkspace(ws); err != nil {
 		// 若第二条把状态打成 failed 且驱动已中止，仍可能提交失败；再查库
 		// 核心断言：不能是「事务在第一条请求结束时就被 cancel 掉」
 		t.Logf("commit err: %v", err)
@@ -398,7 +398,7 @@ func TestRequestCancelDoesNotKillManualTx(t *testing.T) {
 	// 更硬的断言：用独立事务路径再跑一遍「仅第一条 + 直接 commit」
 	// （上面 dead ctx 路径可能因 Exec 失败置 TxFailed；单独保证主路径）
 	ws2 := wm.CreateWorkspace("res-3b", "carol", adapter, false)
-	_ = wm.SetAutoCommit(ws2, false)
+	_, _ = wm.SetAutoCommit(ws2, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	if _, err := wm.ExecuteInWorkspace(ctx, ws2, `INSERT INTO items (id, name) VALUES (30, 'x')`, 0, 0); err != nil {
 		cancel()
@@ -407,7 +407,7 @@ func TestRequestCancelDoesNotKillManualTx(t *testing.T) {
 	cancel()
 	// 短暂等待，确保若错误地绑了已 cancel 的 ctx，awaitDone 有时间 rollback
 	time.Sleep(50 * time.Millisecond)
-	if err := wm.CommitWorkspace(ws2); err != nil {
+	if _, err := wm.CommitWorkspace(ws2); err != nil {
 		t.Fatalf("请求 cancel 后提交应成功: %v", err)
 	}
 	var n int

@@ -13,8 +13,10 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -77,15 +79,13 @@ func prepareExportSQL(sqlText string) error {
 	return nil
 }
 
-// ExportCSV 流式导出查询结果为 CSV。
-// 先成功 Begin/Query/Columns，再写响应头，避免失败时返回空 200 下载。
-// 一旦写出响应体，后续错误包装为 ErrExportBodyStarted，禁止 handler 再写 JSON。
+// ExportCSV 先写入临时文件，确认未超限后再发送响应。
+// 超限时返回 ErrExportLimit 且不写 HTTP 体，避免 200 + 截断文件被当成成功下载。
 func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
 	if err := prepareExportSQL(sqlText); err != nil {
 		return err
 	}
 
-	// 在只读事务中执行全量查询（成功前不写 HTTP 体）
 	tx, err := adapter.Begin(ctx, true)
 	if err != nil {
 		return fmt.Errorf("开启只读事务失败: %w", err)
@@ -104,25 +104,24 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	}
 	typeNames := columnTypeNames(rows, len(cols))
 
-	// 查询就绪后再提交下载头
-	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.csv", time.Now().Format("20060102-150405")))
-
-	bodyStarted := false
-	// BOM for Excel UTF-8
-	n, err := w.Write([]byte{0xEF, 0xBB, 0xBF})
+	tmp, err := os.CreateTemp("", "mc-export-*.csv")
 	if err != nil {
+		return fmt.Errorf("创建导出临时文件失败: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		tmp.Close()
+		os.Remove(tmpPath)
+	}()
+
+	// BOM for Excel UTF-8
+	if _, err := tmp.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
 		return err
 	}
-	bodyStarted = true
-	approxBytes := n
-
-	cw := csv.NewWriter(w)
-	// 不 defer Flush：body 已开始后 Flush 失败也不得让 handler 写 JSON；成功路径末尾显式 Flush
-
-	// 写表头
+	approxBytes := 3
+	cw := csv.NewWriter(tmp)
 	if err := cw.Write(cols); err != nil {
-		return wrapIfBodyStarted(bodyStarted, err)
+		return err
 	}
 	for _, c := range cols {
 		approxBytes += len(c) + 1
@@ -131,10 +130,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 	rowCount := 0
 	for rows.Next() {
 		if rowCount >= ExportMaxRows {
-			cw.Flush()
-			msg := "\n... 已达到最大导出行数限制 (" + strconv.Itoa(ExportMaxRows) + " 行)\n"
-			_, _ = w.Write([]byte(msg))
-			return &ErrExportLimit{Reason: "已达到最大导出行数限制"}
+			return &ErrExportLimit{Reason: fmt.Sprintf("已达到最大导出行数限制 (%d 行)", ExportMaxRows)}
 		}
 		values := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -142,8 +138,7 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			_ = cw.Error()
-			return wrapIfBodyStarted(bodyStarted, err)
+			return err
 		}
 		record := make([]string, len(cols))
 		rowBytes := 0
@@ -152,23 +147,33 @@ func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w
 			rowBytes += len(record[i]) + 1
 		}
 		if approxBytes+rowBytes > ExportMaxBytes {
-			cw.Flush()
-			msg := fmt.Sprintf("\n... 已达到最大导出体积限制 (%d MB)\n", ExportMaxBytes>>20)
-			_, _ = w.Write([]byte(msg))
-			return &ErrExportLimit{Reason: "已达到最大导出体积限制"}
+			return &ErrExportLimit{Reason: fmt.Sprintf("已达到最大导出体积限制 (%d MB)", ExportMaxBytes>>20)}
 		}
 		if err := cw.Write(record); err != nil {
-			return wrapIfBodyStarted(bodyStarted, err)
+			return err
 		}
 		approxBytes += rowBytes
 		rowCount++
 	}
 	if err := rows.Err(); err != nil {
-		return wrapIfBodyStarted(bodyStarted, err)
+		return err
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
-		return wrapIfBodyStarted(bodyStarted, err)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	// 完整文件就绪后再写响应头与体
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export-%s.csv", time.Now().Format("20060102-150405")))
+	if _, err := io.Copy(w, tmp); err != nil {
+		return &ErrExportBodyStarted{Err: err}
 	}
 	return nil
 }

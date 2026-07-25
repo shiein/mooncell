@@ -384,8 +384,8 @@ func (a *dmAdapter) NormalizeError(err error) DatabaseError {
 
 func (a *dmAdapter) Capabilities() Capabilities {
 	return Capabilities{
-		// 视图 DDL 与完整索引/外键导出仍不完整；表级基础 DDL+PK 可用
-		DDLSupported:        true,
+		// 外键目标/索引/检查/注释未完整导出，不得宣称 DDL 可重建表
+		DDLSupported:        false,
 		ImportSupported:     true,
 		ReadOnlyTxSupported: true,
 		StoredProcSupported: true,

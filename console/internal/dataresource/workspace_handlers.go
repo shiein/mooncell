@@ -104,13 +104,14 @@ func (s *Service) PatchAutoCommit(w http.ResponseWriter, r *http.Request) {
 		writeJSONBodyError(w, err)
 		return
 	}
-	if err := s.workspaces.SetAutoCommit(ws, body.AutoCommit); err != nil {
+	snap, err := s.workspaces.SetAutoCommit(ws, body.AutoCommit)
+	if err != nil {
 		writeErr(w, http.StatusConflict, "TX_ACTIVE", err.Error())
 		return
 	}
 	writeOK(w, map[string]any{
-		"autoCommit": ws.AutoCommit,
-		"txState":    string(ws.TxState),
+		"autoCommit": snap.AutoCommit,
+		"txState":    string(snap.TxState),
 	})
 }
 
@@ -214,7 +215,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 	}
 	// 读写用户：单表 SELECT 且有主键时附带 editable 元数据，供结果区就地改删
 	if canWriteAccess(mode) && result != nil && stmtType.IsReadOnly() {
-		s.attachEditableMeta(r.Context(), ws, body.SQL, result)
+		s.attachEditableMeta(r.Context(), ws, body.SQL, result, ws.snapshotState().AutoCommit)
 	}
 	// 审计：写操作（DML/DDL）记录类型、哈希、行数、耗时；不记录普通 SELECT 全文。
 	if stmtType.IsWrite() || stmtType.IsDDLorDCL() || stmtType == StmtTruncate || stmtType == StmtCall {
@@ -228,10 +229,10 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 }
 
 // attachEditableMeta 为 SELECT * 单表结果附加就地编辑元数据。
-// 要求：写权限调用方已过滤；autoCommit=true；表有主键且主键列均出现在结果中。
-func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText string, result *ExecutionResult) {
+// autoCommit 须由调用方在锁内快照传入，禁止解锁后直接读 ws.AutoCommit。
+func (s *Service) attachEditableMeta(ctx context.Context, ws *Workspace, sqlText string, result *ExecutionResult, autoCommit bool) {
 	// 手工事务模式下禁用就地编辑，避免绕过自动提交开关与提交/回滚按钮
-	if !ws.AutoCommit {
+	if !autoCommit {
 		result.Editable = &EditableInfo{Reason: "已关闭自动提交，请使用 SQL 编辑或先开启自动提交后再就地编辑"}
 		return
 	}
@@ -356,14 +357,15 @@ func (s *Service) CommitWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	user, _, _ := userFromCtx(r)
-	if err := s.workspaces.CommitWorkspace(ws); err != nil {
-		writeErr(w, http.StatusConflict, "COMMIT_FAILED", err.Error())
+	snap, err := s.workspaces.CommitWorkspace(ws)
+	if err != nil {
+		writeErrTx(w, http.StatusConflict, "COMMIT_FAILED", err.Error(), string(snap.TxState))
 		return
 	}
 	s.auditLog(user, "提交事务", ws.ResourceID, "成功")
 	writeOK(w, map[string]any{
-		"txState":    string(ws.TxState),
-		"autoCommit": ws.AutoCommit,
+		"txState":    string(snap.TxState),
+		"autoCommit": snap.AutoCommit,
 	})
 }
 
@@ -375,14 +377,15 @@ func (s *Service) RollbackWorkspaceHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	user, _, _ := userFromCtx(r)
-	if err := s.workspaces.RollbackWorkspace(ws); err != nil {
-		writeErr(w, http.StatusInternalServerError, "ROLLBACK_FAILED", err.Error())
+	snap, err := s.workspaces.RollbackWorkspace(ws)
+	if err != nil {
+		writeErrTx(w, http.StatusInternalServerError, "ROLLBACK_FAILED", err.Error(), string(snap.TxState))
 		return
 	}
 	s.auditLog(user, "回滚事务", ws.ResourceID, "成功")
 	writeOK(w, map[string]any{
-		"txState":    string(ws.TxState),
-		"autoCommit": ws.AutoCommit,
+		"txState":    string(snap.TxState),
+		"autoCommit": snap.AutoCommit,
 	})
 }
 
@@ -436,10 +439,11 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 	switch body.Format {
 	case "csv":
 		if err := ExportCSV(ectx, adapter, sqlText, w); err != nil {
-			if _, ok := err.(*ErrExportLimit); ok {
+			if lim, ok := err.(*ErrExportLimit); ok {
+				// 临时文件路径：超限时尚未写响应体，可返回明确错误
+				writeErr(w, http.StatusRequestEntityTooLarge, "EXPORT_LIMIT", lim.Reason)
 				return
 			}
-			// 响应体已开始：禁止 writeErr JSON；ErrAbortHandler 静默中止连接
 			var bodyStarted *ErrExportBodyStarted
 			if errors.As(err, &bodyStarted) {
 				panic(http.ErrAbortHandler)

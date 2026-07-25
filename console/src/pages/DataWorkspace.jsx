@@ -584,7 +584,14 @@ function DataWorkspacePage({ resource, onBack }) {
         if (ci >= 0) keys[pk] = orig[ri][ci];
       });
       if (deletedRows.has(ri)) {
-        deletes.push({ keys });
+        // 乐观删除：附带查询时整行非主键值，避免静默删掉他人已改的新版本
+        const old = {};
+        cols.forEach((col, ci) => {
+          if (pkSet.has(String(col).toLowerCase())) return;
+          if (cellIsBinary(orig[ri][ci])) return;
+          old[col] = orig[ri][ci] == null ? null : orig[ri][ci];
+        });
+        deletes.push({ keys, old });
         continue;
       }
       if (!editingRows.has(ri)) continue;

@@ -27,6 +27,8 @@ type RowUpdateOp struct {
 // RowDeleteOp 以主键删除一行。
 type RowDeleteOp struct {
 	Keys map[string]any `json:"keys"`
+	// Old 为查询时该行非主键列的原值，用于乐观条件，避免静默删除他人已改的新版本。
+	Old map[string]any `json:"old,omitempty"`
 }
 
 // RowEditResult 批量编辑结果。
@@ -181,6 +183,28 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 		whereSQL, whereArgs, err := buildPKWhere(adapter, serverPKs, del.Keys, &ph)
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 条删除: %w", i+1, err)
+		}
+		// 乐观条件：非主键列原值（与 UPDATE 一致）
+		for col, val := range del.Old {
+			col = strings.TrimSpace(col)
+			if col == "" || pkSet[col] || pkSet[strings.ToLower(col)] {
+				continue
+			}
+			if !colSet[col] && !colSet[strings.ToLower(col)] {
+				return nil, fmt.Errorf("第 %d 条删除: 未知列 %s", i+1, col)
+			}
+			nv, err := normalizeEditValue(val)
+			if err != nil {
+				return nil, fmt.Errorf("第 %d 条删除列 %s: %w", i+1, col, err)
+			}
+			real := resolveColumnName(structure, col)
+			if nv == nil {
+				whereSQL += " AND " + adapter.QuoteIdentifier(real) + " IS NULL"
+			} else {
+				ph++
+				whereSQL += " AND " + adapter.QuoteIdentifier(real) + " = " + adapter.Placeholder(ph)
+				whereArgs = append(whereArgs, nv)
+			}
 		}
 		sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s", qual, whereSQL)
 		res, err := tx.Exec(ctx, sqlText, whereArgs...)
