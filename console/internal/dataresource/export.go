@@ -92,7 +92,8 @@ func ExportSnapshotCSV(columns []string, rows [][]any, w http.ResponseWriter) er
 		record := make([]string, len(columns))
 		for i := range columns {
 			if i < len(row) {
-				record[i] = snapshotCellString(row[i])
+				// 与全量导出一致：防 Excel 公式注入
+				record[i] = csvFormulaSafe(snapshotCellString(row[i]))
 			}
 		}
 		if err := cw.Write(record); err != nil {
@@ -102,12 +103,18 @@ func ExportSnapshotCSV(columns []string, rows [][]any, w http.ResponseWriter) er
 	return nil
 }
 
+// ExportSnapshotMaxCols 快照导出列数上限（与行数 MaxLimit 分离）。
+const ExportSnapshotMaxCols = 512
+
 func validateSnapshot(columns []string, rows [][]any) error {
 	if len(columns) == 0 {
 		return fmt.Errorf("当前结果没有可导出的列")
 	}
-	if len(columns) > MaxLimit || len(rows) > ExportSnapshotMaxRows {
-		return fmt.Errorf("当前结果快照超过导出上限")
+	if len(columns) > ExportSnapshotMaxCols {
+		return fmt.Errorf("当前结果列数超过导出上限 (%d)", ExportSnapshotMaxCols)
+	}
+	if len(rows) > ExportSnapshotMaxRows {
+		return fmt.Errorf("当前结果行数超过导出上限 (%d)", ExportSnapshotMaxRows)
 	}
 	return nil
 }

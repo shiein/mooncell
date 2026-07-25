@@ -36,6 +36,9 @@ type RowEditResult struct {
 	DurationMs int64 `json:"durationMs"`
 }
 
+// RowEditMaxOps 单次就地编辑 updates+deletes 条数上限。
+const RowEditMaxOps = MaxLimit
+
 // ApplyRowEdits 在适配器上执行批量 UPDATE/DELETE（独立事务，自动提交）。
 // primaryKeys 必须由服务端从 Describe 重新读取，不得信任客户端。
 func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table string, primaryKeys []string, req RowEditRequest) (*RowEditResult, error) {
@@ -47,6 +50,9 @@ func ApplyRowEdits(ctx context.Context, adapter DataSourceAdapter, schema, table
 	}
 	if len(req.Updates) == 0 && len(req.Deletes) == 0 {
 		return nil, fmt.Errorf("没有需要保存的变更")
+	}
+	if len(req.Updates)+len(req.Deletes) > RowEditMaxOps {
+		return nil, fmt.Errorf("单次编辑条数超过上限 (%d)", RowEditMaxOps)
 	}
 
 	// 校验表存在并取得列白名单

@@ -59,7 +59,7 @@ func (s *Service) CreateSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 		Name    string `json:"name"`
 		SQLText string `json:"sqlText"`
 	}
-	if err := jsonDecodeBody(r, &body); err != nil {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
@@ -107,7 +107,7 @@ func (s *Service) UpdateSavedSQLHandler(w http.ResponseWriter, r *http.Request) 
 		Name    string `json:"name"`
 		SQLText string `json:"sqlText"`
 	}
-	if err := jsonDecodeBody(r, &body); err != nil {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}

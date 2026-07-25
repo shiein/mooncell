@@ -56,6 +56,35 @@ func TestExportSnapshotCSVUsesProvidedRows(t *testing.T) {
 	}
 }
 
+func TestExportSnapshotCSVFormulaSafe(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	err := ExportSnapshotCSV(
+		[]string{"v"},
+		[][]any{{"=1+2"}},
+		recorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(bytes.TrimPrefix(recorder.Body.Bytes(), []byte{0xEF, 0xBB, 0xBF}))
+	if !strings.Contains(body, "'=1+2") {
+		t.Fatalf("快照导出应对公式注入加前缀: %q", body)
+	}
+}
+
+func TestValidateSnapshotLimits(t *testing.T) {
+	cols := make([]string, ExportSnapshotMaxCols+1)
+	for i := range cols {
+		cols[i] = fmt.Sprintf("c%d", i)
+	}
+	if err := validateSnapshot(cols, nil); err == nil {
+		t.Fatal("列数超限应失败")
+	}
+	if err := validateSnapshot([]string{"a"}, make([][]any, ExportSnapshotMaxRows+1)); err == nil {
+		t.Fatal("行数超限应失败")
+	}
+}
+
 func TestImportCellValueEmptyToNull(t *testing.T) {
 	if v := importCellValue("", true); v != nil {
 		t.Fatalf("可空列空串应绑定 NULL, got %#v", v)

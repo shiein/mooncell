@@ -134,7 +134,7 @@ func (s *Service) MetadataSQLTemplate(w http.ResponseWriter, r *http.Request) {
 		NodeID    string `json:"nodeId"`
 		Operation string `json:"operation"` // SELECT/INSERT/UPDATE/DELETE
 	}
-	if err := jsonDecodeBody(r, &body); err != nil {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
@@ -156,7 +156,13 @@ func (s *Service) MetadataSQLTemplate(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]string{"sql": tpl})
 }
 
-// jsonDecodeBody 解码 JSON 请求体。
-func jsonDecodeBody(r *http.Request, v any) error {
-	return json.NewDecoder(r.Body).Decode(v)
+// jsonBodyMaxBytes JSON 请求体上限（含导出快照 rows、行编辑数组等）。
+// 与 consoleapp 上传路径一致：传输层截断，避免无界内存占用。
+const jsonBodyMaxBytes = 16 << 20 // 16MB
+
+// jsonDecodeBody 解码 JSON 请求体（套 MaxBytesReader）。
+func jsonDecodeBody(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyMaxBytes)
+	dec := json.NewDecoder(r.Body)
+	return dec.Decode(v)
 }

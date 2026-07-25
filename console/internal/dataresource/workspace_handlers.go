@@ -89,7 +89,7 @@ func (s *Service) PatchAutoCommit(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AutoCommit bool `json:"autoCommit"`
 	}
-	if err := jsonDecodeBody(r, &body); err != nil {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
@@ -117,7 +117,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		Offset    int    `json:"offset,omitempty"` // 隐式分页偏移，不改写 SQL
 		Confirmed bool   `json:"confirmed,omitempty"` // 危险 SQL 二次确认
 	}
-	if err := jsonDecodeBody(r, &body); err != nil {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
@@ -238,7 +238,7 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	user, _, _ := userFromCtx(r)
 	var body RowEditRequest
-	if err := jsonDecodeBody(r, &body); err != nil {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
@@ -352,7 +352,7 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		Columns []string `json:"columns"` // current 快照
 		Rows    [][]any  `json:"rows"`    // current 快照，最多 MaxLimit 行
 	}
-	if err := jsonDecodeBody(r, &body); err != nil {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 		return
 	}
