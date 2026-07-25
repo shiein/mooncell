@@ -181,37 +181,72 @@ func ListDataResources(db *sql.DB) ([]DataResource, error) {
 	return out, rows.Err()
 }
 
+// connectionFieldsChanged 连接相关字段是否变化（密码单独由 credentialCipher 非空表示）。
+// name/defaultSchema 变更不触发撤权。
+func connectionFieldsChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
+	if credentialCipher != "" {
+		return true
+	}
+	return prev.DBType != input.DBType ||
+		prev.Host != input.Host ||
+		prev.Port != input.Port ||
+		prev.DatabaseName != input.DatabaseName ||
+		prev.Username != input.Username ||
+		prev.SSLMode != input.SSLMode
+}
+
 // UpdateDataResource 更新资源。credentialCipher 为空表示保留原密码。
-// 配置变更后清空连接测试状态，并撤销该资源上所有 read 授权（须重新测试后才能再授只读）。
-func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, credentialCipher string) error {
+// 仅当连接相关字段变化时清空 last_test_status 并撤销 read 授权；纯改名/改默认 schema 不动授权。
+func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, credentialCipher string, prev DataResource) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
+	connChanged := connectionFieldsChanged(prev, input, credentialCipher)
 	if credentialCipher != "" {
-		_, err = tx.Exec(`UPDATE data_resources SET
-			name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
-			credential_cipher=?, ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
-			WHERE id=?`,
-			input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
-			input.Username, credentialCipher, input.SSLMode, now, id)
+		if connChanged {
+			_, err = tx.Exec(`UPDATE data_resources SET
+				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
+				credential_cipher=?, ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
+				WHERE id=?`,
+				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
+				input.Username, credentialCipher, input.SSLMode, now, id)
+		} else {
+			_, err = tx.Exec(`UPDATE data_resources SET
+				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
+				credential_cipher=?, ssl_mode=?, updated_at=?
+				WHERE id=?`,
+				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
+				input.Username, credentialCipher, input.SSLMode, now, id)
+		}
 	} else {
-		_, err = tx.Exec(`UPDATE data_resources SET
-			name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
-			ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
-			WHERE id=?`,
-			input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
-			input.Username, input.SSLMode, now, id)
+		if connChanged {
+			_, err = tx.Exec(`UPDATE data_resources SET
+				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
+				ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
+				WHERE id=?`,
+				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
+				input.Username, input.SSLMode, now, id)
+		} else {
+			_, err = tx.Exec(`UPDATE data_resources SET
+				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
+				ssl_mode=?, updated_at=?
+				WHERE id=?`,
+				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
+				input.Username, input.SSLMode, now, id)
+		}
 	}
 	if err != nil {
 		return err
 	}
-	// 配置可能已切到未认证的驱动/目标库：旧 read 授权不得沿用
-	if _, err := tx.Exec(`DELETE FROM data_resource_grants WHERE resource_id = ? AND access_mode = ?`,
-		id, AccessRead); err != nil {
-		return err
+	// 仅连接目标/凭据变化时：旧 read 授权不得沿用
+	if connChanged {
+		if _, err := tx.Exec(`DELETE FROM data_resource_grants WHERE resource_id = ? AND access_mode = ?`,
+			id, AccessRead); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

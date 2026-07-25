@@ -203,7 +203,7 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	_, found, err := GetDataResource(s.db, id)
+	prev, found, err := GetDataResource(s.db, id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源失败")
 		return
@@ -237,7 +237,8 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := UpdateDataResource(s.db, id, input, cipher); err != nil {
+	connChanged := connectionFieldsChanged(prev, input, cipher)
+	if err := UpdateDataResource(s.db, id, input, cipher, prev); err != nil {
 		if isUniqueConstraint(err) {
 			writeErr(w, http.StatusConflict, "NAME_DUPLICATE", "资源名称已存在")
 			return
@@ -245,19 +246,22 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新资源失败")
 		return
 	}
-	// 配置变更后关闭旧连接池并失效工作台，下次 GetDB 按新 DSN/凭据懒加载
-	s.workspaces.InvalidateResource(id)
-	s.pools.CloseDB(id)
-	res, _, _ := GetDataResource(s.db, id)
-	// UpdateDataResource 会清空 last_test_status；保存后用当前凭据重测并写回，便于立即授权 read
-	password := input.Password
-	if password == "" {
-		if p, err := s.credKey.Decrypt(res.CredentialCipher); err == nil {
-			password = p
-		}
+	// 连接目标/凭据变化：关闭旧池、失效工作台、重测并写回 last_test_status
+	if connChanged {
+		s.workspaces.InvalidateResource(id)
+		s.pools.CloseDB(id)
 	}
-	if password != "" {
-		res = s.persistConnectionTest(res, password)
+	res, _, _ := GetDataResource(s.db, id)
+	if connChanged {
+		password := input.Password
+		if password == "" {
+			if p, err := s.credKey.Decrypt(res.CredentialCipher); err == nil {
+				password = p
+			}
+		}
+		if password != "" {
+			res = s.persistConnectionTest(res, password)
+		}
 	}
 	s.auditLog(user, "更新数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
