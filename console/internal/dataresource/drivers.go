@@ -59,7 +59,8 @@ func DriverCatalog() []DriverMeta {
 		{ID: DriverPostgreSQL, Label: "PostgreSQL", DefaultPort: DefaultPort(DriverPostgreSQL), HasCatalog: true},
 		{ID: DriverMySQL, Label: "MySQL", DefaultPort: DefaultPort(DriverMySQL), HasCatalog: true},
 		{ID: DriverDM, Label: "达梦 DM8", DefaultPort: DefaultPort(DriverDM), HasCatalog: false},
-		{ID: DriverKingbase, Label: "KingbaseES", DefaultPort: DefaultPort(DriverKingbase), HasCatalog: true},
+		// Kingbase 走 pg 适配器兼容路径，尚未完成独立真机认证
+		{ID: DriverKingbase, Label: "KingbaseES", DefaultPort: DefaultPort(DriverKingbase), HasCatalog: true, Experimental: true},
 	}
 	out := make([]DriverMeta, 0, len(all))
 	for _, m := range all {

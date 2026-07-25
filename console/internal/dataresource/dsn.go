@@ -35,6 +35,10 @@ func pgQuote(s string) string {
 
 // pgDSN 构建 PostgreSQL/Kingbase/Vastbase 的 key=value DSN。
 // 用户名、密码、host、dbname 均做 libpq 引号转义，避免特殊字符破坏字段边界。
+//
+// sslMode=require 的语义（与 MySQL 路径不同，属驱动差异，勿假定完全一致）：
+//   - libpq require：加密连接，但不校验证书（可被 MITM）
+//   - MySQL TLSConfig="true"：加密且校验系统根证书
 func pgDSN(r DataResource, password string) string {
 	sslmode := r.SSLMode
 	if sslmode == "" {
@@ -45,6 +49,7 @@ func pgDSN(r DataResource, password string) string {
 }
 
 // mysqlDSN 构建 MySQL 的 DSN：使用驱动 Config.FormatDSN 正确转义用户名/密码。
+// sslMode=require 使用驱动 TLSConfig="true"（校验系统根证书），强度高于 libpq require。
 func mysqlDSN(r DataResource, password string) string {
 	cfg := mysql.NewConfig()
 	cfg.User = r.Username

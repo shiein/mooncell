@@ -11,7 +11,6 @@
 package dataresource
 
 import (
-	"context"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
@@ -23,9 +22,10 @@ import (
 
 // 执行常量。
 const (
-	DefaultLimit   = 100   // SELECT 默认每页行数（隐式，不写入编辑器 SQL）
-	MaxLimit       = 10000 // SELECT 单次最大行数（展开全部上限）
-	ExpandAllMax   = 10000 // 前端「展开全部」允许的最大总数
+	DefaultLimit = 100   // SELECT 默认每页行数（隐式，不写入编辑器 SQL）
+	MaxLimit     = 10000 // SELECT 单次最大行数（展开全部上限）
+	// ExpandAllMax 与 MaxLimit 同值；前端注释对齐用。
+	ExpandAllMax = MaxLimit
 )
 
 // ExecutionResult 是 SQL 执行的返回结构。
@@ -46,155 +46,6 @@ type ExecutionResult struct {
 	TxState       string          `json:"txState"` // none/active/failed
 	// Editable 非空表示该 SELECT 结果支持就地编辑（单表 + 有主键）；只读用户由 handler 省略。
 	Editable *EditableInfo `json:"editable,omitempty"`
-}
-
-// ExecuteOptions 控制执行行为。
-type ExecuteOptions struct {
-	Limit      int  // 返回行数上限
-	Offset     int  // 分页偏移
-	ReadOnly   bool // 是否强制只读事务
-	AutoCommit bool // 是否自动提交（true 时每条 SQL 独立事务）
-}
-
-// ExecuteSQL 在给定适配器上执行单条 SQL。
-// Phase 3 只实现自动提交模式（无手工事务）；Phase 4 增加事务支持。
-func ExecuteSQL(ctx context.Context, adapter DataSourceAdapter, sqlText string, opts ExecuteOptions) (*ExecutionResult, error) {
-	start := time.Now()
-
-	// 校验单语句
-	if err := ValidateSingleStatement(sqlText); err != nil {
-		return nil, err
-	}
-
-	// 分类语句
-	stmtType := ClassifySQL(sqlText)
-
-	// 拒绝显式事务控制
-	if stmtType.IsTransactionControl() {
-		return nil, fmt.Errorf("显式事务控制语句不允许，请使用工作台按钮")
-	}
-
-	// 只读模式检查
-	if opts.ReadOnly {
-		if !stmtType.IsReadOnly() {
-			return nil, &APIError{Message: "只读模式下不允许写操作", Code: "DATA_RESOURCE_READ_ONLY", TxState: "none"}
-		}
-	}
-
-	// DDL/DCL/TRUNCATE/CALL 只允许自动提交模式
-	if stmtType.IsAutoCommitOnly() && !opts.AutoCommit {
-		return nil, fmt.Errorf("DDL/DCL/TRUNCATE/过程调用只允许自动提交模式")
-	}
-
-	result := &ExecutionResult{
-		ExecutionID:   newID(),
-		StatementType: stmtType,
-		TxState:       "none",
-	}
-
-	if stmtType.IsReadOnly() {
-		// SELECT：在只读事务中执行查询和计数
-		if opts.Limit <= 0 {
-			opts.Limit = DefaultLimit
-		}
-		if opts.Limit > MaxLimit {
-			opts.Limit = MaxLimit
-		}
-		err := executeQuery(ctx, adapter, sqlText, opts, result)
-		result.DurationMs = time.Since(start).Milliseconds()
-		if err != nil {
-			return result, err
-		}
-	} else {
-		// 写操作：自动提交模式执行
-		err := executeWrite(ctx, adapter, sqlText, result)
-		result.DurationMs = time.Since(start).Milliseconds()
-		if err != nil {
-			return result, err
-		}
-	}
-
-	return result, nil
-}
-
-// executeQuery 执行 SELECT 查询，包含分页和计数。
-func executeQuery(ctx context.Context, adapter DataSourceAdapter, sqlText string, opts ExecuteOptions, result *ExecutionResult) error {
-	// 在只读事务中执行
-	tx, err := adapter.Begin(ctx, true)
-	if err != nil {
-		return fmt.Errorf("开启只读事务失败: %w", err)
-	}
-	defer tx.Rollback()
-
-	// 分页查询
-	if opts.Offset < 0 {
-		opts.Offset = 0
-	}
-	result.Limit = opts.Limit
-	result.Offset = opts.Offset
-	pageSQL, err := adapter.PageSQL(sqlText, opts.Limit, opts.Offset)
-	if err != nil {
-		return err
-	}
-	rows, err := tx.Query(ctx, pageSQL)
-	if err != nil {
-		return adapter.NormalizeError(err).toError()
-	}
-	defer rows.Close()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return err
-	}
-	result.Columns = cols
-
-	for rows.Next() {
-		values, err := scanRow(rows, cols)
-		if err != nil {
-			return err
-		}
-		result.Rows = append(result.Rows, values)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	result.ReturnedRows = len(result.Rows)
-	result.HasMore = result.ReturnedRows == opts.Limit
-
-	// 计数（在同一只读事务中）
-	countSQL, err := adapter.CountSQL(sqlText)
-	if err == nil {
-		var total int
-		if err := tx.QueryRow(ctx, countSQL).Scan(&total); err == nil {
-			result.Total = total
-			result.TotalStatus = "available"
-		} else {
-			result.TotalStatus = "unavailable"
-		}
-	} else {
-		result.TotalStatus = "unavailable"
-	}
-
-	return nil
-}
-
-// executeWrite 执行写操作（自动提交）。
-func executeWrite(ctx context.Context, adapter DataSourceAdapter, sqlText string, result *ExecutionResult) error {
-	tx, err := adapter.Begin(ctx, false)
-	if err != nil {
-		return fmt.Errorf("开启事务失败: %w", err)
-	}
-	res, err := tx.Exec(ctx, sqlText)
-	if err != nil {
-		tx.Rollback()
-		return adapter.NormalizeError(err).toError()
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交失败: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	result.AffectedRows = n
-	return nil
 }
 
 // columnTypeNames 从 *sql.Rows 取 DatabaseTypeName 列表（失败则返回等长空串）。
