@@ -412,7 +412,13 @@ function DataWorkspacePage({ resource, onBack }) {
       }
       return true;
     } catch (e) {
+      // 同步服务端事务状态（取消后可能已是 failed，不得仍显示 active）
+      const serverTx = e.body?.txState || e.txState;
+      if (serverTx) setTxState(serverTx);
+
       if (e.name === 'AbortError') {
+        // 卸载/导航时 abort：无 body，关自动提交时保守标 failed 以免误点提交
+        if (!autoCommit) setTxState((prev) => (prev === 'active' ? 'failed' : prev));
         setMsg('执行已取消');
         return false;
       }
@@ -433,7 +439,10 @@ function DataWorkspacePage({ resource, onBack }) {
       const friendly = friendlyWorkspaceError(e);
       setResult(null);
       setMsg(friendly);
-      if (!silentToast) toast(friendly, { tone: 'error' });
+      // 取消/超时不弹 error toast（信息已在状态栏）
+      if (!silentToast && e.code !== 'QUERY_CANCELED') {
+        toast(friendly, { tone: 'error' });
+      }
       return false;
     } finally {
       if (runControllerRef.current === controller) {
@@ -1069,9 +1078,9 @@ function DataWorkspacePage({ resource, onBack }) {
             <Btn size="sm" variant="primary" icon="play" disabled={busy || !wsId} onClick={() => runSQL(false, '', { resetPage: true })}>执行</Btn>
             <Btn size="sm" variant="ghost" icon="stop" disabled={!busy}
               onClick={() => {
-                // 先通知服务端取消语句（不持 ws.mu），再 abort 客户端请求
+                // 只调服务端 cancel，等 execute 返回 QUERY_CANCELED + txState；
+                // 不立刻 abort，避免丢掉错误体里的真实事务状态。
                 if (wsId) cancelWorkspaceSQL(resource.id, wsId).catch(() => {});
-                runControllerRef.current?.abort();
               }}>取消</Btn>
             <Btn size="sm" variant="ghost" disabled={busy} onClick={toggleAC}>自动提交: {autoCommit ? '开' : '关'}</Btn>
             <Btn size="sm" variant="ghost" disabled={autoCommit || txState !== 'active'} onClick={doCommit}>提交</Btn>

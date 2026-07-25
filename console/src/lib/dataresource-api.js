@@ -8,6 +8,7 @@ async function jsonFetch(url, opts = {}) {
     err.code = d.code;
     err.status = r.status;
     err.body = d;
+    err.txState = d.txState; // 工作台执行失败/取消时带真实事务态
     throw err;
   }
   return d;

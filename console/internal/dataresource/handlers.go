@@ -36,9 +36,17 @@ type APIError struct {
 func (e *APIError) Error() string { return e.Message }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	writeErrTx(w, status, code, msg, "none")
+}
+
+// writeErrTx 写出错误并附带工作台事务状态（取消/执行失败时前端需同步，不得固定 none）。
+func writeErrTx(w http.ResponseWriter, status int, code, msg, txState string) {
+	if txState == "" {
+		txState = "none"
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(APIError{Message: msg, Code: code, TxState: "none"})
+	json.NewEncoder(w).Encode(APIError{Message: msg, Code: code, TxState: txState})
 }
 
 func writeOK(w http.ResponseWriter, v any) {

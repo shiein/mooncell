@@ -157,21 +157,29 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 
 	result, err := s.workspaces.ExecuteInWorkspace(r.Context(), ws, body.SQL, body.Limit, body.Offset)
 	if err != nil {
+		// 执行失败时 result 仍可能带有正确的 TxState（如取消后 failed），必须回传前端
+		txState := "none"
+		if result != nil && result.TxState != "" {
+			txState = result.TxState
+		}
 		if apiErr, isAPIErr := err.(*APIError); isAPIErr {
+			if apiErr.TxState != "" {
+				txState = apiErr.TxState
+			}
 			if apiErr.Code == "DATA_RESOURCE_READ_ONLY" {
 				s.auditSQL(user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
-				writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
+				writeErrTx(w, http.StatusForbidden, apiErr.Code, apiErr.Message, txState)
 				return
 			}
 			if apiErr.Code == "IMPORT_ACTIVE" {
-				writeErr(w, http.StatusConflict, apiErr.Code, apiErr.Message)
+				writeErrTx(w, http.StatusConflict, apiErr.Code, apiErr.Message, txState)
 				return
 			}
 			if apiErr.Code == "WORKSPACE_CLOSED" {
-				writeErr(w, http.StatusGone, apiErr.Code, apiErr.Message)
+				writeErrTx(w, http.StatusGone, apiErr.Code, apiErr.Message, txState)
 				return
 			}
-			writeErr(w, http.StatusForbidden, apiErr.Code, apiErr.Message)
+			writeErrTx(w, http.StatusForbidden, apiErr.Code, apiErr.Message, txState)
 			return
 		}
 		var de DatabaseError
@@ -182,13 +190,14 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 			case "DATA_RESOURCE_READ_ONLY":
 				status = http.StatusForbidden
 			case "QUERY_CANCELED":
-				status = http.StatusRequestTimeout
+				// 用 400 而非 408：部分代理对 408 行为怪异；语义靠 code
+				status = http.StatusBadRequest
 			}
-			writeErr(w, status, de.Code, de.Message)
+			writeErrTx(w, status, de.Code, de.Message, txState)
 			return
 		}
 		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败", 0)
-		writeErr(w, http.StatusBadRequest, "EXEC_ERROR", err.Error())
+		writeErrTx(w, http.StatusBadRequest, "EXEC_ERROR", err.Error(), txState)
 		return
 	}
 	// 读写用户：单表 SELECT 且有主键时附带 editable 元数据，供结果区就地改删
