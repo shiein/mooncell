@@ -403,7 +403,11 @@ func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Reques
 	var body struct {
 		Sheet string `json:"sheet"`
 	}
-	if err := jsonDecodeBody(w, r, &body); err != nil || strings.TrimSpace(body.Sheet) == "" {
+	if err := jsonDecodeBody(w, r, &body); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	if strings.TrimSpace(body.Sheet) == "" {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "工作表不能为空")
 		return
 	}
@@ -506,7 +510,7 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		ColumnMapping []string `json:"columnMapping"` // 目标列名，顺序与文件列对应；空字符串表示跳过
 	}
 	if err := jsonDecodeBody(w, r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		writeJSONBodyError(w, err)
 		return
 	}
 	if strings.TrimSpace(body.TableName) == "" {

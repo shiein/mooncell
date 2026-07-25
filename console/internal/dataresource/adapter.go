@@ -79,28 +79,25 @@ func (n MetadataNode) EncodeID() string {
 }
 
 // DecodeID 从编码 ID 解析节点。服务端解码后仍须重新校验对象存在性。
-// 兼容旧版 "kind:schema:name" 冒号格式（仅当恰好 3 段时）。
+// 仅接受 EncodeID 产出的 base64url(kind\0schema\0name)；nodeId 从不持久化，无需旧格式兼容。
 func DecodeID(id string) (MetadataNode, bool) {
 	if id == "" {
 		return MetadataNode{}, false
 	}
-	if b, err := base64.RawURLEncoding.DecodeString(id); err == nil {
-		parts := strings.SplitN(string(b), "\x00", 3)
-		if len(parts) == 3 {
-			return MetadataNode{
-				Kind:   MetadataNodeKind(parts[0]),
-				Schema: parts[1],
-				Name:   parts[2],
-				ID:     id,
-			}, true
-		}
+	b, err := base64.RawURLEncoding.DecodeString(id)
+	if err != nil {
+		return MetadataNode{}, false
 	}
-	// 兼容旧格式（无 base64 或解码后非三元组）
-	parts := strings.SplitN(id, ":", 3)
+	parts := strings.SplitN(string(b), "\x00", 3)
 	if len(parts) != 3 {
 		return MetadataNode{}, false
 	}
-	return MetadataNode{Kind: MetadataNodeKind(parts[0]), Schema: parts[1], Name: parts[2], ID: id}, true
+	return MetadataNode{
+		Kind:   MetadataNodeKind(parts[0]),
+		Schema: parts[1],
+		Name:   parts[2],
+		ID:     id,
+	}, true
 }
 
 // ColumnInfo 描述表字段。

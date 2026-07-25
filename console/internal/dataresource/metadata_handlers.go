@@ -11,8 +11,20 @@ package dataresource
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 )
+
+// ResourceCapabilities 处理 GET /api/data-resources/{id}/capabilities
+// 供前端关闭不支持的菜单（DDL/导入等），避免空结果伪装成功。
+func (s *Service) ResourceCapabilities(w http.ResponseWriter, r *http.Request) {
+	adapter, _, ok := s.getAdapterForRequest(w, r)
+	if !ok {
+		return
+	}
+	writeOK(w, adapter.Capabilities())
+}
 
 // getAdapterForRequest 从请求中获取资源 ID，创建适配器。
 // 复用权限校验逻辑：admin 全放行，普通用户须有授权。
@@ -135,7 +147,7 @@ func (s *Service) MetadataSQLTemplate(w http.ResponseWriter, r *http.Request) {
 		Operation string `json:"operation"` // SELECT/INSERT/UPDATE/DELETE
 	}
 	if err := jsonDecodeBody(w, r, &body); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		writeJSONBodyError(w, err)
 		return
 	}
 	node, found := DecodeID(body.NodeID)
@@ -156,13 +168,38 @@ func (s *Service) MetadataSQLTemplate(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]string{"sql": tpl})
 }
 
-// jsonBodyMaxBytes JSON 请求体上限（含导出快照 rows、行编辑数组等）。
+// jsonBodyMaxBytes JSON 请求体上限（行编辑等）。
 // 与 consoleapp 上传路径一致：传输层截断，避免无界内存占用。
 const jsonBodyMaxBytes = 16 << 20 // 16MB
 
+// ErrRequestBodyTooLarge 请求体超过 MaxBytesReader 上限。
+var ErrRequestBodyTooLarge = errors.New("REQUEST_BODY_TOO_LARGE")
+
 // jsonDecodeBody 解码 JSON 请求体（套 MaxBytesReader）。
+// 超限返回 ErrRequestBodyTooLarge，调用方应回 413。
 func jsonDecodeBody(w http.ResponseWriter, r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyMaxBytes)
 	dec := json.NewDecoder(r.Body)
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return ErrRequestBodyTooLarge
+		}
+		return err
+	}
+	return nil
+}
+
+// writeJSONBodyError 将 jsonDecodeBody 错误写成 HTTP 响应；返回 true 表示已写出。
+func writeJSONBodyError(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrRequestBodyTooLarge) {
+		writeErr(w, http.StatusRequestEntityTooLarge, "REQUEST_BODY_TOO_LARGE",
+			fmt.Sprintf("请求体过大，上限 %d MB", jsonBodyMaxBytes>>20))
+		return true
+	}
+	writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+	return true
 }

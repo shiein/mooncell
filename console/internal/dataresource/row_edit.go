@@ -37,7 +37,8 @@ type RowEditResult struct {
 }
 
 // RowEditMaxOps 单次就地编辑 updates+deletes 条数上限。
-const RowEditMaxOps = MaxLimit
+// 逐条 Exec 受 QueryTimeout 约束，10000 形同虚设；取能在超时内完成的经验上限。
+const RowEditMaxOps = 500
 
 // ApplyRowEdits 在适配器上执行批量 UPDATE/DELETE（独立事务，自动提交）。
 // primaryKeys 必须由服务端从 Describe 重新读取，不得信任客户端。
