@@ -141,32 +141,10 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 
 	_ = writeWSJSON(ctx, conn, map[string]any{"type": "ready"})
 
-	// 有界输出队列：慢客户端丢弃新输出并提示，不直接杀 SSH（cat 大文件在慢链路上很常见）。
-	// 注意：只有写协程消费 outCh，pump 不得从 channel 偷读。
+	// 有界输出队列：队列满时暂停读取 SSH 输出，把背压传回远端。
+	// PTY 也承载 ZMODEM，禁止丢弃或插入任何字节。
 	type chunk struct{ b []byte }
-	outCh := make(chan chunk, 64)
-	var (
-		outMu       sync.Mutex
-		outBytes    int
-		needDropNote bool
-	)
-	tryEnqueue := func(data []byte) {
-		outMu.Lock()
-		defer outMu.Unlock()
-		if outBytes+len(data) > maxPTYOutputQueue || len(outCh) >= cap(outCh) {
-			needDropNote = true
-			return
-		}
-		cp := make([]byte, len(data))
-		copy(cp, data)
-		outBytes += len(cp)
-		select {
-		case outCh <- chunk{cp}:
-		default:
-			outBytes -= len(cp)
-			needDropNote = true
-		}
-	}
+	outCh := make(chan chunk, maxPTYOutputQueue/(32*1024))
 
 	var pumps sync.WaitGroup
 	pump := func(rd io.Reader) {
@@ -175,15 +153,16 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, err := rd.Read(buf)
 			if n > 0 {
-				tryEnqueue(buf[:n])
-				outMu.Lock()
-				note := needDropNote
-				if note {
-					needDropNote = false
-				}
-				outMu.Unlock()
-				if note {
-					tryEnqueue([]byte("\r\n\x1b[33m[Mooncell] 输出过快，已丢弃部分终端输出\x1b[0m\r\n"))
+				cp := make([]byte, n)
+				copy(cp, buf[:n])
+				select {
+				case outCh <- chunk{cp}:
+				case <-ctx.Done():
+					return
+				case <-sess.ctx.Done():
+					return
+				case <-ptyDone:
+					return
 				}
 			}
 			if err != nil {
@@ -270,12 +249,6 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					return
 				}
-				outMu.Lock()
-				outBytes -= len(c.b)
-				if outBytes < 0 {
-					outBytes = 0
-				}
-				outMu.Unlock()
 				if err := writeBin(c.b); err != nil {
 					return
 				}

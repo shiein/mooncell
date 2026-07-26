@@ -608,8 +608,12 @@ func (s *Service) CancelUpload(w http.ResponseWriter, r *http.Request) {
 		s.releaseTransfer(tid)
 		writeOK(w, map[string]any{"ok": true, "state": TransferCancelled})
 		return
-	case TransferUploading, TransferCleanupPending, TransferCompleting:
-		// completing 崩溃后会成僵尸；允许取消并尝试清理 part。
+	case TransferUploading, TransferCleanupPending:
+		// 活动上传可取消；cleanup_pending 可在新会话中重试精确清理。
+	case TransferCompleting:
+		writeErr(w, http.StatusConflict, CodeResourceChanged,
+			"上传完成结果正在核对，请重新连接后刷新状态", true)
+		return
 	default:
 		writeErr(w, http.StatusConflict, CodeResourceChanged, "当前传输状态不可取消", false)
 		return
@@ -656,7 +660,6 @@ func (s *Service) reserveTransfer(id, user string) (bool, error) {
 		if t.Before(cut) {
 			delete(s.activeTransfers, tid)
 			delete(s.transferLastAct, tid)
-			delete(s.uploadLocks, tid)
 		}
 	}
 	if owner, ok := s.activeTransfers[id]; ok {
@@ -701,13 +704,14 @@ func (s *Service) releaseTransfer(tid string) {
 	s.transferMu.Lock()
 	delete(s.activeTransfers, tid)
 	delete(s.transferLastAct, tid)
-	delete(s.uploadLocks, tid)
 	s.transferMu.Unlock()
 }
 
 func (s *Service) uploadLock(tid string) *sync.Mutex {
 	s.transferMu.Lock()
 	defer s.transferMu.Unlock()
+	// mutex 一旦发布便在 Service 生命周期内保持同一对象；删除后重建会让
+	// 仍持有旧指针的请求与新请求失去互斥。条目体积很小，随服务重启回收。
 	if s.uploadLocks[tid] == nil {
 		s.uploadLocks[tid] = &sync.Mutex{}
 	}

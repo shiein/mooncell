@@ -287,6 +287,78 @@ func TestTransferReservationIsAtomic(t *testing.T) {
 	}
 }
 
+func TestUploadLockRemainsStableWhenSlotIsReleased(t *testing.T) {
+	cfg := DefaultConfig()
+	svc := NewService(openTestDB(t), cfg)
+	const id = "tx_stable_lock"
+	first := svc.uploadLock(id)
+	if _, err := svc.reserveTransfer(id, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	svc.transferMu.Lock()
+	svc.transferLastAct[id] = time.Now().Add(-transferSlotIdle - time.Minute)
+	svc.transferMu.Unlock()
+	svc.reapIdleTransferSlots()
+	if got := svc.uploadLock(id); got != first {
+		t.Fatal("idle slot reap must not replace a published upload mutex")
+	}
+	if _, err := svc.reserveTransfer(id, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	svc.releaseTransfer(id)
+	if got := svc.uploadLock(id); got != first {
+		t.Fatal("terminal slot release must not replace a published upload mutex")
+	}
+}
+
+func TestCompletingRecoveryState(t *testing.T) {
+	knownMissing := remotePathState{known: true}
+	cases := []struct {
+		name         string
+		temp, target remotePathState
+		want         string
+		resolved     bool
+	}{
+		{
+			name:   "temp remains",
+			temp:   remotePathState{known: true, exists: true, size: 10},
+			target: remotePathState{},
+			want:   TransferCancelled, resolved: true,
+		},
+		{
+			name:   "rename completed",
+			temp:   knownMissing,
+			target: remotePathState{known: true, exists: true, size: 10},
+			want:   TransferCompleted, resolved: true,
+		},
+		{
+			name: "neither exists",
+			temp: knownMissing, target: knownMissing,
+			want: TransferCancelled, resolved: true,
+		},
+		{
+			name:     "target differs",
+			temp:     knownMissing,
+			target:   remotePathState{known: true, exists: true, size: 9},
+			resolved: false,
+		},
+		{
+			name: "stat uncertain",
+			temp: remotePathState{}, target: knownMissing,
+			resolved: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, resolved := completingRecoveryState(tc.temp, tc.target, 10)
+			if got != tc.want || resolved != tc.resolved {
+				t.Fatalf("got state=%q resolved=%v, want state=%q resolved=%v",
+					got, resolved, tc.want, tc.resolved)
+			}
+		})
+	}
+}
+
 func TestReadUploadChunkRejectsActualOverflow(t *testing.T) {
 	exactReq := httptest.NewRequest("PUT", "/", bytes.NewReader(make([]byte, ChunkSize)))
 	if got, err := readUploadChunk(httptest.NewRecorder(), exactReq); err != nil || len(got) != ChunkSize {
@@ -343,6 +415,43 @@ func TestExpireTransferQueuesExactCleanupAndReleasesSlot(t *testing.T) {
 	}
 	if _, err := svc.reserveTransfer("tx_next", tr.Username); err != nil {
 		t.Fatalf("expired transfer slot was not released: %v", err)
+	}
+}
+
+func TestStuckCompletingKeepsStateAndReleasesSlot(t *testing.T) {
+	db := openTestDB(t)
+	cfg := DefaultConfig()
+	cfg.SFTPMaxTransfersTotal = 1
+	cfg.SFTPMaxTransfersPerUser = 1
+	svc := NewService(db, cfg)
+	now := time.Now().UnixMilli()
+	tr := FileTransfer{
+		ID: "tx_completing", ResourceID: "r1", Username: "alice", Direction: DirectionUpload,
+		RemotePath: "/tmp/a", RemoteTempPath: "/tmp/.a.mooncell-upload-x.part",
+		ExpectedSize: 10, TransferredSize: 10, State: TransferCompleting,
+		CreatedAt: 1, UpdatedAt: now - int64(31*time.Minute/time.Millisecond),
+		ExpiresAt: now + int64(time.Hour/time.Millisecond),
+	}
+	if err := insertTransfer(db, tr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.reserveTransfer(tr.ID, tr.Username); err != nil {
+		t.Fatal(err)
+	}
+	svc.expireStaleTransfers()
+	got, ok, err := getTransfer(db, tr.ID)
+	if err != nil || !ok {
+		t.Fatalf("get completing transfer: ok=%v err=%v", ok, err)
+	}
+	if got.State != TransferCompleting {
+		t.Fatalf("ambiguous completing state must be preserved, got %s", got.State)
+	}
+	if _, err := svc.reserveTransfer("tx_next", tr.Username); err != nil {
+		t.Fatalf("stuck completing slot was not released: %v", err)
+	}
+	recoverable, err := listRecoverableTransfers(db, tr.ResourceID)
+	if err != nil || len(recoverable) != 1 || recoverable[0].ID != tr.ID {
+		t.Fatalf("completing transfer must be recoverable: list=%+v err=%v", recoverable, err)
 	}
 }
 

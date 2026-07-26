@@ -427,11 +427,12 @@ func listActiveTransfers(db *sql.DB, username, resourceID string) ([]FileTransfe
 	return out, rows.Err()
 }
 
-// listCleanupPending 列出待清理的 part 记录。
-func listCleanupPending(db *sql.DB, resourceID string) ([]FileTransfer, error) {
+// listRecoverableTransfers 列出可在已认证 SFTP 会话中清理或核对的记录。
+func listRecoverableTransfers(db *sql.DB, resourceID string) ([]FileTransfer, error) {
 	rows, err := db.Query(`SELECT `+transferSelectCols+`
 		FROM server_file_transfers
-		WHERE resource_id=? AND state=? ORDER BY created_at`, resourceID, TransferCleanupPending)
+		WHERE resource_id=? AND state IN (?, ?) ORDER BY created_at`,
+		resourceID, TransferCleanupPending, TransferCompleting)
 	if err != nil {
 		return nil, err
 	}

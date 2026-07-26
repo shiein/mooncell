@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/pkg/sftp"
 )
 
 // SessionValidator 校验 Mooncell 登录会话是否仍有效（由 consoleapp 注入）。
@@ -32,10 +34,10 @@ type Service struct {
 	authFails  map[string][]time.Time
 
 	// 活动传输计数（内存），配合 SQLite 元数据。
-	transferMu       sync.Mutex
-	activeTransfers  map[string]string    // transferId/downloadId -> Mooncell username
-	transferLastAct  map[string]time.Time // 槽位最后活动，用于释放僵尸内存槽
-	uploadLocks      map[string]*sync.Mutex
+	transferMu      sync.Mutex
+	activeTransfers map[string]string    // transferId/downloadId -> Mooncell username
+	transferLastAct map[string]time.Time // 槽位最后活动，用于释放僵尸内存槽
+	uploadLocks     map[string]*sync.Mutex
 
 	closed atomic.Bool
 	stopCh chan struct{}
@@ -140,7 +142,8 @@ func (s *Service) InvalidateResource(resourceID string) {
 
 func (s *Service) expireStaleTransfers() {
 	now := time.Now().UnixMilli()
-	// uploading 过期 + completing 卡住（updated_at 超过 30 分钟）均回收。
+	// uploading 过期后进入精确清理；completing 卡住时只释放内存槽，
+	// 保留状态供下次已认证 SFTP 会话核对 rename 的真实结果。
 	const completingStuckMs = int64(30 * 60 * 1000)
 	rows, err := s.db.Query(
 		`SELECT id, state FROM server_file_transfers
@@ -170,7 +173,9 @@ func (s *Service) expireStaleTransfers() {
 	}
 	for _, it := range ids {
 		lock := s.uploadLock(it.id)
-		lock.Lock()
+		if !lock.TryLock() {
+			continue
+		}
 		tr, found, err := getTransfer(s.db, it.id)
 		if err != nil || !found {
 			lock.Unlock()
@@ -189,11 +194,16 @@ func (s *Service) expireStaleTransfers() {
 			lock.Unlock()
 			continue
 		}
+		if from == TransferCompleting {
+			s.releaseTransfer(it.id)
+			lock.Unlock()
+			continue
+		}
 		next := TransferExpired
 		if tr.RemoteTempPath != "" {
 			next = TransferCleanupPending
 		}
-		updated, err := updateTransferStateFrom(s.db, it.id, from, next, now)
+		updated, err := updateTransferStateFrom(s.db, it.id, TransferUploading, next, now)
 		if err != nil {
 			log.Printf("[serverops] 标记过期传输失败 id=%s: %v", it.id, err)
 		} else if updated {
@@ -213,18 +223,17 @@ func (s *Service) reapIdleTransferSlots() {
 		if t.Before(cut) {
 			delete(s.activeTransfers, id)
 			delete(s.transferLastAct, id)
-			delete(s.uploadLocks, id)
 		}
 	}
 }
 
-// cleanupPendingTransfers 使用本次已认证 SSH session 精确清理由数据库记录的远端 part。
-// 失败记录保持 cleanup_pending，供下一次成功连接继续重试。
+// cleanupPendingTransfers 使用本次已认证 SSH session 清理 cleanup_pending，
+// 并核对 completing 的远端 rename 结果。无法判定时保留原状态供下次重试。
 func (s *Service) cleanupPendingTransfers(sess *Session) {
 	if sess == nil || sess.closed.Load() {
 		return
 	}
-	pending, err := listCleanupPending(s.db, sess.ResourceID)
+	pending, err := listRecoverableTransfers(s.db, sess.ResourceID)
 	if err != nil || len(pending) == 0 {
 		if err != nil {
 			log.Printf("[serverops] 查询待清理上传失败 resource=%s: %v", sess.ResourceID, err)
@@ -238,27 +247,95 @@ func (s *Service) cleanupPendingTransfers(sess *Session) {
 	}
 	for _, item := range pending {
 		lock := s.uploadLock(item.ID)
-		lock.Lock()
+		if !lock.TryLock() {
+			continue
+		}
 		current, found, err := getTransfer(s.db, item.ID)
 		if err != nil || !found || current.ResourceID != sess.ResourceID ||
-			current.State != TransferCleanupPending ||
 			!isManagedUploadTemp(current.RemotePath, current.RemoteTempPath) {
 			lock.Unlock()
 			continue
 		}
-		if err := sc.Remove(current.RemoteTempPath); err != nil && !os.IsNotExist(err) {
-			lock.Unlock()
-			continue
-		}
-		updated, err := updateTransferStateFrom(
-			s.db, current.ID, TransferCleanupPending, TransferCancelled, time.Now().UnixMilli())
-		if err != nil {
-			log.Printf("[serverops] 更新待清理上传状态失败 id=%s: %v", current.ID, err)
-		} else if updated {
-			s.releaseTransfer(current.ID)
+		switch current.State {
+		case TransferCleanupPending:
+			if err := sc.Remove(current.RemoteTempPath); err != nil && !os.IsNotExist(err) {
+				lock.Unlock()
+				continue
+			}
+			updated, err := updateTransferStateFrom(
+				s.db, current.ID, TransferCleanupPending, TransferCancelled, time.Now().UnixMilli())
+			if err != nil {
+				log.Printf("[serverops] 更新待清理上传状态失败 id=%s: %v", current.ID, err)
+			} else if updated {
+				s.releaseTransfer(current.ID)
+			}
+		case TransferCompleting:
+			next, resolved := completingRecoveryState(
+				remoteFileState(sc, current.RemoteTempPath),
+				remoteFileState(sc, current.RemotePath),
+				current.ExpectedSize,
+			)
+			if !resolved {
+				lock.Unlock()
+				continue
+			}
+			if next == TransferCancelled {
+				if err := sc.Remove(current.RemoteTempPath); err != nil && !os.IsNotExist(err) {
+					lock.Unlock()
+					continue
+				}
+			}
+			updated, err := updateTransferStateFrom(
+				s.db, current.ID, TransferCompleting, next, time.Now().UnixMilli())
+			if err != nil {
+				log.Printf("[serverops] 恢复 completing 状态失败 id=%s: %v", current.ID, err)
+			} else if updated {
+				s.releaseTransfer(current.ID)
+			}
+		default:
+			// 查询后状态已变化。
 		}
 		lock.Unlock()
 	}
+}
+
+type remotePathState struct {
+	known  bool
+	exists bool
+	size   int64
+}
+
+func remoteFileState(sc *sftp.Client, remotePath string) remotePathState {
+	st, err := sc.Stat(remotePath)
+	if err == nil {
+		return remotePathState{known: true, exists: true, size: st.Size()}
+	}
+	if os.IsNotExist(err) {
+		return remotePathState{known: true}
+	}
+	return remotePathState{}
+}
+
+// completingRecoveryState 只在 temp/target 状态都可确定时给出恢复结果。
+// temp 仍在说明 rename 未完成，可清理为 cancelled；temp 已消失且目标大小匹配，
+// 说明 rename 已完成但 completed 写库失败。其它情况保持 completing，禁止猜测。
+func completingRecoveryState(temp, target remotePathState, expectedSize int64) (string, bool) {
+	if !temp.known {
+		return "", false
+	}
+	if temp.exists {
+		return TransferCancelled, true
+	}
+	if !target.known {
+		return "", false
+	}
+	if target.exists && target.size == expectedSize {
+		return TransferCompleted, true
+	}
+	if !target.exists {
+		return TransferCancelled, true
+	}
+	return "", false
 }
 
 // checkAuthRateLimit 密码失败限速；超过返回错误。

@@ -14,7 +14,7 @@ function friendlyServerOpsError(e) {
   const fallback = (e && e.message) || '操作失败';
   switch (code) {
     case 'HOST_KEY_MISMATCH':
-      return '主机指纹与已确认值不一致。可能主机重装或存在中间人风险，请管理员重新探测并确认指纹后再连接。';
+      return '主机指纹与已确认值不一致。可能主机重装或存在中间人风险，请管理员重新探测并确认指纹，然后刷新此工作台。';
     case 'HOST_KEY_UNCONFIRMED':
       return '主机指纹尚未确认，请管理员先探测并确认后再连接。';
     case 'SSH_AUTH_FAILED':
@@ -88,7 +88,6 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
   const connect = async (password) => {
     setConnecting(true);
     setConnErr(null);
-    setHostKeyBlock(null);
     try {
       const res = await createServerSession(resourceId, { password, cols: 120, rows: 36 });
       // password 参数离开本函数后由 PasswordDialog 清空 state
@@ -200,8 +199,8 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
           <Btn size="sm" variant="outline" onClick={disconnect}>断开</Btn>
         ) : (
           <Btn size="sm" variant="primary" icon="terminal"
-            onClick={() => { setHostKeyBlock(null); setConnErr(null); setShowPw(true); }}
-            disabled={!!loadErr && resource?.hostKeyStatus !== 'trusted'}>连接</Btn>
+            onClick={() => { setConnErr(null); setShowPw(true); }}
+            disabled={!!hostKeyBlock || (!!loadErr && resource?.hostKeyStatus !== 'trusted')}>连接</Btn>
         )}
         <Btn size="sm" variant="ghost" icon={theme === 'dark' ? 'sun' : 'moon'} onClick={onTheme} />
         <Btn size="sm" variant="ghost" icon="logout" onClick={onLogout} title="退出登录" />
