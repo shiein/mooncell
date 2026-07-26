@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mooncell/console/internal/dataresource"
+	"mooncell/console/internal/serverops"
 )
 
 // consoleVersion 由根 package main 的构建版本传入，供版本接口和自更新审计使用。
@@ -123,6 +124,40 @@ func Run(distFS fs.FS, version string, args []string) {
 		}
 	}()
 
+	// 服务器运维模块：迁移已在 openDB 完成；此处按 feature flag 组装服务与路由。
+	soCfg := serverops.Config{
+		Enabled:                 cfg.ServerOperations.Enabled,
+		ConnectTimeoutSeconds:   cfg.ServerOperations.ConnectTimeoutSeconds,
+		IdleTimeoutMinutes:      cfg.ServerOperations.IdleTimeoutMinutes,
+		MaxSessionHours:         cfg.ServerOperations.MaxSessionHours,
+		MaxSessionsPerUser:      cfg.ServerOperations.MaxSessionsPerUser,
+		MaxSessionsTotal:        cfg.ServerOperations.MaxSessionsTotal,
+		SFTPMaxUploadMB:         cfg.ServerOperations.SFTPMaxUploadMB,
+		SFTPMaxDownloadMB:       cfg.ServerOperations.SFTPMaxDownloadMB,
+		SFTPMaxTransfersPerUser: cfg.ServerOperations.SFTPMaxTransfersPerUser,
+		SFTPMaxTransfersTotal:   cfg.ServerOperations.SFTPMaxTransfersTotal,
+		TransferResumeHours:     cfg.ServerOperations.TransferResumeHours,
+		ZmodemMaxTransferMB:     cfg.ServerOperations.ZmodemMaxTransferMB,
+	}
+	// 即使 disabled 也创建 Service 以便用户管理授权 API 与 schema 一致；路由仅 enabled 时注册。
+	serverOpsSvc := serverops.NewService(store.db, soCfg)
+	defer serverOpsSvc.Close()
+	a.serverOps = serverOpsSvc
+	serverOpsSvc.SetAuditFunc(func(user, action, target, result string) {
+		a.store.appendAudit(user, action, target, result)
+	})
+	serverOpsSvc.SetSessionValidator(func(username string) bool {
+		// 检查该用户是否仍有未过期会话（任意 token 即可证明登录有效）。
+		return a.store.userHasActiveSession(username)
+	})
+	serverOpsSvc.SetTouchSession(func(username string) {
+		a.store.touchUserSessions(username)
+	})
+	if soCfg.Enabled {
+		serverOpsSvc.Start()
+		log.Printf("[serverops] 服务器运维功能已启用")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
 	mux.HandleFunc("POST /api/logout", a.logout)
@@ -211,6 +246,12 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("PATCH /api/data-resources/{id}/imports/{importId}", drAuth(dataResSvc.ImportSelectSheetHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/imports/{importId}/execute", drAuth(dataResSvc.ImportExecuteHandler))
 	mux.HandleFunc("DELETE /api/data-resources/{id}/imports/{importId}", drAuth(dataResSvc.ImportDeleteHandler))
+
+	// 服务器运维：仅 enabled 时注册业务路由。
+	if soCfg.Enabled {
+		soAuth := a.requireAuthSO
+		serverOpsSvc.RegisterRoutes(mux, soAuth)
+	}
 
 	// 多 Agent 管理:仅 admin
 	mux.HandleFunc("GET /api/agents", adminOnly(a.listAgents))

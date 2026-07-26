@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite" // 纯 Go sqlite 驱动,无 CGO,利于单二进制
 
 	"mooncell/console/internal/dataresource"
+	"mooncell/console/internal/serverops"
 )
 
 type Store struct {
@@ -106,6 +107,10 @@ func openDB(cfg *Config) *Store {
 	// 密钥文件丢失但已有资源时拒绝启动(不生成新密钥伪装成功)。
 	if err := dataresource.MigrateDataResources(db); err != nil {
 		log.Fatalf("[db] 数据资源迁移失败: %v", err)
+	}
+	// 服务器运维表无条件迁移（feature flag 只控制路由/运行时，不控制 schema）。
+	if err := serverops.Migrate(db); err != nil {
+		log.Fatalf("[db] 服务器运维迁移失败: %v", err)
 	}
 	keyFile := cfg.DataResource.CredentialKeyFile
 	if keyFile == "" {
@@ -263,11 +268,12 @@ func (s *Store) seedAdmin(username, password string) {
 
 // UserInfo 是用户列表对外形态(不含口令哈希)。
 type UserInfo struct {
-	Username           string                           `json:"username"`
-	Role               string                           `json:"role"`
-	CreatedAt          int64                            `json:"createdAt"`
-	AppIDs             []string                         `json:"appIds"`             // 授权访问的应用;admin 忽略(全量)
-	DataResourceGrants []dataresource.DataResourceGrant `json:"dataResourceGrants"` // 数据资源授权;admin 忽略(隐式全量)
+	Username             string                           `json:"username"`
+	Role                 string                           `json:"role"`
+	CreatedAt            int64                            `json:"createdAt"`
+	AppIDs               []string                         `json:"appIds"`               // 授权访问的应用;admin 忽略(全量)
+	DataResourceGrants   []dataresource.DataResourceGrant `json:"dataResourceGrants"`   // 数据资源授权;admin 忽略(隐式全量)
+	ServerResourceGrants []serverops.ServerResourceGrant  `json:"serverResourceGrants"` // 服务器运维授权;admin 忽略(隐式全量)
 }
 
 func (s *Store) userRole(username string) string {
@@ -294,6 +300,7 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 		}
 		u.AppIDs = []string{}
 		u.DataResourceGrants = []dataresource.DataResourceGrant{}
+		u.ServerResourceGrants = []serverops.ServerResourceGrant{}
 		out = append(out, u)
 	}
 	if err := rows.Err(); err != nil {
@@ -324,12 +331,20 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 批量拉服务器运维授权。
+	srvGrantsByUser, err := serverops.AllGrantsByUser(s.db)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
 		if apps, ok := byUser[out[i].Username]; ok {
 			out[i].AppIDs = apps
 		}
 		if gs, ok := grantsByUser[out[i].Username]; ok {
 			out[i].DataResourceGrants = gs
+		}
+		if gs, ok := srvGrantsByUser[out[i].Username]; ok {
+			out[i].ServerResourceGrants = gs
 		}
 	}
 	return out, nil
@@ -347,11 +362,12 @@ func (s *Store) createUser(username, password, role string) error {
 	return err // UNIQUE 冲突 → 用户名已存在
 }
 
-// createUserBundle 在一个 SQLite 事务中创建用户、应用授权和数据资源授权。
+// createUserBundle 在一个 SQLite 事务中创建用户、应用授权、数据资源授权与服务器运维授权。
 func (s *Store) createUserBundle(
 	username, password, role string,
 	appIDs []string,
 	grants []dataresource.DataResourceGrant,
+	serverGrants []serverops.ServerResourceGrant,
 	grantedBy string,
 ) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -379,6 +395,9 @@ func (s *Store) createUserBundle(
 		}
 	}
 	if err := dataresource.SetUserGrantsTx(tx, username, grants, grantedBy); err != nil {
+		return err
+	}
+	if err := serverops.SetUserGrantsTx(tx, username, serverGrants, grantedBy); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -482,6 +501,7 @@ func (s *Store) deleteUser(username string) (bool, error) {
 			"DELETE FROM user_apps WHERE username = ?",
 			"DELETE FROM data_resource_grants WHERE username = ?",
 			"DELETE FROM saved_sql WHERE username = ?",
+			"DELETE FROM server_resource_grants WHERE username = ?",
 		} {
 			if _, err := tx.Exec(stmt, username); err != nil {
 				return false, err
@@ -494,9 +514,16 @@ func (s *Store) deleteUser(username string) (bool, error) {
 	return n > 0, nil
 }
 
-// updateUserBundle 在同一 SQLite 事务中更新口令(可选)、应用授权(可选)与数据资源授权(可选)。
+// updateUserBundle 在同一 SQLite 事务中更新口令(可选)、应用/数据资源/服务器授权(可选)。
 // 任一失败整单回滚，避免半成品。
-func (s *Store) updateUserBundle(username, password string, appIDs *[]string, grants *[]dataresource.DataResourceGrant, grantedBy string, beforeCommit func()) error {
+func (s *Store) updateUserBundle(
+	username, password string,
+	appIDs *[]string,
+	grants *[]dataresource.DataResourceGrant,
+	serverGrants *[]serverops.ServerResourceGrant,
+	grantedBy string,
+	beforeCommit func(),
+) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -532,6 +559,11 @@ func (s *Store) updateUserBundle(username, password string, appIDs *[]string, gr
 	}
 	if grants != nil {
 		if err := dataresource.SetUserGrantsTx(tx, username, *grants, grantedBy); err != nil {
+			return err
+		}
+	}
+	if serverGrants != nil {
+		if err := serverops.SetUserGrantsTx(tx, username, *serverGrants, grantedBy); err != nil {
 			return err
 		}
 	}
@@ -603,4 +635,28 @@ func (s *Store) touchSession(token string) {
 
 func (s *Store) deleteSession(token string) {
 	s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
+}
+
+// userHasActiveSession 判断用户是否仍有未过期的 Mooncell 登录会话。
+// 供 serverops WebSocket 周期校验注入。
+func (s *Store) userHasActiveSession(username string) bool {
+	var n int
+	now := time.Now().UnixMilli()
+	_ = s.db.QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE username = ? AND expires_at > ? AND (? - created_at) <= ?`,
+		username, now, now, sessionAbsoluteMax.Milliseconds(),
+	).Scan(&n)
+	return n > 0
+}
+
+// touchUserSessions 对该用户全部有效会话做节流滑动续期（主动文件/终端操作时）。
+func (s *Store) touchUserSessions(username string) {
+	if s.ttl <= time.Minute {
+		return
+	}
+	now := time.Now()
+	_, _ = s.db.Exec(
+		`UPDATE sessions SET expires_at = ? WHERE username = ? AND expires_at > ? AND expires_at <= ?`,
+		now.Add(s.ttl).UnixMilli(), username, now.UnixMilli(), now.Add(s.ttl-time.Minute).UnixMilli(),
+	)
 }

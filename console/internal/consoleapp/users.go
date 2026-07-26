@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"mooncell/console/internal/dataresource"
+	"mooncell/console/internal/serverops"
 )
 
 // listUsers 处理 GET /api/users(admin):列出全部用户(不含口令,含授权应用)。
@@ -22,10 +23,11 @@ func (a *api) listUsers(w http.ResponseWriter, r *http.Request) {
 // 角色固定为 user;管理员仅由 config 种入或库内既有 admin,不经此接口再造。
 func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username           string                           `json:"username"`
-		Password           string                           `json:"password"`
-		AppIDs             []string                         `json:"appIds"`
-		DataResourceGrants []dataresource.DataResourceGrant `json:"dataResourceGrants"`
+		Username             string                           `json:"username"`
+		Password             string                           `json:"password"`
+		AppIDs               []string                         `json:"appIds"`
+		DataResourceGrants   []dataresource.DataResourceGrant `json:"dataResourceGrants"`
+		ServerResourceGrants []serverops.ServerResourceGrant  `json:"serverResourceGrants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -39,12 +41,16 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 	for i := range body.DataResourceGrants {
 		body.DataResourceGrants[i].Username = body.Username
 	}
+	for i := range body.ServerResourceGrants {
+		body.ServerResourceGrants[i].Username = body.Username
+	}
 	if err := a.store.createUserBundle(
 		body.Username,
 		body.Password,
 		"user",
 		normalizeAppIDs(body.AppIDs),
 		body.DataResourceGrants,
+		body.ServerResourceGrants,
 		a.sessionUser(r),
 	); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "创建失败:用户名可能已存在或授权无效"})
@@ -67,15 +73,16 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Password           string                            `json:"password"`           // 非空则改密
-		AppIDs             *[]string                         `json:"appIds"`             // 非 nil 则全量替换授权
-		DataResourceGrants *[]dataresource.DataResourceGrant `json:"dataResourceGrants"` // 非 nil 则全量替换数据资源授权
+		Password             string                            `json:"password"`             // 非空则改密
+		AppIDs               *[]string                         `json:"appIds"`               // 非 nil 则全量替换授权
+		DataResourceGrants   *[]dataresource.DataResourceGrant `json:"dataResourceGrants"`   // 非 nil 则全量替换数据资源授权
+		ServerResourceGrants *[]serverops.ServerResourceGrant  `json:"serverResourceGrants"` // 非 nil 则全量替换服务器运维授权
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	// 密码 / 应用授权 / 数据资源授权必须同一事务，避免半成品。
+	// 密码 / 应用 / 数据资源 / 服务器授权必须同一事务，避免半成品。
 	var appIDs *[]string
 	if body.AppIDs != nil {
 		n := normalizeAppIDs(*body.AppIDs)
@@ -97,14 +104,34 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		grants = &g
 	}
+	var serverGrants *[]serverops.ServerResourceGrant
+	var oldServerGrants []serverops.ServerResourceGrant
+	if body.ServerResourceGrants != nil {
+		g := *body.ServerResourceGrants
+		for i := range g {
+			g[i].Username = target
+		}
+		var err error
+		oldServerGrants, err = serverops.UserGrants(a.store.db, target)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取服务器运维授权失败"})
+			return
+		}
+		serverGrants = &g
+	}
 	var beforeCommit func()
-	if grants != nil {
+	if grants != nil || serverGrants != nil {
 		beforeCommit = func() {
-			// 所有授权校验和写入已成功后、事务提交前，使旧授权的在途写失效。
-			a.rollbackRevokedDataResourceTx(target, oldGrants, *grants)
+			// 所有授权校验和写入已成功后、事务提交前，使旧授权的在途写/SSH 失效。
+			if grants != nil {
+				a.rollbackRevokedDataResourceTx(target, oldGrants, *grants)
+			}
+			if serverGrants != nil {
+				a.invalidateRevokedServerOps(target, oldServerGrants, *serverGrants)
+			}
 		}
 	}
-	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, a.sessionUser(r), beforeCommit); err != nil {
+	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, serverGrants, a.sessionUser(r), beforeCommit); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新用户失败: " + err.Error()})
 		return
 	}
@@ -125,9 +152,12 @@ func (a *api) deleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不能删除最后一个管理员"})
 		return
 	}
-	// 删除前先回滚并清理该用户全部数据资源工作台事务。
+	// 删除前先回滚并清理该用户全部数据资源工作台与 SSH 会话。
 	if a.dataResSvc != nil {
 		a.dataResSvc.InvalidateAllForUser(target)
+	}
+	if a.serverOps != nil {
+		a.serverOps.InvalidateUser(target)
 	}
 	// 原子删除:即便上面的预检因并发互删而失效,deleteUser 内末位 admin 守卫也会拦下。
 	deleted, err := a.store.deleteUser(target)
@@ -175,6 +205,23 @@ func (a *api) rollbackRevokedDataResourceTx(username string, oldGrants, newGrant
 		newMode, still := newModes[old.ResourceID]
 		if !still || old.AccessMode != newMode {
 			a.dataResSvc.InvalidateUserResource(username, old.ResourceID)
+		}
+	}
+}
+
+// invalidateRevokedServerOps 比较旧/新服务器授权：被撤销的资源立即终止活动 SSH/SFTP。
+// 审计记在 updateUser 成功路径；此处只负责运行时失效。
+func (a *api) invalidateRevokedServerOps(username string, oldGrants, newGrants []serverops.ServerResourceGrant) {
+	if a.serverOps == nil {
+		return
+	}
+	still := map[string]bool{}
+	for _, g := range newGrants {
+		still[g.ResourceID] = true
+	}
+	for _, old := range oldGrants {
+		if !still[old.ResourceID] {
+			a.serverOps.InvalidateUserResource(username, old.ResourceID)
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mooncell/console/internal/dataresource"
+	"mooncell/console/internal/serverops"
 )
 
 const sessionCookie = "mc_sid"
@@ -35,8 +36,9 @@ type api struct {
 	appEpoch        map[string]uint64 // 按 app id 的操作代际:每次启停/部署/还原/下线自增(markBusy 内);巡检据此丢弃陈旧回写。busyMu 保护
 	draining        bool              // 自更新 draining:置位后 tryBeginOp 拒绝新操作,等在飞清零再 self-exec 重启。busyMu 保护
 	requireTLSAgents bool             // 开启后拒绝注册非 loopback 明文 Agent(security.require_tls_agents)
-	selfUpdateMu    sync.Mutex // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
-	dataResSvc      *dataresource.Service // 数据资源模块服务（工作台事务回滚等）
+	selfUpdateMu sync.Mutex              // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
+	dataResSvc   *dataresource.Service   // 数据资源模块服务（工作台事务回滚等）
+	serverOps    *serverops.Service      // 服务器运维（SSH/SFTP）；nil 表示未启用
 }
 
 func randomToken() string {
@@ -87,13 +89,24 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"user": username, "role": a.store.userRole(username)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": username,
+		"role": a.store.userRole(username),
+		"features": map[string]bool{
+			"serverOperations": a.serverOps != nil && a.serverOps.Enabled(),
+		},
+	})
 }
 
 func (a *api) logout(w http.ResponseWriter, r *http.Request) {
-	// 先解析用户，回滚其工作台事务后再删会话（不得提交未完成事务）
-	if username, _, ok := a.currentUser(r); ok && a.dataResSvc != nil {
-		a.dataResSvc.InvalidateAllForUser(username)
+	// 先解析用户，回滚其工作台事务并终止 SSH 会话后再删会话
+	if username, _, ok := a.currentUser(r); ok {
+		if a.dataResSvc != nil {
+			a.dataResSvc.InvalidateAllForUser(username)
+		}
+		if a.serverOps != nil {
+			a.serverOps.InvalidateUser(username)
+		}
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		a.store.deleteSession(c.Value)
@@ -117,14 +130,26 @@ func (a *api) session(w http.ResponseWriter, r *http.Request) {
 	}
 	username, ok := a.store.userByToken(c.Value)
 	if !ok {
-		// 会话过期：回滚该用户未完成的数据资源事务
-		if username != "" && a.dataResSvc != nil {
-			a.dataResSvc.InvalidateAllForUser(username)
+		// 会话过期：回滚该用户未完成的数据资源事务并终止 SSH
+		if username != "" {
+			if a.dataResSvc != nil {
+				a.dataResSvc.InvalidateAllForUser(username)
+			}
+			if a.serverOps != nil {
+				a.serverOps.InvalidateUser(username)
+			}
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"user": username, "role": a.store.userRole(username)})
+	// features.serverOperations 供前端 fail-closed 隐藏菜单
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": username,
+		"role": a.store.userRole(username),
+		"features": map[string]bool{
+			"serverOperations": a.serverOps != nil && a.serverOps.Enabled(),
+		},
+	})
 }
 
 // isAdmin 判定管理员。历史 operator/viewer 均视为普通用户(按 user_apps 授权)。
@@ -145,9 +170,14 @@ func (a *api) currentUser(r *http.Request) (string, string, bool) {
 	}
 	u, ok := a.store.userByToken(c.Value)
 	if !ok {
-		// 闲置/绝对过期：不得留下未完成的工作台事务
-		if u != "" && a.dataResSvc != nil {
-			a.dataResSvc.InvalidateAllForUser(u)
+		// 闲置/绝对过期：不得留下未完成的工作台事务或 SSH 会话
+		if u != "" {
+			if a.dataResSvc != nil {
+				a.dataResSvc.InvalidateAllForUser(u)
+			}
+			if a.serverOps != nil {
+				a.serverOps.InvalidateUser(u)
+			}
 		}
 		return "", "", false
 	}
@@ -226,5 +256,17 @@ func (a *api) requireAuthDR(next func(http.ResponseWriter, *http.Request)) http.
 			return
 		}
 		next(w, dataresource.WithUser(r, user, role))
+	}
+}
+
+// requireAuthSO 是服务器运维模块的认证 wrapper：注入 serverops Principal。
+func (a *api) requireAuthSO(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, role, ok := a.currentUser(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
+			return
+		}
+		next(w, serverops.WithUser(r, user, role))
 	}
 }

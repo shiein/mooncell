@@ -25,8 +25,29 @@ type Config struct {
 	Deploy         DeployUpload         `toml:"deploy"`
 	Audit          AuditConfig          `toml:"audit"`
 	Monitor        MonitorConfig        `toml:"monitor"`
-	Security       SecurityConfig       `toml:"security"`
-	DataResource   DataResourceConfig   `toml:"data_resource"`
+	Security          SecurityConfig          `toml:"security"`
+	DataResource      DataResourceConfig      `toml:"data_resource"`
+	ServerOperations  ServerOperationsConfig  `toml:"server_operations"`
+}
+
+// ServerOperationsConfig 对应 [server_operations]：远程 Linux SSH/SFTP 运维。
+// 默认 enabled=false，升级后须管理员确认 HTTPS/网络/授权后再开启。
+type ServerOperationsConfig struct {
+	Enabled bool `toml:"enabled"`
+
+	ConnectTimeoutSeconds int `toml:"connect_timeout_seconds"`
+	IdleTimeoutMinutes    int `toml:"idle_timeout_minutes"`
+	MaxSessionHours       int `toml:"max_session_hours"`
+	MaxSessionsPerUser    int `toml:"max_sessions_per_user"`
+	MaxSessionsTotal      int `toml:"max_sessions_total"`
+
+	SFTPMaxUploadMB         int `toml:"sftp_max_upload_mb"`
+	SFTPMaxDownloadMB       int `toml:"sftp_max_download_mb"`
+	SFTPMaxTransfersPerUser int `toml:"sftp_max_transfers_per_user"`
+	SFTPMaxTransfersTotal   int `toml:"sftp_max_transfers_total"`
+	TransferResumeHours     int `toml:"transfer_resume_hours"`
+
+	ZmodemMaxTransferMB int `toml:"zmodem_max_transfer_mb"`
 }
 
 // LegacyArtifactConfig 兼容读取旧版 [artifact].dir，供一次性移除旧表与落盘字节。
@@ -128,7 +149,22 @@ func loadConfig(path string) *Config {
 		Deploy:         DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 		Audit:          AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
 		Monitor:        MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
-		DataResource:   DataResourceConfig{CredentialKeyFile: "mooncell-data.key", ImportMaxMB: 100},
+		DataResource: DataResourceConfig{CredentialKeyFile: "mooncell-data.key", ImportMaxMB: 100},
+		// 服务器运维默认关闭；开启后暴露任意远程 shell，须确认 HTTPS 与授权模型。
+		ServerOperations: ServerOperationsConfig{
+			Enabled:                 false,
+			ConnectTimeoutSeconds:   15,
+			IdleTimeoutMinutes:      30,
+			MaxSessionHours:         8,
+			MaxSessionsPerUser:      3,
+			MaxSessionsTotal:        30,
+			SFTPMaxUploadMB:         1024,
+			SFTPMaxDownloadMB:       2048,
+			SFTPMaxTransfersPerUser: 2,
+			SFTPMaxTransfersTotal:   10,
+			TransferResumeHours:     24,
+			ZmodemMaxTransferMB:     512,
+		},
 	}
 	// 文件不存在 → 只允许本地回环默认配置;文件存在但解析失败(语法错误/权限等)→ 直接退出。
 	// 显式对外监听时若仍使用周知默认密码/token,同样拒绝启动。

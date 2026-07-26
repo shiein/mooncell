@@ -26,3 +26,19 @@ token = "mc_ag_change_me"
 # 部署制品上传的传输层硬上限(MB)。超出在传输层截断并回 413,防超大制品撑爆磁盘。
 # 浏览器→Console 大文件(>16MB)走分块上传 + 断点续传(已实现);此上限同时约束分块总量。默认 1024MB。
 max_upload_mb = 1024
+
+# 服务器运维：远程 Linux SSH/SFTP/Web 终端。
+# 任意远程 shell 是高权限能力。升级后默认关闭，确认 HTTPS、网络可达与授权后再开启。
+[server_operations]
+enabled = false
+connect_timeout_seconds = 15
+idle_timeout_minutes = 30
+max_session_hours = 8
+max_sessions_per_user = 3
+max_sessions_total = 30
+sftp_max_upload_mb = 1024
+sftp_max_download_mb = 2048
+sftp_max_transfers_per_user = 2
+sftp_max_transfers_total = 10
+transfer_resume_hours = 24
+zmodem_max_transfer_mb = 512

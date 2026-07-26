@@ -1,0 +1,310 @@
+// PTY 与 WebSocket 桥接。
+// binary frame = PTY 原始字节（含 ZMODEM）；text frame = 控制 JSON。
+package serverops
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	"golang.org/x/crypto/ssh"
+)
+
+// TerminalWS GET /api/server-resources/{id}/sessions/{sid}/terminal
+func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
+	user, _, ok := userFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, CodeUnauthorized, "未登录", false)
+		return
+	}
+	resourceID := r.PathValue("id")
+	sessionID := r.PathValue("sid")
+
+	if !originOK(r) {
+		writeErr(w, http.StatusForbidden, CodeForbidden, "Origin 不允许", false)
+		return
+	}
+
+	sess := s.sess.Get(sessionID, user, resourceID)
+	if sess == nil {
+		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		CompressionMode: websocket.CompressionDisabled,
+		OriginPatterns:  originPatterns(r),
+	})
+	if err != nil {
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	client := sess.Client()
+	if client == nil {
+		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSessionClosed, "message": "会话已结束"})
+		return
+	}
+
+	sshSess, err := client.NewSession()
+	if err != nil {
+		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSSHConnectionFailed, "message": "创建 SSH 会话失败"})
+		return
+	}
+	sess.mu.Lock()
+	sess.sshSession = sshSess
+	sess.mu.Unlock()
+	defer func() {
+		sess.mu.Lock()
+		if sess.sshSession == sshSess {
+			sess.sshSession = nil
+		}
+		sess.mu.Unlock()
+		_ = sshSess.Close()
+	}()
+
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if err := sshSess.RequestPty("xterm-256color", 36, 120, modes); err != nil {
+		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSSHConnectionFailed, "message": "申请 PTY 失败"})
+		return
+	}
+
+	stdout, err := sshSess.StdoutPipe()
+	if err != nil {
+		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSSHConnectionFailed, "message": "打开终端输出失败"})
+		return
+	}
+	stderr, err := sshSess.StderrPipe()
+	if err != nil {
+		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSSHConnectionFailed, "message": "打开终端错误流失败"})
+		return
+	}
+	stdin, err := sshSess.StdinPipe()
+	if err != nil {
+		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSSHConnectionFailed, "message": "打开终端输入失败"})
+		return
+	}
+	if err := sshSess.Shell(); err != nil {
+		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSSHConnectionFailed, "message": "启动 Shell 失败"})
+		return
+	}
+
+	ctx := r.Context()
+	_ = writeWSJSON(ctx, conn, map[string]any{"type": "ready"})
+
+	// 有界输出队列：慢客户端关闭会话，避免无限堆内存。
+	type chunk struct{ b []byte }
+	outCh := make(chan chunk, 64)
+	var (
+		outMu    sync.Mutex
+		outBytes int
+		tooSlow  bool
+	)
+
+	pump := func(rd io.Reader) {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := rd.Read(buf)
+			if n > 0 {
+				outMu.Lock()
+				if outBytes+n > maxPTYOutputQueue {
+					tooSlow = true
+					outMu.Unlock()
+					sess.Close()
+					return
+				}
+				outBytes += n
+				outMu.Unlock()
+				cp := make([]byte, n)
+				copy(cp, buf[:n])
+				select {
+				case outCh <- chunk{cp}:
+				case <-ctx.Done():
+					return
+				case <-sess.ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+	go pump(stdout)
+	go pump(stderr)
+
+	// Mooncell 会话校验 + SSH keepalive
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		missed := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sess.ctx.Done():
+				return
+			case <-t.C:
+				if s.valid != nil && !s.valid(user) {
+					_ = writeWSJSON(ctx, conn, map[string]any{"type": "error", "code": CodeMooncellSessionExp, "message": "登录已过期"})
+					sess.Close()
+					return
+				}
+				if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+					missed++
+					if missed >= defaultKeepaliveMissed {
+						sess.Close()
+						return
+					}
+				} else {
+					missed = 0
+				}
+			}
+		}
+	}()
+
+	// 写协程：所有 WS 写串行
+	var writeMu sync.Mutex
+	writeBin := func(data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return conn.Write(wctx, websocket.MessageBinary, data)
+	}
+	writeTxt := func(v any) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return writeWSJSONLocked(ctx, conn, v)
+	}
+
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sess.ctx.Done():
+				return
+			case c, ok := <-outCh:
+				if !ok {
+					return
+				}
+				outMu.Lock()
+				outBytes -= len(c.b)
+				if outBytes < 0 {
+					outBytes = 0
+				}
+				slow := tooSlow
+				outMu.Unlock()
+				if slow {
+					_ = writeTxt(map[string]any{"type": "error", "code": CodeClientTooSlow, "message": "客户端消费过慢，会话已关闭"})
+					return
+				}
+				if err := writeBin(c.b); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// 读循环
+	for {
+		msgType, data, err := conn.Read(ctx)
+		if err != nil {
+			break
+		}
+		if msgType == websocket.MessageBinary {
+			if len(data) > maxWSBinaryFrame {
+				_ = writeTxt(map[string]any{"type": "error", "code": CodeBadRequest, "message": "单帧过大"})
+				break
+			}
+			if _, err := stdin.Write(data); err != nil {
+				break
+			}
+			if s.touch != nil {
+				s.touch(user)
+			}
+			continue
+		}
+		var ctrl struct {
+			Type string `json:"type"`
+			Cols int    `json:"cols"`
+			Rows int    `json:"rows"`
+		}
+		if err := json.Unmarshal(data, &ctrl); err != nil {
+			continue
+		}
+		switch ctrl.Type {
+		case "resize":
+			if ctrl.Cols > 0 && ctrl.Rows > 0 {
+				_ = sshSess.WindowChange(ctrl.Rows, ctrl.Cols)
+				if s.touch != nil {
+					s.touch(user)
+				}
+			}
+		case "ping":
+			_ = writeTxt(map[string]any{"type": "pong"})
+		case "close":
+			_ = writeTxt(map[string]any{"type": "exit", "code": 0})
+			sess.Close()
+			return
+		}
+	}
+
+	_ = stdin.Close()
+	select {
+	case <-writeDone:
+	case <-time.After(2 * time.Second):
+	}
+	_ = writeTxt(map[string]any{"type": "exit", "code": 0})
+	log.Printf("[serverops] terminal closed user=%s resource=%s", user, resourceID)
+}
+
+func writeWSJSON(ctx context.Context, conn *websocket.Conn, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return conn.Write(wctx, websocket.MessageText, b)
+}
+
+func writeWSJSONLocked(ctx context.Context, conn *websocket.Conn, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return conn.Write(wctx, websocket.MessageText, b)
+}
+
+func originOK(r *http.Request) bool {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
+	}
+	host := r.Host
+	return strings.Contains(o, "://"+host) || strings.HasSuffix(o, host)
+}
+
+func originPatterns(r *http.Request) []string {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return []string{"*"}
+	}
+	return []string{o}
+}
