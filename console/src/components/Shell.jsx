@@ -8,6 +8,8 @@ const NAV_ITEMS = [
   { id: "overview", label: "总览", en: "Overview", icon: "gauge", adminOnly: true },
   { id: "apps", label: "应用", en: "Applications", icon: "box" },
   { id: "data-resources", label: "数据资源", en: "Data Resources", icon: "server" },
+  // featureFlag: 由 App 根据 session.features.serverOperations 过滤；默认 fail-closed 隐藏
+  { id: "server-operations", label: "服务器运维", en: "Server Operations", icon: "terminal", feature: "serverOperations" },
   { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder", adminOnly: true },
   { id: "audit", label: "审计日志", en: "Audit", icon: "shield", adminOnly: true },
   { id: "agents", label: "Agent 管理", en: "Agents", icon: "server", adminOnly: true },
@@ -35,8 +37,13 @@ function MoonLogo({ size = 26 }) {
   );
 }
 
-function Sidebar({ page, onNav, user, role, onLogout, agent }) {
-  const navItems = NAV_ITEMS.filter((n) => !n.adminOnly || role === "admin");
+function Sidebar({ page, onNav, user, role, onLogout, agent, features }) {
+  const navItems = NAV_ITEMS.filter((n) => {
+    if (n.adminOnly && role !== "admin") return false;
+    // 功能开关未加载或关闭时 fail-closed 隐藏
+    if (n.feature && !(features && features[n.feature])) return false;
+    return true;
+  });
   // 真实 Agent 状态(与顶栏同源):此前左卡硬编码绿点 + 模拟磁盘,Agent 离线时仍显示"绿+磁盘",
   // 与顶栏"Agent 不可达"自相矛盾。null=探测中(灰,不脉冲) / true=在线(绿,脉冲) / false=不可达(红)。
   const online = agent ? agent.online : null;
@@ -133,13 +140,13 @@ function Topbar({ crumbs, theme, onTheme, right, agent, role }) {
   );
 }
 
-function Shell({ page, onNav, crumbs, theme, onTheme, user, role, onLogout, children, topRight }) {
+function Shell({ page, onNav, crumbs, theme, onTheme, user, role, onLogout, children, topRight, features }) {
   // 单一 Agent 状态源,顶栏与左卡共用一份轮询(避免双份 poller),二者显示天然一致。
   // enabled=false 时 hook 不发任何 admin-only Agent 请求,普通用户不会产生无意义的 403 轮询。
   const agent = useAgent(role === "admin");
   return (
     <div className="shell">
-      <Sidebar page={page} onNav={onNav} user={user} role={role} onLogout={onLogout} agent={agent} />
+      <Sidebar page={page} onNav={onNav} user={user} role={role} onLogout={onLogout} agent={agent} features={features} />
       <div className="main">
         <Topbar crumbs={crumbs} theme={theme} onTheme={onTheme} right={topRight} agent={agent} role={role} />
         <div className="content"><div className="content-inner" key={page}>{children}</div></div>

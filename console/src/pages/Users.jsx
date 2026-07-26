@@ -6,6 +6,7 @@ import { PageHead } from '../components/Shell.jsx';
 import { useAsync } from '../lib/async.js';
 import { listUsers, createUser, updateUser, deleteUser } from '../lib/api.js';
 import { listDataResources } from '../lib/dataresource-api.js';
+import { listServerResources } from '../lib/serverops-api.js';
 
 function UsersPage() {
   const store = useMC();
@@ -40,7 +41,7 @@ function UsersPage() {
 
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
-          <thead><tr><th>用户名</th><th>角色</th><th>授权应用</th><th>数据资源</th><th>创建时间</th><th style={{ width: 120 }}></th></tr></thead>
+          <thead><tr><th>用户名</th><th>角色</th><th>授权应用</th><th>数据资源</th><th>服务器</th><th>创建时间</th><th style={{ width: 120 }}></th></tr></thead>
           <tbody>
             {(users || []).map((u) => (
               <tr key={u.username}>
@@ -69,6 +70,15 @@ function UsersPage() {
                     <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>未授权</span>
                   ) : (
                     <span style={{ fontSize: 12.5 }}>{(u.dataResourceGrants || []).length} 项</span>
+                  )}
+                </td>
+                <td>
+                  {u.role === "admin" ? (
+                    <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>全部</span>
+                  ) : !(u.serverResourceGrants || []).length ? (
+                    <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>未授权</span>
+                  ) : (
+                    <span style={{ fontSize: 12.5 }}>{(u.serverResourceGrants || []).length} 项</span>
                   )}
                 </td>
                 <td><span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>{fmtTime(u.createdAt)}</span></td>
@@ -154,17 +164,46 @@ function DataResourceGrantPicker({ resources, grants, onChange }) {
   );
 }
 
+/** 服务器运维授权：第一版仅「可运维」复选框，无只读假象。 */
+function ServerResourceGrantPicker({ resources, grants, onChange }) {
+  const selected = new Set((grants || []).map((g) => g.resourceId));
+  const toggle = (id) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange([...next].map((resourceId) => ({ resourceId })));
+  };
+  if (!resources.length) {
+    return <div style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>暂无服务器，请先在「服务器运维」中创建</div>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto",
+      border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>
+      {resources.map((r) => (
+        <label key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+          <Checkbox checked={selected.has(r.id)} onChange={() => toggle(r.id)} ariaLabel={r.name} />
+          <span style={{ fontWeight: 500 }}>{r.name}</span>
+          <span className="mono" style={{ fontSize: 11, color: "var(--muted-fg)" }}>{r.host}:{r.port}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
 function CreateUserDialog({ open, onClose, onCreated, apps }) {
   const [u, setU] = React.useState("");
   const [p, setP] = React.useState("");
   const [appIds, setAppIds] = React.useState([]);
   const [drGrants, setDrGrants] = React.useState([]);
+  const [srvGrants, setSrvGrants] = React.useState([]);
   const [resources, setResources] = React.useState([]);
+  const [servers, setServers] = React.useState([]);
   const [busy, setBusy] = React.useState(false);
   React.useEffect(() => {
     if (open) {
-      setU(""); setP(""); setAppIds([]); setDrGrants([]); setBusy(false);
+      setU(""); setP(""); setAppIds([]); setDrGrants([]); setSrvGrants([]); setBusy(false);
       listDataResources().then(setResources).catch(() => setResources([]));
+      listServerResources().then((d) => setServers(d.resources || [])).catch(() => setServers([]));
     }
   }, [open]);
 
@@ -175,6 +214,7 @@ function CreateUserDialog({ open, onClose, onCreated, apps }) {
       await createUser({
         username: u.trim(), password: p, appIds,
         dataResourceGrants: drGrants.map((g) => ({ resourceId: g.resourceId, accessMode: g.accessMode })),
+        serverResourceGrants: srvGrants.map((g) => ({ resourceId: g.resourceId })),
       });
       toast(`已创建用户 ${u.trim()}`);
       onCreated();
@@ -185,7 +225,7 @@ function CreateUserDialog({ open, onClose, onCreated, apps }) {
   };
 
   return (
-    <Dialog open={open} onClose={onClose} width={520} title="新建用户" desc="普通用户仅能部署与查看授权的应用,并访问已授权数据资源"
+    <Dialog open={open} onClose={onClose} width={520} title="新建用户" desc="普通用户仅能部署与查看授权的应用,并访问已授权数据资源与服务器"
       foot={<React.Fragment>
         <Btn variant="ghost" onClick={onClose}>取消</Btn>
         <Btn variant="primary" icon="check" disabled={busy} onClick={submit}>{busy ? <Spinner size={12} /> : "创建"}</Btn>
@@ -199,6 +239,9 @@ function CreateUserDialog({ open, onClose, onCreated, apps }) {
         <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证。PostgreSQL/Kingbase 可见范围为整个库的所有 schema，实际权限由数据库账号决定；推荐资源使用只读账号">
           <DataResourceGrantPicker resources={resources} grants={drGrants} onChange={setDrGrants} />
         </Field>
+        <Field label="服务器运维授权" hint="可运维即能打开 Web SSH/SFTP；SSH 账号权限由远端决定，不提供假只读终端">
+          <ServerResourceGrantPicker resources={servers} grants={srvGrants} onChange={setSrvGrants} />
+        </Field>
       </div>
     </Dialog>
   );
@@ -208,7 +251,9 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
   const [p, setP] = React.useState("");
   const [appIds, setAppIds] = React.useState([]);
   const [drGrants, setDrGrants] = React.useState([]);
+  const [srvGrants, setSrvGrants] = React.useState([]);
   const [resources, setResources] = React.useState([]);
+  const [servers, setServers] = React.useState([]);
   const [busy, setBusy] = React.useState(false);
   React.useEffect(() => {
     if (open && user) {
@@ -217,8 +262,12 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
       setDrGrants([...(user.dataResourceGrants || [])].map((g) => ({
         resourceId: g.resourceId, accessMode: g.accessMode,
       })));
+      setSrvGrants([...(user.serverResourceGrants || [])].map((g) => ({
+        resourceId: g.resourceId,
+      })));
       setBusy(false);
       listDataResources().then(setResources).catch(() => setResources([]));
+      listServerResources().then((d) => setServers(d.resources || [])).catch(() => setServers([]));
     }
   }, [open, user]);
 
@@ -228,6 +277,7 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
       const payload = {
         appIds,
         dataResourceGrants: drGrants.map((g) => ({ resourceId: g.resourceId, accessMode: g.accessMode })),
+        serverResourceGrants: srvGrants.map((g) => ({ resourceId: g.resourceId })),
       };
       if (p.trim()) payload.password = p.trim();
       await updateUser(user.username, payload);
@@ -241,7 +291,7 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
 
   if (!user) return null;
   return (
-    <Dialog open={open} onClose={onClose} width={520} title={`编辑 · ${user.username}`} desc="可重置密码并调整应用与数据资源授权"
+    <Dialog open={open} onClose={onClose} width={520} title={`编辑 · ${user.username}`} desc="可重置密码并调整应用、数据资源与服务器运维授权"
       foot={<React.Fragment>
         <Btn variant="ghost" onClick={onClose}>取消</Btn>
         <Btn variant="primary" icon="check" disabled={busy} onClick={submit}>{busy ? <Spinner size={12} /> : "保存"}</Btn>
@@ -253,6 +303,9 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
         </Field>
         <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证。PostgreSQL/Kingbase 可见范围为整个库的所有 schema，实际权限由数据库账号决定；推荐资源使用只读账号">
           <DataResourceGrantPicker resources={resources} grants={drGrants} onChange={setDrGrants} />
+        </Field>
+        <Field label="服务器运维授权" hint="撤销后会立即终止该用户在对应服务器上的活动会话">
+          <ServerResourceGrantPicker resources={servers} grants={srvGrants} onChange={setSrvGrants} />
         </Field>
       </div>
     </Dialog>

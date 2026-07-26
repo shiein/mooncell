@@ -16,6 +16,8 @@ import { AgentsPage } from './pages/Agents.jsx';
 import { SystemPage } from './pages/System.jsx';
 import { DataResourcesPage } from './pages/DataResources.jsx';
 import { DataWorkspacePage } from './pages/DataWorkspace.jsx';
+import { ServerResourcesPage } from './pages/ServerResources.jsx';
+import { ServerWorkspacePage } from './pages/ServerWorkspace.jsx';
 import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
@@ -35,18 +37,41 @@ function App() {
   const [session, setSession] = React.useState(null);
   const [role, setRole] = React.useState("admin");
   const [view, setView] = React.useState("login");
+  // features 来自 /api/session 与 /api/login；开关未加载前 fail-closed
+  const [features, setFeatures] = React.useState({ serverOperations: false });
   const user = session || "admin";
 
+  // 独立工作台 hash：/#/server-operations/{id} — 不写入 mc_route
+  const [workspaceResourceId, setWorkspaceResourceId] = React.useState(() => {
+    const h = (typeof location !== "undefined" && location.hash) || "";
+    const m = h.match(/^#\/server-operations\/([^/?#]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  });
+  React.useEffect(() => {
+    const sync = () => {
+      const h = location.hash || "";
+      const m = h.match(/^#\/server-operations\/([^/?#]+)/);
+      setWorkspaceResourceId(m ? decodeURIComponent(m[1]) : null);
+    };
+    window.addEventListener("hashchange", sync);
+    sync();
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+
   // ---- route ----
-  // 非 admin 仅允许应用与数据资源相关页;初始化与切换时同步钳制。
-  const clampRoute = React.useCallback((r, roleNow) => {
+  // 非 admin 仅允许应用、数据资源与服务器运维相关页;初始化与切换时同步钳制。
+  const clampRoute = React.useCallback((r, roleNow, feat) => {
     if (!r) return { page: "apps" };
+    const f = feat || features;
+    if (r.page === "server-operations" && !(f && f.serverOperations)) {
+      return roleNow === "admin" ? { page: "overview" } : { page: "apps" };
+    }
     if (roleNow && roleNow !== "admin") {
-      const allowed = new Set(["apps", "app-detail", "data-resources", "data-workspace"]);
+      const allowed = new Set(["apps", "app-detail", "data-resources", "data-workspace", "server-operations"]);
       if (!allowed.has(r.page)) return { page: "apps" };
     }
     return r;
-  }, []);
+  }, [features]);
   const [route, setRoute] = React.useState(() => {
     try { return JSON.parse(localStorage.getItem("mc_route")) || { page: "overview" }; }
     catch (e) { return { page: "overview" }; }
@@ -58,10 +83,11 @@ function App() {
       tab: opts.tab || (page === "app-detail" ? (opts.tab || "overview") : undefined),
       resourceId: opts.resourceId,
       resource: opts.resource,
-    }, role);
+    }, role, features);
     setRoute(r);
     try {
       // 不把完整 resource 对象写入 localStorage（含敏感配置）
+      // 服务器工作台使用独立 hash，不写 mc_route
       const persist = { ...r };
       delete persist.resource;
       localStorage.setItem("mc_route", JSON.stringify(persist));
@@ -78,9 +104,11 @@ function App() {
     getSession().then((s) => {
       if (alive && s) {
         const r = s.role || "viewer";
+        const feat = s.features || { serverOperations: false };
         setSession(s.user);
         setRole(r);
-        setRoute((cur) => clampRoute(cur, r));
+        setFeatures(feat);
+        setRoute((cur) => clampRoute(cur, r, feat));
         setView("console");
       }
     });
@@ -96,6 +124,7 @@ function App() {
           setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
           setBackupRevision({});
           setRole("viewer");
+          setFeatures({ serverOperations: false });
           resetSessionRoute();
           setView("login");
           toast("会话已过期,请重新登录", { tone: "warn", icon: "alert" });
@@ -109,12 +138,12 @@ function App() {
   React.useEffect(() => {
     if (!session) return;
     setRoute((cur) => {
-      const next = clampRoute(cur, role);
+      const next = clampRoute(cur, role, features);
       if (next === cur || (next.page === cur.page && next.appId === cur.appId)) return cur;
       try { localStorage.setItem("mc_route", JSON.stringify(next)); } catch (e) {}
       return next;
     });
-  }, [session, role, clampRoute]);
+  }, [session, role, features, clampRoute]);
 
   // ---- domain state ----
   // 角色作用域数据默认空,登录后从后端权威水合。INITIAL_* 只作为 demo seed 发给后端,
@@ -387,11 +416,13 @@ function App() {
   const login = (res) => {
     if (!res || !res.user) return; // 防御:无后端返回不进入主壳
     const r = res.role || "viewer";
+    const feat = res.features || { serverOperations: false };
     // 先清空上一会话的角色数据,再切换身份；同一批 React 更新不会渲染旧账号数据。
     setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
     setBackupRevision({});
     setSession(res.user);
     setRole(r);
+    setFeatures(feat);
     resetSessionRoute(); // 认证边界不继承上一账号的数据资源/应用详情对象
     setView("console");
     toast(`欢迎回来,${res.user}`);
@@ -401,7 +432,7 @@ function App() {
     setApps([]); setReleases([]); setBackups([]); setCabinet([]); setAudit([]);
     setBackupRevision({});
     resetSessionRoute();
-    setSession(null); setRole("viewer"); setView("login");
+    setSession(null); setRole("viewer"); setFeatures({ serverOperations: false }); setView("login");
   };
 
   // ---- crumbs ----
@@ -412,6 +443,7 @@ function App() {
     route.page === "app-detail" ? [{ label: "应用", onClick: () => nav("apps") }, { label: detailApp ? detailApp.name : "详情" }] :
     route.page === "data-resources" ? [{ label: "数据资源" }] :
     route.page === "data-workspace" ? [{ label: "数据资源", onClick: () => nav("data-resources") }, { label: route.resource?.name || "工作台" }] :
+    route.page === "server-operations" ? [{ label: "服务器运维" }] :
     route.page === "cabinet" ? [{ label: "文件柜" }] :
     route.page === "users" ? [{ label: "用户管理" }] :
     route.page === "agents" ? [{ label: "Agent 管理" }] :
@@ -422,7 +454,27 @@ function App() {
     view !== "console" ? (view === "login" ? "登录" : "初始化向导") :
     route.page === "app-detail" ? `应用详情 · ${detailApp ? detailApp.name : ""}` :
     route.page === "data-workspace" ? `数据工作台 · ${route.resource?.name || ""}` :
+    route.page === "server-operations" ? "服务器运维" :
     ({ overview: "总览", apps: "应用列表", "data-resources": "数据资源", cabinet: "文件柜", audit: "审计日志", users: "用户管理", agents: "Agent 管理", system: "系统" })[route.page] || route.page;
+
+  // 工作台独立全页（已登录 + hash 匹配）
+  if (view === "console" && workspaceResourceId) {
+    return (
+      <MCStore.Provider value={store}>
+        <div data-screen-label="服务器工作台" style={{ height: "100%" }}>
+          <ServerWorkspacePage
+            resourceId={workspaceResourceId}
+            user={user}
+            theme={t.dark ? "dark" : "light"}
+            onTheme={() => setTweak("dark", !t.dark)}
+            onLogout={logout}
+          />
+        </div>
+        <ToastHost />
+        <ConfirmHost />
+      </MCStore.Provider>
+    );
+  }
 
   return (
     <MCStore.Provider value={store}>
@@ -431,7 +483,7 @@ function App() {
         {view === "console" ? (
           <Shell page={route.page} onNav={(p) => nav(p)} crumbs={crumbs}
             theme={t.dark ? "dark" : "light"} onTheme={() => setTweak("dark", !t.dark)}
-            user={user} role={role} onLogout={logout}>
+            user={user} role={role} onLogout={logout} features={features}>
             {route.page === "overview" ? <OverviewPage /> : null}
             {route.page === "apps" ? <AppsPage /> : null}
             {route.page === "app-detail" ? (
@@ -447,6 +499,7 @@ function App() {
             {route.page === "data-workspace" && !route.resource ? (
               <DataResourcesPage onOpenWorkspace={(res) => nav("data-workspace", { resourceId: res.id, resource: res })} />
             ) : null}
+            {route.page === "server-operations" ? <ServerResourcesPage /> : null}
             {route.page === "cabinet" ? <CabinetPage /> : null}
             {route.page === "audit" ? <AuditPage /> : null}
             {route.page === "users" ? <UsersPage /> : null}

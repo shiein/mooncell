@@ -44,13 +44,17 @@ async function logout() {
   } catch (e) { /* 忽略网络错误,前端无论如何清空会话 */ }
 }
 
-// 返回 { user, role },未登录返回 null
+// 返回 { user, role, features },未登录返回 null
 async function getSession() {
   try {
     const r = await fetch('/api/session', { credentials: 'same-origin' });
     if (!r.ok) return null;
     const d = await r.json();
-    return d.user ? { user: d.user, role: d.role || 'viewer' } : null;
+    return d.user ? {
+      user: d.user,
+      role: d.role || 'viewer',
+      features: d.features || { serverOperations: false },
+    } : null;
   } catch (e) {
     return null;
   }
