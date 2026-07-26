@@ -68,10 +68,18 @@ func (s *Service) InitUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.checkTransferLimits(user); err != nil {
+	tid := newID("tx")
+	newReservation, err := s.reserveTransfer(tid, user)
+	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
+	keepReservation := false
+	defer func() {
+		if newReservation && !keepReservation {
+			s.releaseTransfer(tid)
+		}
+	}()
 
 	remotePath := joinRemote(dir, body.Filename)
 	if st, err := sc.Stat(remotePath); err == nil && st != nil && !body.Overwrite {
@@ -92,7 +100,6 @@ func (s *Service) InitUpload(w http.ResponseWriter, r *http.Request) {
 	_ = f.Close()
 
 	now := time.Now().UnixMilli()
-	tid := newID("tx")
 	tr := FileTransfer{
 		ID:              tid,
 		ResourceID:      resourceID,
@@ -113,7 +120,7 @@ func (s *Service) InitUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, CodeDBError, "保存传输记录失败", true)
 		return
 	}
-	s.trackUpload(tid)
+	keepReservation = true
 
 	resName := resourceID
 	if res, found, _ := getResource(s.db, resourceID); found {
@@ -149,19 +156,6 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.Touch()
-	tr, found, err := getTransfer(s.db, tid)
-	if err != nil || !found {
-		writeErr(w, http.StatusNotFound, CodeNotFound, "传输不存在", false)
-		return
-	}
-	if tr.Username != user || tr.ResourceID != resourceID {
-		writeErr(w, http.StatusNotFound, CodeNotFound, "传输不存在", false)
-		return
-	}
-	if tr.State != TransferUploading {
-		writeErr(w, http.StatusConflict, CodeResourceChanged, "传输状态不可写入", false)
-		return
-	}
 
 	offsetStr := r.URL.Query().Get("offset")
 	offset, err := strconv.ParseInt(offsetStr, 10, 64)
@@ -174,9 +168,17 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	tr, _, err = getTransfer(s.db, tid)
+	tr, found, err := getTransfer(s.db, tid)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, CodeDBError, "读取传输失败", true)
+		return
+	}
+	if !found || tr.Username != user || tr.ResourceID != resourceID {
+		writeErr(w, http.StatusNotFound, CodeNotFound, "传输不存在", false)
+		return
+	}
+	if tr.State != TransferUploading {
+		writeErr(w, http.StatusConflict, CodeResourceChanged, "传输状态不可写入", false)
 		return
 	}
 	if offset != tr.TransferredSize {
@@ -187,28 +189,21 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		writeErrOffset(w, http.StatusConflict, CodeChunkOffsetMismatch, "分块 offset 不一致", tr.TransferredSize)
 		return
 	}
-
-	// 单块硬限制：MaxBytesReader 限制为 ChunkSize；再读 1 字节确认没有更多数据。
-	r.Body = http.MaxBytesReader(w, r.Body, int64(ChunkSize))
-	buf := make([]byte, ChunkSize)
-	n, readErr := io.ReadFull(r.Body, buf)
-	if readErr == io.ErrUnexpectedEOF || readErr == io.EOF {
-		buf = buf[:n]
-		readErr = nil
+	if _, err := s.reserveTransfer(tid, user); err != nil {
+		writeAPIError(w, err)
+		return
 	}
+
+	// 允许实际读取第 ChunkSize+1 字节，明确判断超限；不能只读满 8 MiB 后假定 EOF。
+	buf, readErr := readUploadChunk(w, r)
 	if readErr != nil {
-		msg := readErr.Error()
-		if errors.Is(readErr, http.ErrBodyReadAfterClose) ||
-			strings.Contains(msg, "request body too large") ||
-			strings.Contains(msg, "http: request body too large") {
+		if errors.Is(readErr, errChunkTooLarge) {
 			writeErr(w, http.StatusRequestEntityTooLarge, CodeTransferTooLarge, "分块超过 8 MiB 上限", false)
 			return
 		}
 		writeErr(w, http.StatusBadRequest, CodeBadRequest, "读取分块失败", true)
 		return
 	}
-	// 确认 body 已耗尽：再读应得到 EOF；若仍有字节说明被截断前已满（MaxBytesReader 会在超过时错误）。
-	// 上面 MaxBytesReader(ChunkSize) 在第 ChunkSize+1 字节会返回错误，不会静默成功。
 	if len(buf) == 0 {
 		writeErr(w, http.StatusBadRequest, CodeValidation, "空分块", false)
 		return
@@ -220,8 +215,8 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 块校验：要求 X-Chunk-SHA256，防止静默损坏推进 offset。
 	want := strings.TrimSpace(r.Header.Get("X-Chunk-SHA256"))
-	if want == "" {
-		writeErr(w, http.StatusBadRequest, CodeValidation, "缺少 X-Chunk-SHA256", false)
+	if !validSHA256Hex(want) {
+		writeErr(w, http.StatusBadRequest, CodeValidation, "缺少或无效的 X-Chunk-SHA256", false)
 		return
 	}
 	sum := sha256.Sum256(buf)
@@ -247,7 +242,8 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, CodeSSHConnectionFailed, "定位远端临时文件失败", true)
 		return
 	}
-	if _, err := f.Write(buf); err != nil {
+	written, err := f.Write(buf)
+	if err != nil || written != len(buf) {
 		_ = f.Truncate(offset)
 		writeErr(w, http.StatusBadGateway, CodeSSHConnectionFailed, "写入远端失败", true)
 		return
@@ -255,7 +251,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UnixMilli()
 	newSize := offset + int64(len(buf))
-	if err := updateTransferProgress(s.db, tid, newSize, now); err != nil {
+	if err := recordTransferChunk(s.db, tid, offset, int64(len(buf)), got, newSize, now); err != nil {
 		_ = f.Truncate(offset)
 		writeErr(w, http.StatusInternalServerError, CodeDBError, "更新进度失败", true)
 		return
@@ -298,6 +294,7 @@ func (s *Service) ListActiveUploads(w http.ResponseWriter, r *http.Request) {
 			"expectedSize":    t.ExpectedSize,
 			"transferredSize": t.TransferredSize,
 			"nextOffset":      t.TransferredSize,
+			"chunkSize":       ChunkSize,
 			"overwrite":       t.Overwrite,
 			"state":           t.State,
 			"expiresAt":       t.ExpiresAt,
@@ -335,6 +332,7 @@ func (s *Service) GetUploadStatus(w http.ResponseWriter, r *http.Request) {
 		"expectedSize":    tr.ExpectedSize,
 		"transferredSize": tr.TransferredSize,
 		"nextOffset":      tr.TransferredSize,
+		"chunkSize":       ChunkSize,
 		"filename":        path.Base(tr.RemotePath),
 		"directory":       path.Dir(tr.RemotePath),
 		"overwrite":       tr.Overwrite,
@@ -358,6 +356,10 @@ func (s *Service) ResumeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.Touch()
+	lock := s.uploadLock(tid)
+	lock.Lock()
+	defer lock.Unlock()
+
 	tr, found, err := getTransfer(s.db, tid)
 	if err != nil || !found || tr.Username != user || tr.ResourceID != resourceID {
 		writeErr(w, http.StatusNotFound, CodeNotFound, "传输不存在", false)
@@ -367,15 +369,45 @@ func (s *Service) ResumeUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, CodeResourceChanged, "传输不可恢复", false)
 		return
 	}
-	// 可选：客户端声明本地文件大小，必须与 expected 一致。
-	var body struct {
-		LocalSize int64 `json:"localSize"`
+	if tr.ExpiresAt > 0 && tr.ExpiresAt <= time.Now().UnixMilli() {
+		writeErr(w, http.StatusConflict, CodeResourceChanged, "传输已过期，请丢弃后重新上传", false)
+		return
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	if body.LocalSize > 0 && body.LocalSize != tr.ExpectedSize {
+	// 客户端须重新计算已上传前缀每块摘要，证明选择的是同一份本地文件。
+	var body struct {
+		LocalSize    int64              `json:"localSize"`
+		PrefixChunks []UploadChunkProof `json:"prefixChunks"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, CodeBadRequest, "请求格式错误", false)
+		return
+	}
+	if body.LocalSize != tr.ExpectedSize {
 		writeErr(w, http.StatusUnprocessableEntity, CodeRemotePartChanged, "本地文件大小与上传记录不一致", false)
 		return
 	}
+	storedChunks, err := listTransferChunks(s.db, tid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, CodeDBError, "读取分块身份失败", true)
+		return
+	}
+	if err := validateResumeProof(tr.TransferredSize, storedChunks, body.PrefixChunks); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+
+	newReservation, err := s.reserveTransfer(tid, user)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	keepReservation := false
+	defer func() {
+		if newReservation && !keepReservation {
+			s.releaseTransfer(tid)
+		}
+	}()
 
 	sc, err := sess.SFTP()
 	if err != nil {
@@ -391,7 +423,7 @@ func (s *Service) ResumeUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, CodeRemotePartChanged, "远端临时文件与记录不一致", false)
 		return
 	}
-	s.trackUpload(tid)
+	keepReservation = true
 	writeOK(w, map[string]any{
 		"transferId":      tr.ID,
 		"chunkSize":       ChunkSize,
@@ -460,13 +492,19 @@ func (s *Service) CompleteUpload(w http.ResponseWriter, r *http.Request) {
 	_, targetErr := sc.Stat(tr.RemotePath)
 	targetExists := targetErr == nil
 	if targetExists && !tr.Overwrite {
-		_ = updateTransferState(s.db, tid, TransferUploading, now)
+		if err := updateTransferState(s.db, tid, TransferUploading, now); err != nil {
+			writeErr(w, http.StatusInternalServerError, CodeDBError, "恢复传输状态失败", true)
+			return
+		}
 		writeErr(w, http.StatusConflict, CodeRemoteTargetExists, "目标文件已存在且未允许覆盖", false)
 		return
 	}
 	if targetExists {
 		if err := sc.PosixRename(tr.RemoteTempPath, tr.RemotePath); err != nil {
-			_ = updateTransferState(s.db, tid, TransferUploading, now)
+			if stateErr := updateTransferState(s.db, tid, TransferUploading, now); stateErr != nil {
+				writeErr(w, http.StatusInternalServerError, CodeDBError, "恢复传输状态失败", true)
+				return
+			}
 			writeErr(w, http.StatusUnprocessableEntity, CodeAtomicReplaceUnsupp,
 				"远端不支持安全覆盖，已保留原文件", false)
 			return
@@ -474,7 +512,10 @@ func (s *Service) CompleteUpload(w http.ResponseWriter, r *http.Request) {
 	} else {
 		if err := sc.Rename(tr.RemoteTempPath, tr.RemotePath); err != nil {
 			if err2 := sc.PosixRename(tr.RemoteTempPath, tr.RemotePath); err2 != nil {
-				_ = updateTransferState(s.db, tid, TransferUploading, now)
+				if stateErr := updateTransferState(s.db, tid, TransferUploading, now); stateErr != nil {
+					writeErr(w, http.StatusInternalServerError, CodeDBError, "恢复传输状态失败", true)
+					return
+				}
 				writeErr(w, http.StatusBadGateway, CodeSSHConnectionFailed, "重命名完成失败", true)
 				return
 			}
@@ -483,10 +524,11 @@ func (s *Service) CompleteUpload(w http.ResponseWriter, r *http.Request) {
 
 	if err := updateTransferState(s.db, tid, TransferCompleted, now); err != nil {
 		// 远端已 rename 成功但元数据失败：仍返回错误，避免伪报成功；part 已不存在。
+		s.releaseTransfer(tid)
 		writeErr(w, http.StatusInternalServerError, CodeDBError, "远端文件已就绪，但更新传输记录失败", false)
 		return
 	}
-	s.untrackUpload(tid)
+	s.releaseTransfer(tid)
 
 	resName := resourceID
 	if res, found, _ := getResource(s.db, resourceID); found {
@@ -524,16 +566,31 @@ func (s *Service) CancelUpload(w http.ResponseWriter, r *http.Request) {
 		sess.Touch()
 	}
 
+	lock := s.uploadLock(tid)
+	lock.Lock()
+	defer lock.Unlock()
+
 	tr, found, err := getTransfer(s.db, tid)
 	if err != nil || !found || tr.Username != user || tr.ResourceID != resourceID {
 		writeErr(w, http.StatusNotFound, CodeNotFound, "传输不存在", false)
 		return
 	}
+	switch tr.State {
+	case TransferCancelled:
+		s.releaseTransfer(tid)
+		writeOK(w, map[string]any{"ok": true, "state": TransferCancelled})
+		return
+	case TransferUploading, TransferCleanupPending:
+		// 活动上传可取消；cleanup_pending 可在新会话中重试精确清理。
+	default:
+		writeErr(w, http.StatusConflict, CodeResourceChanged, "当前传输状态不可取消", false)
+		return
+	}
 	now := time.Now().UnixMilli()
-	cleaned := false
+	cleaned := tr.RemoteTempPath == ""
 	if sess != nil && tr.RemoteTempPath != "" {
 		if sc, err := sess.SFTP(); err == nil {
-			if err := sc.Remove(tr.RemoteTempPath); err == nil {
+			if err := sc.Remove(tr.RemoteTempPath); err == nil || os.IsNotExist(err) {
 				cleaned = true
 			}
 		}
@@ -542,11 +599,16 @@ func (s *Service) CancelUpload(w http.ResponseWriter, r *http.Request) {
 	if !cleaned && tr.RemoteTempPath != "" {
 		state = TransferCleanupPending
 	}
-	if err := updateTransferState(s.db, tid, state, now); err != nil {
+	updated, err := updateTransferStateFrom(s.db, tid, tr.State, state, now)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, CodeDBError, "更新取消状态失败", true)
 		return
 	}
-	s.untrackUpload(tid)
+	if !updated {
+		writeErr(w, http.StatusConflict, CodeResourceChanged, "传输状态已变化，请刷新后重试", true)
+		return
+	}
+	s.releaseTransfer(tid)
 
 	resName := resourceID
 	if res, found, _ := getResource(s.db, resourceID); found {
@@ -556,37 +618,41 @@ func (s *Service) CancelUpload(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"ok": true, "state": state})
 }
 
-func (s *Service) checkTransferLimits(user string) error {
+// reserveTransfer 原子校验并占用文件传输槽。相同 id/owner 的恢复视为已占用成功。
+func (s *Service) reserveTransfer(id, user string) (bool, error) {
 	s.transferMu.Lock()
 	defer s.transferMu.Unlock()
-	if len(s.activeUploads) >= s.cfg.SFTPMaxTransfersTotal {
-		return apiErr(CodeTransferLimit, "全局文件传输数已达上限", true)
+	if owner, ok := s.activeTransfers[id]; ok {
+		if owner == user {
+			return false, nil
+		}
+		return false, apiErr(CodeTransferLimit, "文件传输已被其他用户占用", true)
 	}
-	var n int
-	_ = s.db.QueryRow(
-		`SELECT COUNT(*) FROM server_file_transfers WHERE username=? AND state=?`,
-		user, TransferUploading).Scan(&n)
+	if len(s.activeTransfers) >= s.cfg.SFTPMaxTransfersTotal {
+		return false, apiErr(CodeTransferLimit, "全局文件传输数已达上限", true)
+	}
+	n := 0
+	for _, owner := range s.activeTransfers {
+		if owner == user {
+			n++
+		}
+	}
 	if n >= s.cfg.SFTPMaxTransfersPerUser {
-		return apiErr(CodeTransferLimit, "您的文件传输数已达上限", true)
+		return false, apiErr(CodeTransferLimit, "您的文件传输数已达上限", true)
 	}
-	return nil
+	s.activeTransfers[id] = user
+	return true, nil
 }
 
 // tryBeginDownload 占用一个下载并发槽；失败返回错误。
-func (s *Service) tryBeginDownload(user string) error {
-	return s.checkTransferLimits(user) // 与上传共用传输限额语义
+func (s *Service) tryBeginDownload(id, user string) error {
+	_, err := s.reserveTransfer(id, user)
+	return err
 }
 
-func (s *Service) trackUpload(tid string) {
+func (s *Service) releaseTransfer(tid string) {
 	s.transferMu.Lock()
-	s.activeUploads[tid] = struct{}{}
-	s.transferMu.Unlock()
-}
-
-func (s *Service) untrackUpload(tid string) {
-	s.transferMu.Lock()
-	delete(s.activeUploads, tid)
-	delete(s.uploadLocks, tid)
+	delete(s.activeTransfers, tid)
 	s.transferMu.Unlock()
 }
 
@@ -597,4 +663,57 @@ func (s *Service) uploadLock(tid string) *sync.Mutex {
 		s.uploadLocks[tid] = &sync.Mutex{}
 	}
 	return s.uploadLocks[tid]
+}
+
+func validSHA256Hex(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+var errChunkTooLarge = errors.New("upload chunk too large")
+
+func readUploadChunk(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	if r.ContentLength > int64(ChunkSize) {
+		return nil, errChunkTooLarge
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, int64(ChunkSize)+1)
+	buf, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return nil, errChunkTooLarge
+		}
+		return nil, err
+	}
+	if len(buf) > ChunkSize {
+		return nil, errChunkTooLarge
+	}
+	return buf, nil
+}
+
+func validateResumeProof(transferred int64, stored, provided []UploadChunkProof) error {
+	if len(stored) != len(provided) {
+		return apiErr(CodeRemotePartChanged, "本地文件身份与上传记录不一致", false)
+	}
+	var covered int64
+	for i := range stored {
+		want := stored[i]
+		got := provided[i]
+		if want.Offset != covered || want.Size <= 0 || want.Size > ChunkSize ||
+			want.Offset+want.Size > transferred || !validSHA256Hex(want.SHA256) {
+			return apiErr(CodeRemotePartChanged, "服务端分块身份记录不完整，请丢弃后重新上传", false)
+		}
+		if got.Offset != want.Offset || got.Size != want.Size ||
+			!strings.EqualFold(got.SHA256, want.SHA256) {
+			return apiErr(CodeRemotePartChanged, "所选本地文件不是原上传文件", false)
+		}
+		covered += want.Size
+	}
+	if covered != transferred {
+		return apiErr(CodeRemotePartChanged, "服务端分块身份记录不完整，请丢弃后重新上传", false)
+	}
+	return nil
 }

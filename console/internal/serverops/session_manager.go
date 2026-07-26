@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/crypto/ssh"
 	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 // Session 是一次用户到远端的运行时 SSH 连接（含可选 SFTP 子系统）。
@@ -69,6 +69,10 @@ type SessionManager struct {
 
 	// 会话创建时快照的用户代际。
 	sessionUserGen map[string]uint64
+
+	// SSH 握手可能持续数秒，握手前先占位，避免并发请求同时越过会话上限。
+	pendingTotal  int
+	pendingByUser map[string]int
 }
 
 func newSessionManager() *SessionManager {
@@ -78,6 +82,7 @@ func newSessionManager() *SessionManager {
 		grantGen:       map[string]uint64{},
 		userGen:        map[string]uint64{},
 		sessionUserGen: map[string]uint64{},
+		pendingByUser:  map[string]int{},
 	}
 }
 
@@ -174,7 +179,59 @@ func (m *SessionManager) CountUser(username string) int {
 	return n
 }
 
-// Register 注册会话；调用前应已完成 SSH 握手与代际复核。
+// Reserve 在 SSH 握手前原子占用会话槽。
+func (m *SessionManager) Reserve(username string, maxTotal, maxPerUser int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sessions)+m.pendingTotal >= maxTotal {
+		return apiErr(CodeSessionLimit, "全局 SSH 会话数已达上限", true)
+	}
+	activeUser := 0
+	for _, s := range m.sessions {
+		if s.Username == username {
+			activeUser++
+		}
+	}
+	if activeUser+m.pendingByUser[username] >= maxPerUser {
+		return apiErr(CodeSessionLimit, "您的 SSH 会话数已达上限", true)
+	}
+	m.pendingTotal++
+	m.pendingByUser[username]++
+	return nil
+}
+
+// ReleaseReservation 释放失败或取消的握手占位。
+func (m *SessionManager) ReleaseReservation(username string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releaseReservationLocked(username)
+}
+
+func (m *SessionManager) releaseReservationLocked(username string) {
+	if m.pendingByUser[username] <= 0 {
+		return
+	}
+	m.pendingByUser[username]--
+	if m.pendingByUser[username] == 0 {
+		delete(m.pendingByUser, username)
+	}
+	m.pendingTotal--
+}
+
+// RegisterReserved 将握手占位原子转换为活动会话。
+func (m *SessionManager) RegisterReserved(s *Session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releaseReservationLocked(s.Username)
+	s.mgr = m
+	if s.lastActivityUnix.Load() == 0 {
+		s.lastActivityUnix.Store(time.Now().Unix())
+	}
+	m.sessions[s.ID] = s
+	m.sessionUserGen[s.ID] = m.userGen[s.Username]
+}
+
+// Register 仅供无需握手占位的内部测试使用。
 func (m *SessionManager) Register(s *Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

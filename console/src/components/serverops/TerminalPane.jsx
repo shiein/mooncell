@@ -67,11 +67,21 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
+      let binarySendChain = Promise.resolve();
       const sendBinary = (u8) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        // 背压：缓冲过大时仍发送但由浏览器排队；调用方小块写入
-        if (ws.bufferedAmount > 4 * 1024 * 1024) return;
-        ws.send(u8);
+        // 拷贝后串行发送；缓冲过高时等待下降，不能静默丢弃 ZMODEM 帧。
+        const data = u8.slice();
+        const send = async () => {
+          while (!disposed && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > 4 * 1024 * 1024) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          if (disposed || ws.readyState !== WebSocket.OPEN) {
+            throw new Error('终端连接已关闭');
+          }
+          ws.send(data);
+        };
+        binarySendChain = binarySendChain.then(send);
+        return binarySendChain;
       };
 
       zmBridge = createZmodemBridge({
@@ -150,9 +160,8 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
 
       term.onData((data) => {
         if (ws.readyState !== WebSocket.OPEN) return;
-        if (ws.bufferedAmount > 2 * 1024 * 1024) return;
         // ZMODEM 传输期间仍允许键盘（取消等）；协议数据由 bridge 发 binary
-        ws.send(new TextEncoder().encode(data));
+        sendBinary(new TextEncoder().encode(data)).catch(() => {});
       });
 
       term.onResize(({ cols, rows }) => {

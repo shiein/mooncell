@@ -45,6 +45,9 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// WebSocket 已 hijack，不继续依赖 request context；用专用 context 统一中断读写。
+	ctx, cancelWS := context.WithCancel(context.Background())
+	defer cancelWS()
 	// WS 结束后必须释放 PTY；若客户端已走，关闭整会话避免占限额（SFTP 同会话一并结束）。
 	// 浏览器正常卸载会再调 DELETE session；此处保证异常断线也能回收。
 	defer func() {
@@ -87,6 +90,8 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 				// 用户若仍需 SFTP，须保持终端 WS 或重新创建 session。
 				sess.Close()
 			}
+			// 远端 exit、撤权、idle/绝对超时都必须立即打断 conn.Read。
+			cancelWS()
 		})
 	}
 	defer finish(true)
@@ -127,7 +132,6 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		finish(true)
 	}()
 
-	ctx := r.Context()
 	_ = writeWSJSON(ctx, conn, map[string]any{"type": "ready"})
 
 	// 有界输出队列：慢客户端关闭会话，避免无限堆内存。

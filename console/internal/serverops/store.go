@@ -191,6 +191,11 @@ func deleteResource(db *sql.DB, id string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`DELETE FROM server_file_transfer_chunks
+		 WHERE transfer_id IN (SELECT id FROM server_file_transfers WHERE resource_id = ?)`, id); err != nil {
+		return err
+	}
 	for _, q := range []string{
 		"DELETE FROM server_resource_grants WHERE resource_id = ?",
 		"DELETE FROM server_file_transfers WHERE resource_id = ?",
@@ -329,15 +334,75 @@ func getTransfer(db *sql.DB, id string) (FileTransfer, bool, error) {
 	return t, err == nil, err
 }
 
-func updateTransferProgress(db *sql.DB, id string, transferred int64, now int64) error {
-	_, err := db.Exec(`UPDATE server_file_transfers SET transferred_size=?, updated_at=? WHERE id=?`,
-		transferred, now, id)
-	return err
+// recordTransferChunk 在同一事务中持久化块身份并推进权威 offset。
+// 只有远端完整写入后才能调用；事务失败时调用方须 truncate 远端 part 回旧 offset。
+func recordTransferChunk(db *sql.DB, id string, offset, size int64, sha256 string, transferred, now int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO server_file_transfer_chunks(transfer_id, chunk_offset, chunk_size, sha256)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(transfer_id, chunk_offset)
+		 DO UPDATE SET chunk_size=excluded.chunk_size, sha256=excluded.sha256`,
+		id, offset, size, sha256); err != nil {
+		return err
+	}
+	res, err := tx.Exec(
+		`UPDATE server_file_transfers
+		 SET transferred_size=?, updated_at=?
+		 WHERE id=? AND state=? AND transferred_size=?`,
+		transferred, now, id, TransferUploading, offset)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return apiErr(CodeResourceChanged, "传输状态或 offset 已变化", true)
+	}
+	return tx.Commit()
+}
+
+func listTransferChunks(db *sql.DB, transferID string) ([]UploadChunkProof, error) {
+	rows, err := db.Query(
+		`SELECT chunk_offset, chunk_size, sha256
+		 FROM server_file_transfer_chunks
+		 WHERE transfer_id=?
+		 ORDER BY chunk_offset`, transferID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UploadChunkProof
+	for rows.Next() {
+		var p UploadChunkProof
+		if err := rows.Scan(&p.Offset, &p.Size, &p.SHA256); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func updateTransferState(db *sql.DB, id, state string, now int64) error {
 	_, err := db.Exec(`UPDATE server_file_transfers SET state=?, updated_at=? WHERE id=?`, state, now, id)
 	return err
+}
+
+func updateTransferStateFrom(db *sql.DB, id, from, to string, now int64) (bool, error) {
+	res, err := db.Exec(
+		`UPDATE server_file_transfers SET state=?, updated_at=? WHERE id=? AND state=?`,
+		to, now, id, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // listActiveTransfers 列出用户在资源上可续传的 uploading 记录（不含 cleanup_pending）。

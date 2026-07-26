@@ -86,11 +86,19 @@ type FileTransfer struct {
 	ExpectedSize    int64  `json:"expectedSize"`
 	TransferredSize int64  `json:"transferredSize"`
 	// Overwrite 初始化时持久化；完成阶段必须按此策略 re-check，禁止竞态覆盖。
-	Overwrite       bool   `json:"overwrite"`
-	State           string `json:"state"`
-	CreatedAt       int64  `json:"createdAt"`
-	UpdatedAt       int64  `json:"updatedAt"`
-	ExpiresAt       int64  `json:"expiresAt"`
+	Overwrite bool   `json:"overwrite"`
+	State     string `json:"state"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+	ExpiresAt int64  `json:"expiresAt"`
+}
+
+// UploadChunkProof 是已确认上传块的持久化身份。
+// 恢复上传时，客户端必须重新计算本地已上传前缀的每块摘要并逐项匹配。
+type UploadChunkProof struct {
+	Offset int64  `json:"offset"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
 // HostKeyProbeResult 是探测草稿指纹的响应（不写库）。

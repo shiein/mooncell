@@ -60,15 +60,17 @@ func (s *Service) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 会话数限额。
-	if s.sess.Count() >= s.cfg.MaxSessionsTotal {
-		writeErr(w, http.StatusTooManyRequests, CodeSessionLimit, "全局 SSH 会话数已达上限", true)
+	// SSH 握手前原子占位；失败路径释放，成功时与注册原子转换。
+	if err := s.sess.Reserve(user, s.cfg.MaxSessionsTotal, s.cfg.MaxSessionsPerUser); err != nil {
+		writeAPIError(w, err)
 		return
 	}
-	if s.sess.CountUser(user) >= s.cfg.MaxSessionsPerUser {
-		writeErr(w, http.StatusTooManyRequests, CodeSessionLimit, "您的 SSH 会话数已达上限", true)
-		return
-	}
+	reserved := true
+	defer func() {
+		if reserved {
+			s.sess.ReleaseReservation(user)
+		}
+	}()
 
 	// 连接前快照代际。
 	rGen := s.sess.ResourceGeneration(resourceID)
@@ -126,8 +128,13 @@ func (s *Service) CreateSession(w http.ResponseWriter, r *http.Request) {
 		ctx:          ctx,
 	}
 	sess.lastActivityUnix.Store(now.Unix())
-	s.sess.Register(sess)
+	s.sess.RegisterReserved(sess)
+	reserved = false
 	s.auditLog(user, "SSH 连接", res.Name, "成功")
+
+	// 不保存密码，待清理 part 只能复用本次成功认证的 SFTP 连接精确处理。
+	// 清理失败不伪装为连接失败，记录保留供下次重试。
+	s.cleanupPendingTransfers(sess)
 
 	// 主动活动：滑动 Mooncell 登录会话。
 	if s.touch != nil {

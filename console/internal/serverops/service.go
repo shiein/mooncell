@@ -5,6 +5,7 @@ package serverops
 import (
 	"database/sql"
 	"log"
+	"os"
 	"sync"
 	"time"
 )
@@ -18,21 +19,21 @@ type TouchSession func(username string)
 
 // Service 持有服务器运维模块的运行时依赖。
 type Service struct {
-	db     *sql.DB
-	cfg    Config
-	audit  AuditFunc
-	valid  SessionValidator
-	touch  TouchSession
-	sess   *SessionManager
+	db    *sql.DB
+	cfg   Config
+	audit AuditFunc
+	valid SessionValidator
+	touch TouchSession
+	sess  *SessionManager
 
 	// 密码失败限速：(user+"\x00"+resource+"\x00"+ip) → 时间戳列表。
 	authFailMu sync.Mutex
 	authFails  map[string][]time.Time
 
 	// 活动传输计数（内存），配合 SQLite 元数据。
-	transferMu    sync.Mutex
-	activeUploads map[string]struct{} // transferId
-	uploadLocks   map[string]*sync.Mutex
+	transferMu      sync.Mutex
+	activeTransfers map[string]string // transferId/downloadId -> Mooncell username
+	uploadLocks     map[string]*sync.Mutex
 
 	closed bool
 	stopCh chan struct{}
@@ -43,13 +44,13 @@ type Service struct {
 func NewService(db *sql.DB, cfg Config) *Service {
 	cfg.Normalize()
 	return &Service{
-		db:            db,
-		cfg:           cfg,
-		sess:          newSessionManager(),
-		authFails:     map[string][]time.Time{},
-		activeUploads: map[string]struct{}{},
-		uploadLocks:   map[string]*sync.Mutex{},
-		stopCh:        make(chan struct{}),
+		db:              db,
+		cfg:             cfg,
+		sess:            newSessionManager(),
+		authFails:       map[string][]time.Time{},
+		activeTransfers: map[string]string{},
+		uploadLocks:     map[string]*sync.Mutex{},
+		stopCh:          make(chan struct{}),
 	}
 }
 
@@ -133,8 +134,7 @@ func (s *Service) InvalidateResource(resourceID string) {
 
 func (s *Service) expireStaleTransfers() {
 	now := time.Now().UnixMilli()
-	// 仅将 uploading 标为 expired，并移出内存 activeUploads。
-	// cleanup_pending 必须保留，等待下次成功连接后按记录精确删远端 part，不得改成 expired。
+	// 过期 uploading 转为 cleanup_pending，并移出内存活动槽。
 	rows, err := s.db.Query(
 		`SELECT id FROM server_file_transfers WHERE state=? AND expires_at > 0 AND expires_at < ?`,
 		TransferUploading, now)
@@ -156,19 +156,70 @@ func (s *Service) expireStaleTransfers() {
 		return
 	}
 	for _, id := range ids {
-		if _, err := s.db.Exec(
-			`UPDATE server_file_transfers SET state=?, updated_at=? WHERE id=? AND state=?`,
-			TransferExpired, now, id, TransferUploading); err != nil {
-			log.Printf("[serverops] 标记过期传输失败 id=%s: %v", id, err)
+		lock := s.uploadLock(id)
+		lock.Lock()
+		tr, found, err := getTransfer(s.db, id)
+		if err != nil || !found || tr.State != TransferUploading ||
+			tr.ExpiresAt <= 0 || tr.ExpiresAt >= now {
+			lock.Unlock()
 			continue
 		}
-		// 过期后远端 part 无法无密码清理 → 转为 cleanup_pending 等待精确清理
-		_, _ = s.db.Exec(
-			`UPDATE server_file_transfers SET state=? WHERE id=? AND state=? AND remote_temp_path != ''`,
-			TransferCleanupPending, id, TransferExpired)
-		s.untrackUpload(id)
+		next := TransferExpired
+		if tr.RemoteTempPath != "" {
+			next = TransferCleanupPending
+		}
+		updated, err := updateTransferStateFrom(s.db, id, TransferUploading, next, now)
+		if err != nil {
+			log.Printf("[serverops] 标记过期传输失败 id=%s: %v", id, err)
+		} else if updated {
+			s.releaseTransfer(id)
+		}
+		lock.Unlock()
 	}
 	log.Printf("[serverops] 处理过期上传 %d 条", len(ids))
+}
+
+// cleanupPendingTransfers 使用本次已认证 SSH session 精确清理由数据库记录的远端 part。
+// 失败记录保持 cleanup_pending，供下一次成功连接继续重试。
+func (s *Service) cleanupPendingTransfers(sess *Session) {
+	if sess == nil || sess.closed.Load() {
+		return
+	}
+	pending, err := listCleanupPending(s.db, sess.ResourceID)
+	if err != nil || len(pending) == 0 {
+		if err != nil {
+			log.Printf("[serverops] 查询待清理上传失败 resource=%s: %v", sess.ResourceID, err)
+		}
+		return
+	}
+	sc, err := sess.SFTP()
+	if err != nil {
+		log.Printf("[serverops] 待清理上传无法打开 SFTP resource=%s", sess.ResourceID)
+		return
+	}
+	for _, item := range pending {
+		lock := s.uploadLock(item.ID)
+		lock.Lock()
+		current, found, err := getTransfer(s.db, item.ID)
+		if err != nil || !found || current.ResourceID != sess.ResourceID ||
+			current.State != TransferCleanupPending ||
+			!isManagedUploadTemp(current.RemotePath, current.RemoteTempPath) {
+			lock.Unlock()
+			continue
+		}
+		if err := sc.Remove(current.RemoteTempPath); err != nil && !os.IsNotExist(err) {
+			lock.Unlock()
+			continue
+		}
+		updated, err := updateTransferStateFrom(
+			s.db, current.ID, TransferCleanupPending, TransferCancelled, time.Now().UnixMilli())
+		if err != nil {
+			log.Printf("[serverops] 更新待清理上传状态失败 id=%s: %v", current.ID, err)
+		} else if updated {
+			s.releaseTransfer(current.ID)
+		}
+		lock.Unlock()
+	}
 }
 
 // checkAuthRateLimit 密码失败限速；超过返回错误。

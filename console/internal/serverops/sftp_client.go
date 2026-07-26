@@ -65,6 +65,18 @@ func uploadTempName(filename, random string) string {
 	return "." + filename + ".mooncell-upload-" + random + ".part"
 }
 
+// isManagedUploadTemp 只认可由本模块为正式目标生成的同目录 part 路径。
+// cleanup_pending 清理不得接受通配符或数据库中任意不匹配的路径。
+func isManagedUploadTemp(remotePath, tempPath string) bool {
+	if remotePath == "" || tempPath == "" || path.Dir(remotePath) != path.Dir(tempPath) {
+		return false
+	}
+	base := path.Base(tempPath)
+	prefix := "." + path.Base(remotePath) + ".mooncell-upload-"
+	return strings.HasPrefix(base, prefix) && strings.HasSuffix(base, ".part") &&
+		len(base) > len(prefix)+len(".part")
+}
+
 func padOctal(v uint32, width int) string {
 	const digits = "01234567"
 	if width <= 0 {

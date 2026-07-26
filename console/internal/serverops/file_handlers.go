@@ -121,14 +121,13 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.Touch()
-	if err := s.tryBeginDownload(user); err != nil {
+	// 下载 id 在检查时即原子占槽，避免并发请求同时越过全局/用户限制。
+	dlID := newID("dl")
+	if err := s.tryBeginDownload(dlID, user); err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	// 下载用临时 id 占槽，结束时释放（与上传 activeUploads 共用全局并发语义的简化实现）。
-	dlID := newID("dl")
-	s.trackUpload(dlID)
-	defer s.untrackUpload(dlID)
+	defer s.releaseTransfer(dlID)
 
 	sc, err := sess.SFTP()
 	if err != nil {

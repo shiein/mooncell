@@ -16,7 +16,7 @@ const DETECT_LOOKAHEAD = 8;
 
 /**
  * @param {object} opts
- * @param {(u8: Uint8Array) => void} opts.sendToRemote 写入 WebSocket 二进制
+ * @param {(u8: Uint8Array) => Promise<void>} opts.sendToRemote 写入 WebSocket 二进制
  * @param {(u8: Uint8Array) => void} opts.writeToTerm 写入 xterm（非 ZMODEM 数据）
  * @param {number} opts.maxBytes zmodem 单次传输上限
  * @param {(info: {name: string, size: number, direction: string}) => void} [opts.onStart]
@@ -40,9 +40,10 @@ export function createZmodemBridge(opts) {
   let ready = false;
   let loading = null;
 
-  /** @type {null | { kind: 'rx'|'tx', machine: any, fileParts?: Uint8Array[], fileName?: string, fileSize?: number, cancelled?: boolean }} */
+  /** @type {null | { kind: 'rx'|'tx', machine: any, pendingInput: Uint8Array, fileParts?: Uint8Array[], fileName?: string, fileSize?: number, receivedBytes?: number, cancelled?: boolean }} */
   let active = null;
   let detectBuf = new Uint8Array(0);
+  let processing = Promise.resolve();
 
   async function ensureLib() {
     if (ready) return true;
@@ -80,14 +81,17 @@ export function createZmodemBridge(opts) {
     return -1;
   }
 
-  function flushOutgoing(machine) {
+  async function flushOutgoing(machine) {
+    let sent = 0;
     // 循环排空，避免一次 drain 后还有排队
     for (let i = 0; i < 64; i++) {
       const out = machine.drainOutgoing();
       if (!out || out.length === 0) break;
-      sendToRemote(out);
+      await sendToRemote(out);
+      sent += out.length;
       // drainOutgoing 已 auto-advance
     }
+    return sent;
   }
 
   function pickLocalFile() {
@@ -128,21 +132,26 @@ export function createZmodemBridge(opts) {
 
   async function startReceiver(seed) {
     const rx = new Receiver();
-    active = { kind: 'rx', machine: rx, fileParts: [], fileName: '', fileSize: 0 };
-    rx.feedIncoming(seed);
-    flushOutgoing(rx);
-    pumpReceiverEvents(rx);
+    active = {
+      kind: 'rx',
+      machine: rx,
+      pendingInput: new Uint8Array(0),
+      fileParts: [],
+      fileName: '',
+      fileSize: 0,
+      receivedBytes: 0,
+    };
+    await processActiveInput(seed);
   }
 
   async function startSender(seed) {
     // initiator=false：等待远端 ZRINIT（rz）
     const tx = new Sender(false);
-    active = { kind: 'tx', machine: tx, cancelled: false };
-    tx.feedIncoming(seed);
-    flushOutgoing(tx);
+    active = { kind: 'tx', machine: tx, pendingInput: new Uint8Array(0), cancelled: false };
+    await processActiveInput(seed);
 
     const file = await pickLocalFile();
-    if (!file || active?.cancelled) {
+    if (!file || !active || active.machine !== tx || active.cancelled) {
       active = null;
       onError && onError(new Error(file ? '已取消' : '未选择文件'));
       return;
@@ -154,7 +163,7 @@ export function createZmodemBridge(opts) {
     }
     onStart && onStart({ name: file.name, size: file.size, direction: 'upload' });
     tx.startFile(file.name, file.size, file.lastModified || undefined);
-    flushOutgoing(tx);
+    await flushOutgoing(tx);
 
     // 驱动发送：pollFile → feedFile → drain
     const pump = async () => {
@@ -165,15 +174,18 @@ export function createZmodemBridge(opts) {
           const slice = file.slice(req.offset, end);
           const buf = new Uint8Array(await slice.arrayBuffer());
           tx.feedFile(buf);
-          flushOutgoing(tx);
-          // 背压：等待 WebSocket 缓冲下降由调用方 sendToRemote 侧处理
+          await flushOutgoing(tx);
           req = tx.pollFile();
         }
-        flushOutgoing(tx);
+        await flushOutgoing(tx);
+        // feedIncoming 可能因 pendingRequest 暂停并留下同一 WS 包的尾部；
+        // 文件请求满足后主动继续消费，不依赖远端再发一个包来“唤醒”。
+        await enqueue(() => processActiveInput());
+        if (!active || active.machine !== tx) return;
         const ev = tx.pollEvent();
         if (ev === SenderEvent.FileComplete || ev === 'FileComplete') {
           tx.finishSession();
-          flushOutgoing(tx);
+          await flushOutgoing(tx);
         }
         if (ev === SenderEvent.SessionComplete || ev === 'SessionComplete') {
           onComplete && onComplete({ name: file.name, direction: 'upload' });
@@ -192,9 +204,11 @@ export function createZmodemBridge(opts) {
   }
 
   function pumpReceiverEvents(rx) {
+    let progressed = false;
     for (;;) {
       const ev = rx.pollEvent();
       if (ev == null) break;
+      progressed = true;
       if (ev === ReceiverEvent.FileStart || ev === 'FileStart') {
         const name = rx.getFileName() || 'download';
         const size = rx.getFileSize() || 0;
@@ -206,6 +220,7 @@ export function createZmodemBridge(opts) {
         active.fileName = name;
         active.fileSize = size;
         active.fileParts = [];
+        active.receivedBytes = 0;
         onStart && onStart({ name, size, direction: 'download' });
       } else if (ev === ReceiverEvent.FileComplete || ev === 'FileComplete') {
         // drain remaining file data
@@ -213,12 +228,18 @@ export function createZmodemBridge(opts) {
           const part = rx.drainFile();
           if (!part || part.length === 0) break;
           active.fileParts.push(part);
+          active.receivedBytes += part.length;
+          if (active.receivedBytes > maxBytes) {
+            active = null;
+            onError && onError(new Error('接收数据超过 zmodem 上限'));
+            return true;
+          }
         }
         downloadBlob(active.fileName || 'download', active.fileParts);
         onComplete && onComplete({ name: active.fileName, direction: 'download' });
       } else if (ev === ReceiverEvent.SessionComplete || ev === 'SessionComplete') {
         active = null;
-        return;
+        return true;
       }
     }
     // 持续 drain 文件数据
@@ -226,35 +247,81 @@ export function createZmodemBridge(opts) {
       for (;;) {
         const part = rx.drainFile();
         if (!part || part.length === 0) break;
+        progressed = true;
         active.fileParts.push(part);
-        let total = 0;
-        for (const p of active.fileParts) total += p.length;
-        if (total > maxBytes) {
+        active.receivedBytes += part.length;
+        if (active.receivedBytes > maxBytes) {
           active = null;
           onError && onError(new Error('接收数据超过 zmodem 上限'));
-          return;
+          return true;
         }
       }
     }
+    return progressed;
+  }
+
+  // feedIncoming 可能只消费输入前缀；每次先排空 outgoing/file/event，
+  // 再继续喂未消费尾部，直到状态机确实需要等待新的远端数据。
+  async function processActiveInput(input) {
+    if (!active) return;
+    if (input && input.length) {
+      active.pendingInput = concat(active.pendingInput, input);
+    }
+    for (let i = 0; i < 1024 && active; i++) {
+      const current = active;
+      let progressed = (await flushOutgoing(current.machine)) > 0;
+      if (!active || active !== current) return;
+      if (current.kind === 'rx' && pumpReceiverEvents(current.machine)) {
+        progressed = true;
+      }
+      if (!active || active !== current) return;
+      if ((await flushOutgoing(current.machine)) > 0) {
+        progressed = true;
+      }
+      if (!current.pendingInput.length) return;
+      // Sender 有待满足的本地文件请求时，feedIncoming 会返回 0 且不会接收新 wire 数据。
+      // 先保留尾部，pump 满足请求后会再次调度本函数。
+      if (current.kind === 'tx' && current.machine.pollFile()) return;
+
+      const consumed = current.machine.feedIncoming(current.pendingInput);
+      if (!Number.isInteger(consumed) || consumed < 0 || consumed > current.pendingInput.length) {
+        throw new Error('ZMODEM 状态机返回了无效的消费长度');
+      }
+      if (consumed > 0) {
+        current.pendingInput = current.pendingInput.slice(consumed);
+        progressed = true;
+      } else {
+        // zmodem2 的 HeaderReader 会内部缓存不完整 header，但此时公开返回值仍为 0。
+        // outgoing/file/event 已全部排空且 Sender 无 pollFile，说明本批输入已进入内部缓存。
+        current.pendingInput = new Uint8Array(0);
+        return;
+      }
+      if (!progressed) return;
+    }
+    if (active?.pendingInput.length) {
+      throw new Error('ZMODEM 状态机未能收敛');
+    }
+  }
+
+  function enqueue(work) {
+    const next = processing.then(work);
+    processing = next.catch((e) => {
+      active = null;
+      onError && onError(e instanceof Error ? e : new Error(String(e)));
+    });
+    return processing;
   }
 
   /**
    * 处理终端方向的二进制输出。
    * @param {Uint8Array} u8
    */
-  async function onTerminalOutput(u8) {
+  async function processTerminalOutput(u8) {
     if (!u8 || u8.length === 0) return;
 
     // 已在传输中：全部喂给状态机
     if (active) {
-      try {
-        active.machine.feedIncoming(u8);
-        flushOutgoing(active.machine);
-        if (active.kind === 'rx') pumpReceiverEvents(active.machine);
-      } catch (e) {
-        active = null;
-        onError && onError(e instanceof Error ? e : new Error(String(e)));
-      }
+      await processActiveInput(u8);
       return;
     }
 
@@ -270,9 +337,20 @@ export function createZmodemBridge(opts) {
       return;
     }
 
-    // 帧前文本仍写终端
-    if (idx > 0) writeToTerm(detectBuf.subarray(0, idx));
-    const seed = detectBuf.subarray(idx);
+    // 帧前文本仍写终端；起始标记可能与帧类型跨 WebSocket 包，先等待到可判定角色。
+    if (idx > 0) {
+      writeToTerm(detectBuf.subarray(0, idx));
+      detectBuf = detectBuf.subarray(idx);
+    }
+    const mode = guessMode(detectBuf);
+    if (!mode) {
+      if (detectBuf.length > 64) {
+        writeToTerm(detectBuf.subarray(0, detectBuf.length - DETECT_LOOKAHEAD));
+        detectBuf = detectBuf.subarray(detectBuf.length - DETECT_LOOKAHEAD);
+      }
+      return;
+    }
+    const seed = detectBuf;
     detectBuf = new Uint8Array(0);
 
     try {
@@ -284,10 +362,6 @@ export function createZmodemBridge(opts) {
       return;
     }
 
-    // 区分 sz(ZRQINIT 远端发) / rz(ZRINIT 远端收)：
-    // 启发式：seed 中 hex 头常见 "B0000" 等；优先尝试 Receiver，若无进展且像接收端再切 Sender。
-    // 更稳妥：同时看帧类型字节。ZRQINIT 帧类型 '0' / ZRINIT '1'（hex header 中）。
-    const mode = guessMode(seed);
     try {
       if (mode === 'tx') {
         await startSender(seed);
@@ -301,23 +375,51 @@ export function createZmodemBridge(opts) {
     }
   }
 
+  function onTerminalOutput(u8) {
+    if (!u8 || u8.length === 0) return processing;
+    // WebSocket message 回调不会等待 Promise；显式串行，防止并发 feed 同一状态机。
+    const copy = u8.slice();
+    return enqueue(() => processTerminalOutput(copy));
+  }
+
   /**
-   * 粗判模式：hex 头 **\x18B0x 中 x 为帧类型十六进制。
+   * 判定初始握手帧；返回 null 表示 header 尚未收完整。
+   * hex 头 **\x18B 后是两位 frame type，binary 头在 A/C 后是原始 frame byte。
    * ZRQINIT=0 → 远端发 → 浏览器 rx
    * ZRINIT=1 → 远端收 → 浏览器 tx
    */
   function guessMode(seed) {
-    // 寻找 "B0" 后的类型半字节
-    for (let i = 0; i < seed.length - 4; i++) {
-      if (seed[i] === 0x42 /*B*/ && seed[i + 1] === 0x30 /*0*/) {
-        const t = seed[i + 2];
-        // '0' = ZRQINIT, '1' = ZRINIT
-        if (t === 0x31) return 'tx';
-        if (t === 0x30) return 'rx';
+    const hex = (b) => {
+      if (b >= 0x30 && b <= 0x39) return b - 0x30;
+      if (b >= 0x61 && b <= 0x66) return b - 0x61 + 10;
+      if (b >= 0x41 && b <= 0x46) return b - 0x41 + 10;
+      return -1;
+    };
+    for (let i = 0; i < seed.length - 1; i++) {
+      if (seed[i] !== ZDLE) continue;
+      const encoding = seed[i + 1];
+      let frame = -1;
+      if (encoding === 0x42 /* B / ZHEX */) {
+        if (i + 3 >= seed.length) return null;
+        const hi = hex(seed[i + 2]);
+        const lo = hex(seed[i + 3]);
+        if (hi < 0 || lo < 0) return null;
+        frame = (hi << 4) | lo;
+      } else if (encoding === 0x41 || encoding === 0x43 /* A/C / ZBIN/ZBIN32 */) {
+        if (i + 2 >= seed.length) return null;
+        frame = seed[i + 2];
+        if (frame === ZDLE) {
+          if (i + 3 >= seed.length) return null;
+          frame = seed[i + 3] ^ 0x40;
+        }
+      } else {
+        continue;
       }
+      if (frame === 0x01) return 'tx';
+      if (frame === 0x00) return 'rx';
+      return null;
     }
-    // 默认按 sz（下载）处理
-    return 'rx';
+    return null;
   }
 
   function cancel() {

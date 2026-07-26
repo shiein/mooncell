@@ -15,6 +15,18 @@ function fmtSize(n) {
   return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
+async function buildPrefixProof(file, endOffset, chunkSize) {
+  const out = [];
+  let offset = 0;
+  while (offset < endOffset) {
+    const end = Math.min(offset + chunkSize, endOffset);
+    const buf = await file.slice(offset, end).arrayBuffer();
+    out.push({ offset, size: end - offset, sha256: await sha256Hex(buf) });
+    offset = end;
+  }
+  return out;
+}
+
 export function FileTree({ resourceId, sessionId, onTransfer }) {
   const [cwd, setCwd] = React.useState('');
   const [entries, setEntries] = React.useState([]);
@@ -199,7 +211,14 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
     };
     onTransfer && onTransfer(transfer);
     try {
-      const r = await resumeServerUpload(resourceId, sessionId, task.transferId, { localSize: file.size });
+      const proofChunkSize = task.chunkSize || (8 << 20);
+      const prefixChunks = await buildPrefixProof(
+        file, task.transferredSize || 0, proofChunkSize,
+      );
+      const r = await resumeServerUpload(resourceId, sessionId, task.transferId, {
+        localSize: file.size,
+        prefixChunks,
+      });
       const chunkSize = r.chunkSize || (8 << 20);
       const offset = r.nextOffset || 0;
       transfer.transferred = offset;
@@ -257,7 +276,7 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
             </div>
           ))}
           <div style={{ fontSize: 11, color: 'var(--muted-fg)', marginTop: 4 }}>
-            续传须重新选择同一本地文件（按大小校验）；「丢弃」会删除远端临时 part。
+            续传须重新选择同一本地文件（按已上传分块摘要校验）；「丢弃」会删除远端临时 part。
           </div>
         </div>
       ) : null}

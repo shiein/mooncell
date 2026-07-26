@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-// Migrate 创建 server_resources / grants / transfers 三张表。
+// Migrate 创建资源、授权、传输及上传分块身份表。
 // 表结构明确不含 password、private_key 等凭据列。
 func Migrate(db *sql.DB) error {
 	_, err := db.Exec(`
@@ -52,9 +52,19 @@ func Migrate(db *sql.DB) error {
 			updated_at        INTEGER NOT NULL,
 			expires_at        INTEGER NOT NULL
 		);
-		CREATE INDEX IF NOT EXISTS idx_server_transfers_owner
-			ON server_file_transfers(username, resource_id, state);
-	`)
+			CREATE INDEX IF NOT EXISTS idx_server_transfers_owner
+				ON server_file_transfers(username, resource_id, state);
+
+			CREATE TABLE IF NOT EXISTS server_file_transfer_chunks (
+				transfer_id  TEXT    NOT NULL,
+				chunk_offset INTEGER NOT NULL,
+				chunk_size   INTEGER NOT NULL,
+				sha256       TEXT    NOT NULL,
+				PRIMARY KEY (transfer_id, chunk_offset)
+			);
+			CREATE INDEX IF NOT EXISTS idx_server_transfer_chunks_transfer
+				ON server_file_transfer_chunks(transfer_id, chunk_offset);
+		`)
 	if err != nil {
 		return err
 	}

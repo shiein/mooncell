@@ -1,8 +1,14 @@
 package serverops
 
 import (
+	"bytes"
 	"database/sql"
+	"errors"
+	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,11 +190,167 @@ func TestOverwriteColumnAndTransferInsert(t *testing.T) {
 	}
 }
 
+func TestRecordTransferChunkAndResumeProof(t *testing.T) {
+	db := openTestDB(t)
+	hashA := strings.Repeat("a", 64)
+	hashB := strings.Repeat("b", 64)
+	tr := FileTransfer{
+		ID: "tx_chunks", ResourceID: "r1", Username: "u", Direction: DirectionUpload,
+		RemotePath: "/tmp/a", RemoteTempPath: "/tmp/.a.mooncell-upload-x.part",
+		ExpectedSize: 12, State: TransferUploading, CreatedAt: 1, UpdatedAt: 1, ExpiresAt: 9999999999999,
+	}
+	if err := insertTransfer(db, tr); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordTransferChunk(db, tr.ID, 0, 8, hashA, 8, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordTransferChunk(db, tr.ID, 8, 4, hashB, 12, 3); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := getTransfer(db, tr.ID)
+	if err != nil || !ok || got.TransferredSize != 12 {
+		t.Fatalf("transfer progress: got=%+v ok=%v err=%v", got, ok, err)
+	}
+	chunks, err := listTransferChunks(db, tr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateResumeProof(12, chunks, []UploadChunkProof{
+		{Offset: 0, Size: 8, SHA256: strings.ToUpper(hashA)},
+		{Offset: 8, Size: 4, SHA256: hashB},
+	}); err != nil {
+		t.Fatalf("matching proof rejected: %v", err)
+	}
+	if err := validateResumeProof(12, chunks, []UploadChunkProof{
+		{Offset: 0, Size: 8, SHA256: hashA},
+		{Offset: 8, Size: 4, SHA256: hashA},
+	}); err == nil {
+		t.Fatal("different local prefix must be rejected")
+	}
+	if err := recordTransferChunk(db, tr.ID, 8, 1, hashA, 9, 4); err == nil {
+		t.Fatal("stale offset must not overwrite chunk proof or progress")
+	}
+}
+
+func TestSessionReservationIsAtomic(t *testing.T) {
+	m := newSessionManager()
+	const workers = 32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := m.Reserve("alice", 1, 1); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("expected exactly one reservation, got %d", got)
+	}
+	m.ReleaseReservation("alice")
+	if err := m.Reserve("alice", 1, 1); err != nil {
+		t.Fatalf("released reservation should be reusable: %v", err)
+	}
+}
+
+func TestTransferReservationIsAtomic(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SFTPMaxTransfersTotal = 1
+	cfg.SFTPMaxTransfersPerUser = 1
+	svc := NewService(openTestDB(t), cfg)
+	const workers = 32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		id := i
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := svc.reserveTransfer("tx_"+strconv.Itoa(id), "alice"); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("expected exactly one transfer reservation, got %d", got)
+	}
+}
+
+func TestReadUploadChunkRejectsActualOverflow(t *testing.T) {
+	exactReq := httptest.NewRequest("PUT", "/", bytes.NewReader(make([]byte, ChunkSize)))
+	if got, err := readUploadChunk(httptest.NewRecorder(), exactReq); err != nil || len(got) != ChunkSize {
+		t.Fatalf("exact chunk rejected: len=%d err=%v", len(got), err)
+	}
+	overflowReq := httptest.NewRequest("PUT", "/", bytes.NewReader(make([]byte, ChunkSize+1)))
+	overflowReq.ContentLength = -1 // 模拟 chunked 请求，不能依赖 Content-Length。
+	if _, err := readUploadChunk(httptest.NewRecorder(), overflowReq); !errors.Is(err, errChunkTooLarge) {
+		t.Fatalf("expected actual overflow rejection, got %v", err)
+	}
+}
+
+func TestManagedUploadTempPath(t *testing.T) {
+	if !isManagedUploadTemp("/tmp/report.csv", "/tmp/.report.csv.mooncell-upload-abcd.part") {
+		t.Fatal("expected managed temp path")
+	}
+	for _, temp := range []string{
+		"/etc/passwd",
+		"/tmp/.other.csv.mooncell-upload-abcd.part",
+		"/var/tmp/.report.csv.mooncell-upload-abcd.part",
+		"/tmp/.report.csv.part",
+	} {
+		if isManagedUploadTemp("/tmp/report.csv", temp) {
+			t.Fatalf("must reject unmanaged temp path %q", temp)
+		}
+	}
+}
+
+func TestExpireTransferQueuesExactCleanupAndReleasesSlot(t *testing.T) {
+	db := openTestDB(t)
+	cfg := DefaultConfig()
+	cfg.SFTPMaxTransfersTotal = 1
+	cfg.SFTPMaxTransfersPerUser = 1
+	svc := NewService(db, cfg)
+	now := time.Now().UnixMilli()
+	tr := FileTransfer{
+		ID: "tx_expired", ResourceID: "r1", Username: "alice", Direction: DirectionUpload,
+		RemotePath: "/tmp/a", RemoteTempPath: "/tmp/.a.mooncell-upload-x.part",
+		ExpectedSize: 10, State: TransferUploading, CreatedAt: 1, UpdatedAt: 1, ExpiresAt: now - 1,
+	}
+	if err := insertTransfer(db, tr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.reserveTransfer(tr.ID, tr.Username); err != nil {
+		t.Fatal(err)
+	}
+	svc.expireStaleTransfers()
+	got, ok, err := getTransfer(db, tr.ID)
+	if err != nil || !ok {
+		t.Fatalf("get expired transfer: ok=%v err=%v", ok, err)
+	}
+	if got.State != TransferCleanupPending {
+		t.Fatalf("expected cleanup_pending, got %s", got.State)
+	}
+	if _, err := svc.reserveTransfer("tx_next", tr.Username); err != nil {
+		t.Fatalf("expired transfer slot was not released: %v", err)
+	}
+}
+
 func TestSessionIdleReap(t *testing.T) {
 	m := newSessionManager()
 	s := &Session{
 		ID: "ssh_idle", ResourceID: "srv_a", Username: "alice",
-		ExpiresAt: time.Now().Add(time.Hour),
+		ExpiresAt:   time.Now().Add(time.Hour),
 		IdleTimeout: time.Second,
 	}
 	s.lastActivityUnix.Store(time.Now().Add(-2 * time.Second).Unix())
