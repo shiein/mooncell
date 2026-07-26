@@ -256,6 +256,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, CodeDBError, "更新进度失败", true)
 		return
 	}
+	s.touchTransferSlot(tid)
 
 	if s.touch != nil {
 		s.touch(user)
@@ -419,7 +420,25 @@ func (s *Service) ResumeUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, CodeRemotePartChanged, "远端临时文件不存在", false)
 		return
 	}
-	if st.Size() != tr.TransferredSize {
+	remoteSize := st.Size()
+	switch {
+	case remoteSize == tr.TransferredSize:
+		// 与权威进度一致，可续传。
+	case remoteSize > tr.TransferredSize:
+		// 写块中途断连时 part 可能多出未确认字节；前缀已由 chunk SHA256 证明，截断回 DB offset 安全。
+		f, openErr := sc.OpenFile(tr.RemoteTempPath, os.O_WRONLY)
+		if openErr != nil {
+			writeErr(w, http.StatusUnprocessableEntity, CodeRemotePartChanged, "远端临时文件无法截断", false)
+			return
+		}
+		truncErr := f.Truncate(tr.TransferredSize)
+		_ = f.Close()
+		if truncErr != nil {
+			writeErr(w, http.StatusUnprocessableEntity, CodeRemotePartChanged, "远端临时文件截断失败", false)
+			return
+		}
+	default:
+		// part 比记录短：无法安全猜测缺失数据
 		writeErr(w, http.StatusUnprocessableEntity, CodeRemotePartChanged, "远端临时文件与记录不一致", false)
 		return
 	}
@@ -510,15 +529,24 @@ func (s *Service) CompleteUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		// 非覆盖：仅用非原子 Rename。失败后必须重新 Stat，禁止降级 PosixRename
+		//（POSIX rename 有覆盖语义，会踩中 Stat→rename 竞态新建的同名文件）。
 		if err := sc.Rename(tr.RemoteTempPath, tr.RemotePath); err != nil {
-			if err2 := sc.PosixRename(tr.RemoteTempPath, tr.RemotePath); err2 != nil {
+			if _, againErr := sc.Stat(tr.RemotePath); againErr == nil {
 				if stateErr := updateTransferState(s.db, tid, TransferUploading, now); stateErr != nil {
 					writeErr(w, http.StatusInternalServerError, CodeDBError, "恢复传输状态失败", true)
 					return
 				}
-				writeErr(w, http.StatusBadGateway, CodeSSHConnectionFailed, "重命名完成失败", true)
+				writeErr(w, http.StatusConflict, CodeRemoteTargetExists,
+					"目标文件已存在且未允许覆盖", false)
 				return
 			}
+			if stateErr := updateTransferState(s.db, tid, TransferUploading, now); stateErr != nil {
+				writeErr(w, http.StatusInternalServerError, CodeDBError, "恢复传输状态失败", true)
+				return
+			}
+			writeErr(w, http.StatusBadGateway, CodeSSHConnectionFailed, "重命名完成失败", true)
+			return
 		}
 	}
 
@@ -580,8 +608,8 @@ func (s *Service) CancelUpload(w http.ResponseWriter, r *http.Request) {
 		s.releaseTransfer(tid)
 		writeOK(w, map[string]any{"ok": true, "state": TransferCancelled})
 		return
-	case TransferUploading, TransferCleanupPending:
-		// 活动上传可取消；cleanup_pending 可在新会话中重试精确清理。
+	case TransferUploading, TransferCleanupPending, TransferCompleting:
+		// completing 崩溃后会成僵尸；允许取消并尝试清理 part。
 	default:
 		writeErr(w, http.StatusConflict, CodeResourceChanged, "当前传输状态不可取消", false)
 		return
@@ -622,14 +650,24 @@ func (s *Service) CancelUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Service) reserveTransfer(id, user string) (bool, error) {
 	s.transferMu.Lock()
 	defer s.transferMu.Unlock()
+	// 顺带回收本用户长期无活动的槽，避免「关浏览器后 24h 无法上传」。
+	cut := time.Now().Add(-transferSlotIdle)
+	for tid, t := range s.transferLastAct {
+		if t.Before(cut) {
+			delete(s.activeTransfers, tid)
+			delete(s.transferLastAct, tid)
+			delete(s.uploadLocks, tid)
+		}
+	}
 	if owner, ok := s.activeTransfers[id]; ok {
 		if owner == user {
+			s.transferLastAct[id] = time.Now()
 			return false, nil
 		}
 		return false, apiErr(CodeTransferLimit, "文件传输已被其他用户占用", true)
 	}
 	if len(s.activeTransfers) >= s.cfg.SFTPMaxTransfersTotal {
-		return false, apiErr(CodeTransferLimit, "全局文件传输数已达上限", true)
+		return false, apiErr(CodeTransferLimit, "全局文件传输数已达上限，请稍后重试或丢弃未完成任务", true)
 	}
 	n := 0
 	for _, owner := range s.activeTransfers {
@@ -638,9 +676,10 @@ func (s *Service) reserveTransfer(id, user string) (bool, error) {
 		}
 	}
 	if n >= s.cfg.SFTPMaxTransfersPerUser {
-		return false, apiErr(CodeTransferLimit, "您的文件传输数已达上限", true)
+		return false, apiErr(CodeTransferLimit, "您的文件传输数已达上限，可在文件面板丢弃未完成上传后重试", true)
 	}
 	s.activeTransfers[id] = user
+	s.transferLastAct[id] = time.Now()
 	return true, nil
 }
 
@@ -650,9 +689,19 @@ func (s *Service) tryBeginDownload(id, user string) error {
 	return err
 }
 
+func (s *Service) touchTransferSlot(tid string) {
+	s.transferMu.Lock()
+	if _, ok := s.activeTransfers[tid]; ok {
+		s.transferLastAct[tid] = time.Now()
+	}
+	s.transferMu.Unlock()
+}
+
 func (s *Service) releaseTransfer(tid string) {
 	s.transferMu.Lock()
 	delete(s.activeTransfers, tid)
+	delete(s.transferLastAct, tid)
+	delete(s.uploadLocks, tid)
 	s.transferMu.Unlock()
 }
 

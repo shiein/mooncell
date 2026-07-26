@@ -21,13 +21,14 @@ func (s *Service) ListResources(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, CodeDBError, "读取服务器资源失败", true)
 		return
 	}
+	// admin 列表已是全量，权限恒为 admin；普通用户列表来自 grant join，权限恒为 operate。
+	// 避免 MaxOpenConns=1 下逐行 AccessModeFor N+1。
+	mode := AccessOperate
+	if isAdmin(role) {
+		mode = AccessAdmin
+	}
 	out := make([]ResourceOut, 0, len(resources))
 	for _, res := range resources {
-		mode, err := AccessModeFor(s.db, user, role, res.ID)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, CodeDBError, "读取授权失败", true)
-			return
-		}
 		out = append(out, toResourceOut(res, mode))
 	}
 	// 附带 cleanup_pending 计数（admin 可见，便于运维）。
@@ -144,8 +145,8 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	// 连接参数或名称变更均递增代际，终止旧会话（host key 清空后必须重新连接）。
-	if connChanged || cur.Name != body.Name {
+	// 仅连接参数变更才递增代际并终止会话；改显示名不影响已建 SSH。
+	if connChanged {
 		s.InvalidateResource(id)
 	}
 	s.auditLog(user, "更新服务器资源", body.Name, "成功")

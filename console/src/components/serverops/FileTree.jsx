@@ -23,6 +23,10 @@ async function buildPrefixProof(file, endOffset, chunkSize) {
     const buf = await file.slice(offset, end).arrayBuffer();
     out.push({ offset, size: end - offset, sha256: await sha256Hex(buf) });
     offset = end;
+    // 让出主线程，避免纯 JS SHA-256 连续阻塞导致 UI 假死
+    if (offset < endOffset) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
   }
   return out;
 }
@@ -33,6 +37,7 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [pending, setPending] = React.useState([]); // 可续传任务
+  const [overwrite, setOverwrite] = React.useState(false);
   const fileInputRef = React.useRef(null);
   const resumeInputRef = React.useRef(null);
   const resumeTargetRef = React.useRef(null);
@@ -107,23 +112,26 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
         onTransfer && onTransfer({ ...transfer });
         return false;
       }
+      // 每次循环按当前权威 offset 重新切片，避免 OFFSET_MISMATCH 后复用旧 blob。
       const end = Math.min(offset + chunkSize, file.size);
       const blob = file.slice(offset, end);
       const buf = await blob.arrayBuffer();
       const hex = await sha256Hex(buf);
       let tries = 0;
-      for (;;) {
+      let advanced = false;
+      while (!advanced) {
         try {
           const res = await uploadServerChunk(resourceId, sessionId, transferId, offset, blob, hex);
           offset = res.nextOffset != null ? res.nextOffset : end;
           transfer.transferred = offset;
           onTransfer && onTransfer({ ...transfer });
-          break;
+          advanced = true;
         } catch (err) {
           tries++;
           if (err.code === 'CHUNK_OFFSET_MISMATCH' && err.nextOffset != null) {
+            // 跳出内层，用新 offset 重新 slice
             offset = err.nextOffset;
-            continue;
+            break;
           }
           if (tries >= 3) throw err;
           await new Promise((r) => setTimeout(r, 500 * tries));
@@ -137,7 +145,7 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
     return true;
   };
 
-  const uploadOne = async (file) => {
+  const uploadOne = async (file, overwrite) => {
     const transfer = {
       id: 'local-' + Date.now(),
       name: file.name,
@@ -154,7 +162,7 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
         directory: cwd || '.',
         filename: file.name,
         size: file.size,
-        overwrite: false,
+        overwrite: !!overwrite,
       });
       transferId = init.transferId;
       transfer.id = transferId;
@@ -162,11 +170,19 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
       const ok = await runChunks(file, transferId, init.nextOffset || 0, chunkSize, transfer);
       if (ok) toast(`${file.name} 上传完成`);
     } catch (e) {
-      // 网络/校验失败：保留 uploading，供后续续传；不得自动 cancel 删 part
       transfer.state = 'failed';
       onTransfer && onTransfer({ ...transfer });
-      toast((e.message || `${file.name} 上传失败`) + ' · 可稍后续传', { tone: 'error' });
-      await refreshPending();
+      // 未建立传输的错误不要误导「可续传」
+      if (e.code === 'REMOTE_TARGET_EXISTS') {
+        toast(e.message || '目标已存在，可勾选覆盖后重试', { tone: 'error' });
+      } else if (e.code === 'TRANSFER_LIMIT_REACHED') {
+        toast(e.message || '传输数已达上限，请丢弃未完成任务', { tone: 'error' });
+      } else if (transferId) {
+        toast((e.message || `${file.name} 上传失败`) + ' · 可稍后续传', { tone: 'error' });
+        await refreshPending();
+      } else {
+        toast(e.message || `${file.name} 上传失败`, { tone: 'error' });
+      }
     }
   };
 
@@ -174,8 +190,9 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
     abortRef.current = false;
+    const ow = overwrite;
     for (const file of files) {
-      await uploadOne(file);
+      await uploadOne(file, ow);
       if (abortRef.current) break;
     }
     load(cwd || '.');
@@ -212,6 +229,9 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
     onTransfer && onTransfer(transfer);
     try {
       const proofChunkSize = task.chunkSize || (8 << 20);
+      if ((task.transferredSize || 0) > 32 * 1024 * 1024) {
+        toast('正在校验本地文件前缀，大文件可能需要一些时间…', { tone: 'warn' });
+      }
       const prefixChunks = await buildPrefixProof(
         file, task.transferredSize || 0, proofChunkSize,
       );
@@ -252,6 +272,11 @@ export function FileTree({ resourceId, sessionId, onTransfer }) {
       }}>
         <span style={{ fontSize: 12.5, fontWeight: 600 }}>文件</span>
         <div style={{ flex: 1 }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11.5, color: 'var(--muted-fg)', cursor: 'pointer' }}
+          title="开启后上传完成时用原子 rename 覆盖同名文件">
+          <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
+          覆盖同名
+        </label>
         <Btn size="sm" variant="ghost" icon="rotate" title="刷新" onClick={() => { load(cwd || '.'); refreshPending(); }} />
         <Btn size="sm" variant="outline" icon="upload" onClick={() => fileInputRef.current && fileInputRef.current.click()}>上传</Btn>
         <input ref={fileInputRef} type="file" multiple hidden

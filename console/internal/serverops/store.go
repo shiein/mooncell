@@ -458,5 +458,6 @@ func isUniqueConstraint(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "unique") || strings.Contains(s, "constraint")
+	// 仅 UNIQUE 冲突视为重名；不可把 CHECK 等 constraint 误报成名称重复。
+	return strings.Contains(s, "unique")
 }

@@ -121,6 +121,8 @@ func (s *Service) CreateSession(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    now,
 		ExpiresAt:    expires,
 		IdleTimeout:  s.cfg.idleTimeout(),
+		InitialCols:  body.Cols,
+		InitialRows:  body.Rows,
 		ResourceGen:  rGen,
 		UserGrantGen: gGen,
 		client:       client,

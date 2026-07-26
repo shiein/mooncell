@@ -110,7 +110,8 @@ type HostKeyProbeResult struct {
 }
 
 // SessionCreateResponse 是创建 SSH 会话成功响应。
-// sessionId 仅作运行时句柄，不写 URL/localStorage。
+// sessionId 是运行时句柄，不得写入 localStorage；流式下载 URL 因浏览器 <a> 导航会短暂出现在地址栏/历史，
+// 使用时仍须同源 Cookie，且不单独构成授权。
 type SessionCreateResponse struct {
 	SessionID  string `json:"sessionId"`
 	ResourceID string `json:"resourceId"`

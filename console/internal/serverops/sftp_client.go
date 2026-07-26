@@ -10,6 +10,7 @@ import (
 
 // cleanRemotePath 规范化远端路径；拒绝 NUL 与控制字符。
 // 相对路径保留为相对；"." 表示远端 cwd。
+// 不把 `\` 当作分隔符：Linux 上反斜杠是合法文件名字符。
 func cleanRemotePath(p string) (string, error) {
 	if p == "" {
 		p = "."
@@ -17,8 +18,7 @@ func cleanRemotePath(p string) (string, error) {
 	if strings.ContainsRune(p, 0) || hasControl(p) {
 		return "", apiErr(CodeValidation, "路径含非法字符", false)
 	}
-	// 统一为正斜杠风格；path.Clean 处理 . 与 ..
-	p = strings.ReplaceAll(p, "\\", "/")
+	// path.Clean 按 / 处理 . 与 ..，保留字面 `\`。
 	cleaned := path.Clean(p)
 	if cleaned == "" {
 		cleaned = "."

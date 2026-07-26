@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ListFiles GET .../sessions/{sid}/files?path=
@@ -195,9 +197,44 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(status)
 
+	// 长下载期间周期性 Touch，避免 idle 回收在 Copy 中途掐断会话。
 	buf := make([]byte, 256*1024)
-	lr := io.LimitReader(f, length)
-	_, copyErr := io.CopyBuffer(w, lr, buf)
+	var copied int64
+	var copyErr error
+	lastTouch := time.Now()
+	for copied < length {
+		if err := r.Context().Err(); err != nil {
+			copyErr = err
+			break
+		}
+		toRead := int64(len(buf))
+		if remain := length - copied; remain < toRead {
+			toRead = remain
+		}
+		n, err := f.Read(buf[:toRead])
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				copyErr = werr
+				break
+			}
+			copied += int64(n)
+			if time.Since(lastTouch) >= 10*time.Second {
+				sess.Touch()
+				s.touchTransferSlot(dlID)
+				if s.touch != nil {
+					s.touch(user)
+				}
+				lastTouch = time.Now()
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			copyErr = err
+			break
+		}
+	}
 
 	resName := resourceID
 	if res, found, _ := getResource(s.db, resourceID); found {
@@ -210,6 +247,7 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	if copyErr == nil {
 		s.auditLog(user, "SFTP 下载", auditFileTarget(resName, "download", cleaned, size), "成功")
 	}
+	sess.Touch()
 	if s.touch != nil {
 		s.touch(user)
 	}
@@ -277,12 +315,19 @@ func parseSingleRange(rangeHdr, ifRange, etag string, size int64) (start, end in
 }
 
 func contentDispositionAttachment(filename string) string {
-	// 简单 ASCII 回退 + filename* UTF-8
+	// ASCII 回退文件名 + RFC 5987 filename* UTF-8
 	safe := strings.Map(func(r rune) rune {
-		if r < 32 || r == 127 || r == '"' {
+		if r < 32 || r == 127 || r == '"' || r == '\\' {
+			return '_'
+		}
+		if r > 0x7e {
 			return '_'
 		}
 		return r
 	}, filename)
-	return fmt.Sprintf(`attachment; filename="%s"`, safe)
+	if safe == "" {
+		safe = "download"
+	}
+	encoded := url.PathEscape(filename)
+	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, safe, encoded)
 }

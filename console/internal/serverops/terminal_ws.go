@@ -101,7 +101,14 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
-	if err := sshSess.RequestPty("xterm-256color", 36, 120, modes); err != nil {
+	cols, rows := sess.InitialCols, sess.InitialRows
+	if cols <= 0 {
+		cols = 120
+	}
+	if rows <= 0 {
+		rows = 36
+	}
+	if err := sshSess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
 		_ = writeWSJSON(r.Context(), conn, map[string]any{"type": "error", "code": CodeSSHConnectionFailed, "message": "申请 PTY 失败"})
 		return
 	}
@@ -134,14 +141,32 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 
 	_ = writeWSJSON(ctx, conn, map[string]any{"type": "ready"})
 
-	// 有界输出队列：慢客户端关闭会话，避免无限堆内存。
+	// 有界输出队列：慢客户端丢弃新输出并提示，不直接杀 SSH（cat 大文件在慢链路上很常见）。
+	// 注意：只有写协程消费 outCh，pump 不得从 channel 偷读。
 	type chunk struct{ b []byte }
 	outCh := make(chan chunk, 64)
 	var (
-		outMu    sync.Mutex
-		outBytes int
-		tooSlow  bool
+		outMu       sync.Mutex
+		outBytes    int
+		needDropNote bool
 	)
+	tryEnqueue := func(data []byte) {
+		outMu.Lock()
+		defer outMu.Unlock()
+		if outBytes+len(data) > maxPTYOutputQueue || len(outCh) >= cap(outCh) {
+			needDropNote = true
+			return
+		}
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		outBytes += len(cp)
+		select {
+		case outCh <- chunk{cp}:
+		default:
+			outBytes -= len(cp)
+			needDropNote = true
+		}
+	}
 
 	var pumps sync.WaitGroup
 	pump := func(rd io.Reader) {
@@ -150,29 +175,28 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, err := rd.Read(buf)
 			if n > 0 {
+				tryEnqueue(buf[:n])
 				outMu.Lock()
-				if outBytes+n > maxPTYOutputQueue {
-					tooSlow = true
-					outMu.Unlock()
-					finish(true)
-					return
+				note := needDropNote
+				if note {
+					needDropNote = false
 				}
-				outBytes += n
 				outMu.Unlock()
-				cp := make([]byte, n)
-				copy(cp, buf[:n])
-				select {
-				case outCh <- chunk{cp}:
-				case <-ctx.Done():
-					return
-				case <-sess.ctx.Done():
-					return
-				case <-ptyDone:
-					return
+				if note {
+					tryEnqueue([]byte("\r\n\x1b[33m[Mooncell] 输出过快，已丢弃部分终端输出\x1b[0m\r\n"))
 				}
 			}
 			if err != nil {
 				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-sess.ctx.Done():
+				return
+			case <-ptyDone:
+				return
+			default:
 			}
 		}
 	}
@@ -251,12 +275,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 				if outBytes < 0 {
 					outBytes = 0
 				}
-				slow := tooSlow
 				outMu.Unlock()
-				if slow {
-					_ = writeTxt(map[string]any{"type": "error", "code": CodeClientTooSlow, "message": "客户端消费过慢，会话已关闭"})
-					return
-				}
 				if err := writeBin(c.b); err != nil {
 					return
 				}

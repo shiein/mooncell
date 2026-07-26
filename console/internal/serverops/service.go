@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,14 +32,18 @@ type Service struct {
 	authFails  map[string][]time.Time
 
 	// 活动传输计数（内存），配合 SQLite 元数据。
-	transferMu      sync.Mutex
-	activeTransfers map[string]string // transferId/downloadId -> Mooncell username
-	uploadLocks     map[string]*sync.Mutex
+	transferMu       sync.Mutex
+	activeTransfers  map[string]string    // transferId/downloadId -> Mooncell username
+	transferLastAct  map[string]time.Time // 槽位最后活动，用于释放僵尸内存槽
+	uploadLocks      map[string]*sync.Mutex
 
-	closed bool
+	closed atomic.Bool
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
+
+// 内存传输槽无进展多久后释放（DB 记录保留，续传时 re-reserve）。
+const transferSlotIdle = 5 * time.Minute
 
 // NewService 创建服务。cfg 会 Normalize。不启动后台 goroutine（由 Start 负责）。
 func NewService(db *sql.DB, cfg Config) *Service {
@@ -49,6 +54,7 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		sess:            newSessionManager(),
 		authFails:       map[string][]time.Time{},
 		activeTransfers: map[string]string{},
+		transferLastAct: map[string]time.Time{},
 		uploadLocks:     map[string]*sync.Mutex{},
 		stopCh:          make(chan struct{}),
 	}
@@ -96,6 +102,7 @@ func (s *Service) Start() {
 				if n := s.sess.ReapTimedOut(); n > 0 {
 					log.Printf("[serverops] 回收超时 SSH 会话 %d 个", n)
 				}
+				s.reapIdleTransferSlots()
 			case <-transferTicker.C:
 				s.expireStaleTransfers()
 			}
@@ -105,10 +112,9 @@ func (s *Service) Start() {
 
 // Close 关闭全部 SSH/SFTP 与后台任务。
 func (s *Service) Close() {
-	if s.closed {
+	if !s.closed.CompareAndSwap(false, true) {
 		return
 	}
-	s.closed = true
 	close(s.stopCh)
 	s.sess.CloseAll()
 	s.wg.Wait()
@@ -134,33 +140,52 @@ func (s *Service) InvalidateResource(resourceID string) {
 
 func (s *Service) expireStaleTransfers() {
 	now := time.Now().UnixMilli()
-	// 过期 uploading 转为 cleanup_pending，并移出内存活动槽。
+	// uploading 过期 + completing 卡住（updated_at 超过 30 分钟）均回收。
+	const completingStuckMs = int64(30 * 60 * 1000)
 	rows, err := s.db.Query(
-		`SELECT id FROM server_file_transfers WHERE state=? AND expires_at > 0 AND expires_at < ?`,
-		TransferUploading, now)
+		`SELECT id, state FROM server_file_transfers
+		 WHERE (state=? AND expires_at > 0 AND expires_at < ?)
+		    OR (state=? AND updated_at > 0 AND updated_at < ?)`,
+		TransferUploading, now,
+		TransferCompleting, now-completingStuckMs)
 	if err != nil {
 		log.Printf("[serverops] 查询过期传输失败: %v", err)
 		return
 	}
-	var ids []string
+	type item struct {
+		id, state string
+	}
+	var ids []item
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var it item
+		if err := rows.Scan(&it.id, &it.state); err != nil {
 			rows.Close()
 			return
 		}
-		ids = append(ids, id)
+		ids = append(ids, it)
 	}
 	rows.Close()
 	if len(ids) == 0 {
 		return
 	}
-	for _, id := range ids {
-		lock := s.uploadLock(id)
+	for _, it := range ids {
+		lock := s.uploadLock(it.id)
 		lock.Lock()
-		tr, found, err := getTransfer(s.db, id)
-		if err != nil || !found || tr.State != TransferUploading ||
-			tr.ExpiresAt <= 0 || tr.ExpiresAt >= now {
+		tr, found, err := getTransfer(s.db, it.id)
+		if err != nil || !found {
+			lock.Unlock()
+			continue
+		}
+		from := tr.State
+		if from != TransferUploading && from != TransferCompleting {
+			lock.Unlock()
+			continue
+		}
+		if from == TransferUploading && (tr.ExpiresAt <= 0 || tr.ExpiresAt >= now) {
+			lock.Unlock()
+			continue
+		}
+		if from == TransferCompleting && tr.UpdatedAt >= now-completingStuckMs {
 			lock.Unlock()
 			continue
 		}
@@ -168,15 +193,29 @@ func (s *Service) expireStaleTransfers() {
 		if tr.RemoteTempPath != "" {
 			next = TransferCleanupPending
 		}
-		updated, err := updateTransferStateFrom(s.db, id, TransferUploading, next, now)
+		updated, err := updateTransferStateFrom(s.db, it.id, from, next, now)
 		if err != nil {
-			log.Printf("[serverops] 标记过期传输失败 id=%s: %v", id, err)
+			log.Printf("[serverops] 标记过期传输失败 id=%s: %v", it.id, err)
 		} else if updated {
-			s.releaseTransfer(id)
+			s.releaseTransfer(it.id)
 		}
 		lock.Unlock()
 	}
-	log.Printf("[serverops] 处理过期上传 %d 条", len(ids))
+	log.Printf("[serverops] 处理过期/卡住上传 %d 条", len(ids))
+}
+
+// reapIdleTransferSlots 释放长时间无活动的内存槽（DB 记录保留）。
+func (s *Service) reapIdleTransferSlots() {
+	s.transferMu.Lock()
+	defer s.transferMu.Unlock()
+	cut := time.Now().Add(-transferSlotIdle)
+	for id, t := range s.transferLastAct {
+		if t.Before(cut) {
+			delete(s.activeTransfers, id)
+			delete(s.transferLastAct, id)
+			delete(s.uploadLocks, id)
+		}
+	}
 }
 
 // cleanupPendingTransfers 使用本次已认证 SSH session 精确清理由数据库记录的远端 part。
@@ -246,7 +285,23 @@ func (s *Service) recordAuthFail(user, resourceID, clientIP string) {
 	key := user + "\x00" + resourceID + "\x00" + clientIP
 	s.authFailMu.Lock()
 	defer s.authFailMu.Unlock()
-	s.authFails[key] = append(s.authFails[key], time.Now())
+	now := time.Now()
+	cut := now.Add(-authFailWindow)
+	// 顺带清理其它 key 的过期记录，避免 map 只增不减。
+	for k, ts := range s.authFails {
+		var kept []time.Time
+		for _, t := range ts {
+			if t.After(cut) {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(s.authFails, k)
+		} else {
+			s.authFails[k] = kept
+		}
+	}
+	s.authFails[key] = append(s.authFails[key], now)
 }
 
 func (s *Service) clearAuthFail(user, resourceID, clientIP string) {

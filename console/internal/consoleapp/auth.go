@@ -90,11 +90,9 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user": username,
-		"role": a.store.userRole(username),
-		"features": map[string]bool{
-			"serverOperations": a.serverOps != nil && a.serverOps.Enabled(),
-		},
+		"user":     username,
+		"role":     a.store.userRole(username),
+		"features": a.featureFlags(),
 	})
 }
 
@@ -144,12 +142,23 @@ func (a *api) session(w http.ResponseWriter, r *http.Request) {
 	}
 	// features.serverOperations 供前端 fail-closed 隐藏菜单
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user": username,
-		"role": a.store.userRole(username),
-		"features": map[string]bool{
-			"serverOperations": a.serverOps != nil && a.serverOps.Enabled(),
-		},
+		"user":     username,
+		"role":     a.store.userRole(username),
+		"features": a.featureFlags(),
 	})
+}
+
+// featureFlags 返回前端能力开关与相关客户端软限制。
+// zmodemMaxTransferMB 仅为浏览器侧软上限（ZMODEM 走 PTY 裸字节，服务端不强制）。
+func (a *api) featureFlags() map[string]any {
+	enabled := a.serverOps != nil && a.serverOps.Enabled()
+	out := map[string]any{
+		"serverOperations": enabled,
+	}
+	if a.serverOps != nil {
+		out["zmodemMaxTransferMB"] = a.serverOps.Config().ZmodemMaxTransferMB
+	}
+	return out
 }
 
 // isAdmin 判定管理员。历史 operator/viewer 均视为普通用户(按 user_apps 授权)。

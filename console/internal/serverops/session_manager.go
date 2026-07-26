@@ -24,6 +24,9 @@ type Session struct {
 	CreatedAt    time.Time
 	ExpiresAt    time.Time // 绝对过期（max session hours）
 	IdleTimeout  time.Duration
+	// 创建会话时客户端声明的 PTY 尺寸，terminal WS 首帧使用。
+	InitialCols int
+	InitialRows int
 	ResourceGen  uint64 // 注册时资源代际
 	UserGrantGen uint64 // 注册时 (user, resource) 授权代际
 

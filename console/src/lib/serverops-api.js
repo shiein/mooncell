@@ -89,7 +89,11 @@ export async function listServerFiles(resourceId, sessionId, path = '.') {
   );
 }
 
-/** 下载 URL：用 <a> 导航，禁止 fetch+blob（避免百兆进内存）。 */
+/**
+ * 下载 URL：用 <a> 导航，禁止 fetch+blob（避免百兆进内存）。
+ * 注意：sessionId 与 path 会出现在浏览器历史与反代 access log；
+ * 会话仍绑定 mc_sid Cookie，泄漏 ID  alone 不足以冒用。一次性 token 为后续增强。
+ */
 export function serverDownloadUrl(resourceId, sessionId, path) {
   const q = new URLSearchParams({ path });
   return `/api/server-resources/${encodeURIComponent(resourceId)}/sessions/${encodeURIComponent(sessionId)}/download?${q}`;
@@ -168,10 +172,10 @@ export function terminalWsUrl(resourceId, sessionId) {
   return `${proto}//${location.host}/api/server-resources/${encodeURIComponent(resourceId)}/sessions/${encodeURIComponent(sessionId)}/terminal`;
 }
 
-/** 计算 ArrayBuffer 的 SHA-256 hex（Web Crypto）。 */
+/** 计算 ArrayBuffer 的 SHA-256 hex（Web Crypto；HTTP 内网回退本地实现）。 */
 export async function sha256Hex(buffer) {
-  // 普通 HTTP 内网页面通常没有 crypto.subtle；此时使用同结果的本地实现，
-  // 不把 HTTPS 作为服务器运维功能的强制前置条件。
+  // 普通 HTTP 内网页面通常没有 crypto.subtle；此时使用同结果的本地实现。
+  // 大文件应在调用侧分块 + setTimeout(0) 让出主线程，避免连续卡顿。
   if (typeof crypto !== 'undefined' && crypto.subtle) {
     try {
       const digest = await crypto.subtle.digest('SHA-256', buffer);

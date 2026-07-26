@@ -457,8 +457,22 @@ function App() {
     route.page === "server-operations" ? "服务器运维" :
     ({ overview: "总览", apps: "应用列表", "data-resources": "数据资源", cabinet: "文件柜", audit: "审计日志", users: "用户管理", agents: "Agent 管理", system: "系统" })[route.page] || route.page;
 
-  // 工作台独立全页（已登录 + hash 匹配）
+  // 工作台独立全页（已登录 + hash 匹配）；功能关闭时 fail-closed 并给出明确提示。
   if (view === "console" && workspaceResourceId) {
+    if (!(features && features.serverOperations)) {
+      return (
+        <MCStore.Provider value={store}>
+          <div data-screen-label="服务器工作台" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ textAlign: "center", color: "var(--muted-fg)", maxWidth: 360 }}>
+              <div style={{ fontWeight: 600, color: "var(--fg)", marginBottom: 8 }}>服务器运维未启用</div>
+              <div style={{ fontSize: 13 }}>请管理员在 config.toml 中设置 server_operations.enabled=true 并重启 Console。</div>
+            </div>
+          </div>
+          <ToastHost />
+          <ConfirmHost />
+        </MCStore.Provider>
+      );
+    }
     return (
       <MCStore.Provider value={store}>
         <div data-screen-label="服务器工作台" style={{ height: "100%" }}>
@@ -468,6 +482,7 @@ function App() {
             theme={t.dark ? "dark" : "light"}
             onTheme={() => setTweak("dark", !t.dark)}
             onLogout={logout}
+            zmodemMaxMB={Number(features.zmodemMaxTransferMB) > 0 ? Number(features.zmodemMaxTransferMB) : 512}
           />
         </div>
         <ToastHost />
