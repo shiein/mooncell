@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -159,5 +160,43 @@ func TestSessionManagerGeneration(t *testing.T) {
 	// 关闭后从 map 移除
 	if m.Count() != 0 {
 		t.Fatalf("expected 0 after bump grant, got %d", m.Count())
+	}
+}
+
+func TestOverwriteColumnAndTransferInsert(t *testing.T) {
+	db := openTestDB(t)
+	tr := FileTransfer{
+		ID: "tx1", ResourceID: "r1", Username: "u", Direction: DirectionUpload,
+		RemotePath: "/tmp/a", RemoteTempPath: "/tmp/.a.part",
+		ExpectedSize: 10, TransferredSize: 0, Overwrite: true,
+		State: TransferUploading, CreatedAt: 1, UpdatedAt: 1, ExpiresAt: 9999999999999,
+	}
+	// 资源行非必须；insert 不校验 FK
+	if err := insertTransfer(db, tr); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := getTransfer(db, "tx1")
+	if err != nil || !ok {
+		t.Fatalf("get: %v ok=%v", err, ok)
+	}
+	if !got.Overwrite {
+		t.Fatal("overwrite not persisted")
+	}
+}
+
+func TestSessionIdleReap(t *testing.T) {
+	m := newSessionManager()
+	s := &Session{
+		ID: "ssh_idle", ResourceID: "srv_a", Username: "alice",
+		ExpiresAt: time.Now().Add(time.Hour),
+		IdleTimeout: time.Second,
+	}
+	s.lastActivityUnix.Store(time.Now().Add(-2 * time.Second).Unix())
+	m.Register(s)
+	if n := m.ReapTimedOut(); n != 1 {
+		t.Fatalf("reap want 1 got %d", n)
+	}
+	if m.Count() != 0 {
+		t.Fatal("session should be gone")
 	}
 }

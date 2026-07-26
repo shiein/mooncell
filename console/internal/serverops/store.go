@@ -292,22 +292,37 @@ func ListResourceIDs(db *sql.DB) ([]ServerResource, error) {
 // --- 传输元数据 ---
 
 func insertTransfer(db *sql.DB, t FileTransfer) error {
+	ow := 0
+	if t.Overwrite {
+		ow = 1
+	}
 	_, err := db.Exec(`INSERT INTO server_file_transfers
 		(id, resource_id, username, direction, remote_path, remote_temp_path,
-		 expected_size, transferred_size, state, created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 expected_size, transferred_size, overwrite, state, created_at, updated_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.ResourceID, t.Username, t.Direction, t.RemotePath, t.RemoteTempPath,
-		t.ExpectedSize, t.TransferredSize, t.State, t.CreatedAt, t.UpdatedAt, t.ExpiresAt)
+		t.ExpectedSize, t.TransferredSize, ow, t.State, t.CreatedAt, t.UpdatedAt, t.ExpiresAt)
 	return err
 }
 
-func getTransfer(db *sql.DB, id string) (FileTransfer, bool, error) {
+func scanTransfer(scanner interface {
+	Scan(dest ...any) error
+}) (FileTransfer, error) {
 	var t FileTransfer
-	err := db.QueryRow(`SELECT id, resource_id, username, direction, remote_path, remote_temp_path,
-		expected_size, transferred_size, state, created_at, updated_at, expires_at
-		FROM server_file_transfers WHERE id = ?`, id).Scan(
+	var ow int
+	err := scanner.Scan(
 		&t.ID, &t.ResourceID, &t.Username, &t.Direction, &t.RemotePath, &t.RemoteTempPath,
-		&t.ExpectedSize, &t.TransferredSize, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ExpiresAt)
+		&t.ExpectedSize, &t.TransferredSize, &ow, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ExpiresAt)
+	t.Overwrite = ow != 0
+	return t, err
+}
+
+const transferSelectCols = `id, resource_id, username, direction, remote_path, remote_temp_path,
+		expected_size, transferred_size, overwrite, state, created_at, updated_at, expires_at`
+
+func getTransfer(db *sql.DB, id string) (FileTransfer, bool, error) {
+	row := db.QueryRow(`SELECT `+transferSelectCols+` FROM server_file_transfers WHERE id = ?`, id)
+	t, err := scanTransfer(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, false, nil
 	}
@@ -325,23 +340,21 @@ func updateTransferState(db *sql.DB, id, state string, now int64) error {
 	return err
 }
 
-// listActiveTransfers 列出用户在资源上未结束的上传（续传 UI）。
+// listActiveTransfers 列出用户在资源上可续传的 uploading 记录（不含 cleanup_pending）。
 func listActiveTransfers(db *sql.DB, username, resourceID string) ([]FileTransfer, error) {
-	rows, err := db.Query(`SELECT id, resource_id, username, direction, remote_path, remote_temp_path,
-		expected_size, transferred_size, state, created_at, updated_at, expires_at
+	rows, err := db.Query(`SELECT `+transferSelectCols+`
 		FROM server_file_transfers
-		WHERE username=? AND resource_id=? AND state IN (?, ?) AND expires_at > ?
+		WHERE username=? AND resource_id=? AND state=? AND expires_at > ?
 		ORDER BY created_at`,
-		username, resourceID, TransferUploading, TransferCleanupPending, time.Now().UnixMilli())
+		username, resourceID, TransferUploading, time.Now().UnixMilli())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []FileTransfer
 	for rows.Next() {
-		var t FileTransfer
-		if err := rows.Scan(&t.ID, &t.ResourceID, &t.Username, &t.Direction, &t.RemotePath, &t.RemoteTempPath,
-			&t.ExpectedSize, &t.TransferredSize, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ExpiresAt); err != nil {
+		t, err := scanTransfer(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -351,8 +364,7 @@ func listActiveTransfers(db *sql.DB, username, resourceID string) ([]FileTransfe
 
 // listCleanupPending 列出待清理的 part 记录。
 func listCleanupPending(db *sql.DB, resourceID string) ([]FileTransfer, error) {
-	rows, err := db.Query(`SELECT id, resource_id, username, direction, remote_path, remote_temp_path,
-		expected_size, transferred_size, state, created_at, updated_at, expires_at
+	rows, err := db.Query(`SELECT `+transferSelectCols+`
 		FROM server_file_transfers
 		WHERE resource_id=? AND state=? ORDER BY created_at`, resourceID, TransferCleanupPending)
 	if err != nil {
@@ -361,9 +373,8 @@ func listCleanupPending(db *sql.DB, resourceID string) ([]FileTransfer, error) {
 	defer rows.Close()
 	var out []FileTransfer
 	for rows.Next() {
-		var t FileTransfer
-		if err := rows.Scan(&t.ID, &t.ResourceID, &t.Username, &t.Direction, &t.RemotePath, &t.RemoteTempPath,
-			&t.ExpectedSize, &t.TransferredSize, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ExpiresAt); err != nil {
+		t, err := scanTransfer(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, t)

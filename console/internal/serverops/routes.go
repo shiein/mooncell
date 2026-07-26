@@ -29,6 +29,8 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc)
 	mux.HandleFunc("GET /api/server-resources/{id}/sessions/{sid}/download", wrap(s.DownloadFile))
 	mux.HandleFunc("POST /api/server-resources/{id}/sessions/{sid}/uploads", wrap(s.InitUpload))
 	mux.HandleFunc("PUT /api/server-resources/{id}/sessions/{sid}/uploads/{tid}", wrap(s.UploadChunk))
+	// 列表须先于 {tid}，避免 path 冲突（Go 1.22 模式匹配按具体度；active 列表用独立后缀更清晰）。
+	mux.HandleFunc("GET /api/server-resources/{id}/uploads", wrap(s.ListActiveUploads))
 	mux.HandleFunc("GET /api/server-resources/{id}/uploads/{tid}", wrap(s.GetUploadStatus))
 	mux.HandleFunc("POST /api/server-resources/{id}/sessions/{sid}/uploads/{tid}/resume", wrap(s.ResumeUpload))
 	mux.HandleFunc("POST /api/server-resources/{id}/sessions/{sid}/uploads/{tid}/complete", wrap(s.CompleteUpload))

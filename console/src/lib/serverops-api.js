@@ -145,10 +145,20 @@ export async function getUploadStatus(resourceId, transferId) {
   );
 }
 
-export async function resumeServerUpload(resourceId, sessionId, transferId) {
+/** 列出当前用户在该资源上可续传的 uploading 任务。 */
+export async function listActiveUploads(resourceId) {
+  const d = await jsonFetch(`/api/server-resources/${encodeURIComponent(resourceId)}/uploads`);
+  return d.transfers || [];
+}
+
+export async function resumeServerUpload(resourceId, sessionId, transferId, { localSize } = {}) {
   return jsonFetch(
     `/api/server-resources/${encodeURIComponent(resourceId)}/sessions/${encodeURIComponent(sessionId)}/uploads/${encodeURIComponent(transferId)}/resume`,
-    { method: 'POST' },
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ localSize: localSize || 0 }),
+    },
   );
 }
 

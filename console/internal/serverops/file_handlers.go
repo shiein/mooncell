@@ -98,6 +98,7 @@ func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 
+	sess.Touch()
 	if s.touch != nil {
 		s.touch(user)
 	}
@@ -105,7 +106,7 @@ func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 // DownloadFile GET .../sessions/{sid}/download?path=
-// 流式转发，不落 Console 盘；支持单区间 Range。
+// 流式转发，不落 Console 盘；支持单区间 Range（含 suffix bytes=-N）。
 func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	user, _, ok := userFromCtx(r)
 	if !ok {
@@ -119,6 +120,16 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
 	}
+	sess.Touch()
+	if err := s.tryBeginDownload(user); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	// 下载用临时 id 占槽，结束时释放（与上传 activeUploads 共用全局并发语义的简化实现）。
+	dlID := newID("dl")
+	s.trackUpload(dlID)
+	defer s.untrackUpload(dlID)
+
 	sc, err := sess.SFTP()
 	if err != nil {
 		writeAPIError(w, err)
@@ -165,47 +176,14 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", contentDispositionAttachment(base))
 
-	// 多 Range 第一版不支持
-	rangeHdr := r.Header.Get("Range")
-	if strings.Contains(rangeHdr, ",") {
+	start, end, status, okRange := parseSingleRange(r.Header.Get("Range"), r.Header.Get("If-Range"), etag, size)
+	if !okRange {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-		http.Error(w, "multipart ranges not supported", http.StatusRequestedRangeNotSatisfiable)
+		http.Error(w, "invalid range", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
-
-	start := int64(0)
-	end := size - 1
-	status := http.StatusOK
-	if strings.HasPrefix(rangeHdr, "bytes=") {
-		// If-Range：不匹配则完整下载
-		if ir := r.Header.Get("If-Range"); ir != "" && ir != etag {
-			// 忽略 Range，完整响应
-		} else {
-			spec := strings.TrimPrefix(rangeHdr, "bytes=")
-			parts := strings.SplitN(spec, "-", 2)
-			if len(parts) == 2 {
-				if parts[0] != "" {
-					if v, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
-						start = v
-					}
-				}
-				if parts[1] != "" {
-					if v, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-						end = v
-					}
-				}
-				if start < 0 || start >= size || end < start {
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-					http.Error(w, "invalid range", http.StatusRequestedRangeNotSatisfiable)
-					return
-				}
-				if end >= size {
-					end = size - 1
-				}
-				status = http.StatusPartialContent
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
-			}
-		}
+	if status == http.StatusPartialContent {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 	}
 
 	length := end - start + 1
@@ -230,13 +208,73 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		s.auditLog(user, "SFTP 下载", auditFileTarget(resName, "download", cleaned, size), "失败")
 		return
 	}
-	// 完整或客户端取消：仅完整成功记成功
 	if copyErr == nil {
 		s.auditLog(user, "SFTP 下载", auditFileTarget(resName, "download", cleaned, size), "成功")
 	}
 	if s.touch != nil {
 		s.touch(user)
 	}
+}
+
+// parseSingleRange 解析单区间 Range。返回 ok=false 表示应 416。
+// 支持 bytes=start-end、bytes=start-、bytes=-suffix。非法数字 → 416，不返回错误 206。
+func parseSingleRange(rangeHdr, ifRange, etag string, size int64) (start, end int64, status int, ok bool) {
+	start, end, status = int64(0), size-1, http.StatusOK
+	if size <= 0 {
+		return 0, -1, http.StatusOK, true
+	}
+	if rangeHdr == "" {
+		return start, end, status, true
+	}
+	if strings.Contains(rangeHdr, ",") {
+		return 0, 0, 0, false
+	}
+	if !strings.HasPrefix(rangeHdr, "bytes=") {
+		return 0, 0, 0, false
+	}
+	// If-Range 不匹配：忽略 Range，完整响应
+	if ifRange != "" && ifRange != etag {
+		return 0, size - 1, http.StatusOK, true
+	}
+	spec := strings.TrimPrefix(rangeHdr, "bytes=")
+	parts := strings.SplitN(spec, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, 0, false
+	}
+	left, right := parts[0], parts[1]
+
+	if left == "" && right == "" {
+		return 0, 0, 0, false
+	}
+	// suffix: bytes=-N → 最后 N 字节
+	if left == "" {
+		n, err := strconv.ParseInt(right, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, 0, false
+		}
+		if n > size {
+			n = size
+		}
+		return size - n, size - 1, http.StatusPartialContent, true
+	}
+	s, err := strconv.ParseInt(left, 10, 64)
+	if err != nil || s < 0 {
+		return 0, 0, 0, false
+	}
+	e := size - 1
+	if right != "" {
+		e, err = strconv.ParseInt(right, 10, 64)
+		if err != nil || e < 0 {
+			return 0, 0, 0, false
+		}
+	}
+	if s >= size || e < s {
+		return 0, 0, 0, false
+	}
+	if e >= size {
+		e = size - 1
+	}
+	return s, e, http.StatusPartialContent, true
 }
 
 func contentDispositionAttachment(filename string) string {

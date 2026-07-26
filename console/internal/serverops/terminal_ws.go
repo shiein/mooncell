@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,15 +35,21 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
 	}
+	sess.Touch()
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		CompressionMode: websocket.CompressionDisabled,
-		OriginPatterns:  originPatterns(r),
+		// 仅放行 originOK 已校验的精确 Origin，禁止后缀匹配。
+		OriginPatterns: originPatterns(r),
 	})
 	if err != nil {
 		return
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	// WS 结束后必须释放 PTY；若客户端已走，关闭整会话避免占限额（SFTP 同会话一并结束）。
+	// 浏览器正常卸载会再调 DELETE session；此处保证异常断线也能回收。
+	defer func() {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}()
 
 	client := sess.Client()
 	if client == nil {
@@ -58,16 +63,33 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.mu.Lock()
+	// 同一 session 只允许一个 PTY；替换旧的。
+	if sess.sshSession != nil {
+		_ = sess.sshSession.Close()
+	}
 	sess.sshSession = sshSess
 	sess.mu.Unlock()
-	defer func() {
-		sess.mu.Lock()
-		if sess.sshSession == sshSess {
-			sess.sshSession = nil
-		}
-		sess.mu.Unlock()
-		_ = sshSess.Close()
-	}()
+
+	// 远端 shell 退出或 WS 结束时的统一清理。
+	ptyDone := make(chan struct{})
+	var closeOnce sync.Once
+	finish := func(closeFullSession bool) {
+		closeOnce.Do(func() {
+			sess.mu.Lock()
+			if sess.sshSession == sshSess {
+				sess.sshSession = nil
+			}
+			sess.mu.Unlock()
+			_ = sshSess.Close()
+			close(ptyDone)
+			if closeFullSession && !sess.closed.Load() {
+				// 终端是工作台主通道：WS 异常结束后回收整个 SSH，防止僵尸占限额。
+				// 用户若仍需 SFTP，须保持终端 WS 或重新创建 session。
+				sess.Close()
+			}
+		})
+	}
+	defer finish(true)
 
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
@@ -99,6 +121,12 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 监听远端 shell 退出，及时通知浏览器并回收。
+	go func() {
+		_ = sshSess.Wait()
+		finish(true)
+	}()
+
 	ctx := r.Context()
 	_ = writeWSJSON(ctx, conn, map[string]any{"type": "ready"})
 
@@ -111,7 +139,9 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		tooSlow  bool
 	)
 
+	var pumps sync.WaitGroup
 	pump := func(rd io.Reader) {
+		defer pumps.Done()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := rd.Read(buf)
@@ -120,7 +150,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 				if outBytes+n > maxPTYOutputQueue {
 					tooSlow = true
 					outMu.Unlock()
-					sess.Close()
+					finish(true)
 					return
 				}
 				outBytes += n
@@ -133,6 +163,8 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 					return
 				case <-sess.ctx.Done():
 					return
+				case <-ptyDone:
+					return
 				}
 			}
 			if err != nil {
@@ -140,8 +172,13 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	pumps.Add(2)
 	go pump(stdout)
 	go pump(stderr)
+	go func() {
+		pumps.Wait()
+		close(outCh)
+	}()
 
 	// Mooncell 会话校验 + SSH keepalive
 	go func() {
@@ -154,16 +191,18 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-sess.ctx.Done():
 				return
+			case <-ptyDone:
+				return
 			case <-t.C:
 				if s.valid != nil && !s.valid(user) {
 					_ = writeWSJSON(ctx, conn, map[string]any{"type": "error", "code": CodeMooncellSessionExp, "message": "登录已过期"})
-					sess.Close()
+					finish(true)
 					return
 				}
 				if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 					missed++
 					if missed >= defaultKeepaliveMissed {
-						sess.Close()
+						finish(true)
 						return
 					}
 				} else {
@@ -197,6 +236,8 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-sess.ctx.Done():
 				return
+			case <-ptyDone:
+				return
 			case c, ok := <-outCh:
 				if !ok {
 					return
@@ -219,11 +260,17 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 读循环
+	// 读循环：用户输入 / 控制消息
+readLoop:
 	for {
 		msgType, data, err := conn.Read(ctx)
 		if err != nil {
 			break
+		}
+		select {
+		case <-ptyDone:
+			break readLoop
+		default:
 		}
 		if msgType == websocket.MessageBinary {
 			if len(data) > maxWSBinaryFrame {
@@ -233,6 +280,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 			if _, err := stdin.Write(data); err != nil {
 				break
 			}
+			sess.Touch()
 			if s.touch != nil {
 				s.touch(user)
 			}
@@ -250,6 +298,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		case "resize":
 			if ctrl.Cols > 0 && ctrl.Rows > 0 {
 				_ = sshSess.WindowChange(ctrl.Rows, ctrl.Cols)
+				sess.Touch()
 				if s.touch != nil {
 					s.touch(user)
 				}
@@ -258,7 +307,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 			_ = writeTxt(map[string]any{"type": "pong"})
 		case "close":
 			_ = writeTxt(map[string]any{"type": "exit", "code": 0})
-			sess.Close()
+			finish(true)
 			return
 		}
 	}
@@ -270,6 +319,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = writeTxt(map[string]any{"type": "exit", "code": 0})
 	log.Printf("[serverops] terminal closed user=%s resource=%s", user, resourceID)
+	// defer finish(true) 回收 SSH
 }
 
 func writeWSJSON(ctx context.Context, conn *websocket.Conn, v any) error {
@@ -290,21 +340,4 @@ func writeWSJSONLocked(ctx context.Context, conn *websocket.Conn, v any) error {
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return conn.Write(wctx, websocket.MessageText, b)
-}
-
-func originOK(r *http.Request) bool {
-	o := r.Header.Get("Origin")
-	if o == "" {
-		return true
-	}
-	host := r.Host
-	return strings.Contains(o, "://"+host) || strings.HasSuffix(o, host)
-}
-
-func originPatterns(r *http.Request) []string {
-	o := r.Header.Get("Origin")
-	if o == "" {
-		return []string{"*"}
-	}
-	return []string{o}
 }

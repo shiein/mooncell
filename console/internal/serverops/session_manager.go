@@ -22,9 +22,13 @@ type Session struct {
 	Host         string
 	Port         int
 	CreatedAt    time.Time
-	ExpiresAt    time.Time
+	ExpiresAt    time.Time // 绝对过期（max session hours）
+	IdleTimeout  time.Duration
 	ResourceGen  uint64 // 注册时资源代际
 	UserGrantGen uint64 // 注册时 (user, resource) 授权代际
+
+	// lastActivityUnix 最后主动活动（输入/resize/SFTP/创建）；idle 回收依据。
+	lastActivityUnix atomic.Int64
 
 	client   *ssh.Client
 	sftp     *sftp.Client
@@ -175,6 +179,9 @@ func (m *SessionManager) Register(s *Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s.mgr = m
+	if s.lastActivityUnix.Load() == 0 {
+		s.lastActivityUnix.Store(time.Now().Unix())
+	}
 	m.sessions[s.ID] = s
 	m.sessionUserGen[s.ID] = m.userGen[s.Username]
 }
@@ -187,7 +194,7 @@ func (m *SessionManager) Unregister(id string) {
 	delete(m.sessionUserGen, id)
 }
 
-// Get 按 ID 取会话；校验 owner 与代际，不一致则关闭并返回 nil。
+// Get 按 ID 取会话；校验 owner、代际、绝对过期与 idle；不一致则关闭并返回 nil。
 func (m *SessionManager) Get(sessionID, username, resourceID string) *Session {
 	m.mu.Lock()
 	s := m.sessions[sessionID]
@@ -210,13 +217,53 @@ func (m *SessionManager) Get(sessionID, username, resourceID string) *Session {
 		s.Close()
 		return nil
 	}
-	if time.Now().After(s.ExpiresAt) {
+	if s.isTimedOut(time.Now()) {
 		m.mu.Unlock()
 		s.Close()
 		return nil
 	}
 	m.mu.Unlock()
 	return s
+}
+
+// ReapTimedOut 关闭所有绝对过期或 idle 超时的会话，返回关闭数量。
+// 由 Service 后台周期调用，不依赖后续 API 访问才触发回收。
+func (m *SessionManager) ReapTimedOut() int {
+	now := time.Now()
+	m.mu.Lock()
+	var toClose []*Session
+	for _, s := range m.sessions {
+		if s.isTimedOut(now) {
+			toClose = append(toClose, s)
+		}
+	}
+	m.mu.Unlock()
+	for _, s := range toClose {
+		s.Close()
+	}
+	return len(toClose)
+}
+
+// isTimedOut 判断绝对过期或 idle 超时（持锁外可读原子字段）。
+func (s *Session) isTimedOut(now time.Time) bool {
+	if now.After(s.ExpiresAt) {
+		return true
+	}
+	if s.IdleTimeout > 0 {
+		last := s.lastActivityUnix.Load()
+		if last > 0 && now.Unix()-last > int64(s.IdleTimeout.Seconds()) {
+			return true
+		}
+	}
+	return false
+}
+
+// Touch 记录主动活动，滑动 idle 窗口（不延长绝对 ExpiresAt）。
+func (s *Session) Touch() {
+	if s == nil || s.closed.Load() {
+		return
+	}
+	s.lastActivityUnix.Store(time.Now().Unix())
 }
 
 // CloseAll 关闭全部会话（Service.Close / Console 退出）。

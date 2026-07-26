@@ -74,7 +74,7 @@ func (s *Service) DB() *sql.DB { return s.db }
 // Sessions 返回会话管理器（consoleapp 撤权/logout 联动）。
 func (s *Service) Sessions() *SessionManager { return s.sess }
 
-// Start 在 enabled 时启动后台清理（传输 TTL 标记等）。
+// Start 在 enabled 时启动后台清理：会话 idle/绝对过期回收 + 传输 TTL。
 func (s *Service) Start() {
 	if !s.cfg.Enabled {
 		return
@@ -82,13 +82,20 @@ func (s *Service) Start() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		ticker := time.NewTicker(10 * time.Minute)
-		defer ticker.Stop()
+		// 会话回收需较勤，避免浏览器崩溃后占满限额。
+		sessionTicker := time.NewTicker(30 * time.Second)
+		transferTicker := time.NewTicker(10 * time.Minute)
+		defer sessionTicker.Stop()
+		defer transferTicker.Stop()
 		for {
 			select {
 			case <-s.stopCh:
 				return
-			case <-ticker.C:
+			case <-sessionTicker.C:
+				if n := s.sess.ReapTimedOut(); n > 0 {
+					log.Printf("[serverops] 回收超时 SSH 会话 %d 个", n)
+				}
+			case <-transferTicker.C:
 				s.expireStaleTransfers()
 			}
 		}
@@ -126,17 +133,42 @@ func (s *Service) InvalidateResource(resourceID string) {
 
 func (s *Service) expireStaleTransfers() {
 	now := time.Now().UnixMilli()
-	res, err := s.db.Exec(
-		`UPDATE server_file_transfers SET state=?, updated_at=?
-		 WHERE state IN (?, ?) AND expires_at > 0 AND expires_at < ?`,
-		TransferExpired, now, TransferUploading, TransferCleanupPending, now)
+	// 仅将 uploading 标为 expired，并移出内存 activeUploads。
+	// cleanup_pending 必须保留，等待下次成功连接后按记录精确删远端 part，不得改成 expired。
+	rows, err := s.db.Query(
+		`SELECT id FROM server_file_transfers WHERE state=? AND expires_at > 0 AND expires_at < ?`,
+		TransferUploading, now)
 	if err != nil {
-		log.Printf("[serverops] 过期传输标记失败: %v", err)
+		log.Printf("[serverops] 查询过期传输失败: %v", err)
 		return
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		log.Printf("[serverops] 标记过期传输 %d 条", n)
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return
+		}
+		ids = append(ids, id)
 	}
+	rows.Close()
+	if len(ids) == 0 {
+		return
+	}
+	for _, id := range ids {
+		if _, err := s.db.Exec(
+			`UPDATE server_file_transfers SET state=?, updated_at=? WHERE id=? AND state=?`,
+			TransferExpired, now, id, TransferUploading); err != nil {
+			log.Printf("[serverops] 标记过期传输失败 id=%s: %v", id, err)
+			continue
+		}
+		// 过期后远端 part 无法无密码清理 → 转为 cleanup_pending 等待精确清理
+		_, _ = s.db.Exec(
+			`UPDATE server_file_transfers SET state=? WHERE id=? AND state=? AND remote_temp_path != ''`,
+			TransferCleanupPending, id, TransferExpired)
+		s.untrackUpload(id)
+	}
+	log.Printf("[serverops] 处理过期上传 %d 条", len(ids))
 }
 
 // checkAuthRateLimit 密码失败限速；超过返回错误。

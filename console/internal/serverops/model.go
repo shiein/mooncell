@@ -85,6 +85,8 @@ type FileTransfer struct {
 	RemoteTempPath  string `json:"remoteTempPath"`
 	ExpectedSize    int64  `json:"expectedSize"`
 	TransferredSize int64  `json:"transferredSize"`
+	// Overwrite 初始化时持久化；完成阶段必须按此策略 re-check，禁止竞态覆盖。
+	Overwrite       bool   `json:"overwrite"`
 	State           string `json:"state"`
 	CreatedAt       int64  `json:"createdAt"`
 	UpdatedAt       int64  `json:"updatedAt"`

@@ -106,12 +106,8 @@ func (s *Service) CreateSession(w http.ResponseWriter, r *http.Request) {
 	s.clearAuthFail(user, resourceID, clientIP)
 
 	now := time.Now()
+	// 绝对过期 = max session hours；idle 由 lastActivity + IdleTimeout 独立判定。
 	expires := now.Add(s.cfg.maxSessionDuration())
-	// 同时受 idle 限制：绝对过期取 max session；idle 由后台与活动触达共同处理。
-	idleExp := now.Add(s.cfg.idleTimeout())
-	if idleExp.Before(expires) {
-		// 首次 expires 用 absolute；idle 在会话活动中滑动（见 touchSessionActivity）。
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sess := &Session{
 		ID:           newID("ssh"),
@@ -122,12 +118,14 @@ func (s *Service) CreateSession(w http.ResponseWriter, r *http.Request) {
 		Port:         res.Port,
 		CreatedAt:    now,
 		ExpiresAt:    expires,
+		IdleTimeout:  s.cfg.idleTimeout(),
 		ResourceGen:  rGen,
 		UserGrantGen: gGen,
 		client:       client,
 		cancel:       cancel,
 		ctx:          ctx,
 	}
+	sess.lastActivityUnix.Store(now.Unix())
 	s.sess.Register(sess)
 	s.auditLog(user, "SSH 连接", res.Name, "成功")
 

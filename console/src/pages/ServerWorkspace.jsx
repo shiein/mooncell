@@ -80,7 +80,7 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme }) {
     setConnErr(null);
   };
 
-  const onTransfer = (t) => {
+  const onTransfer = React.useCallback((t) => {
     setTransfers((list) => {
       const i = list.findIndex((x) => x.id === t.id);
       if (i < 0) return [t, ...list].slice(0, 20);
@@ -88,7 +88,13 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme }) {
       next[i] = t;
       return next;
     });
-  };
+  }, []);
+
+  // 稳定回调：避免 TerminalPane 因父组件重渲染而重建 WebSocket/Shell
+  const onTerminalDisconnected = React.useCallback(() => {
+    setSessionId(null);
+    toast('会话已结束', { tone: 'warn' });
+  }, []);
 
   // 拖动分隔条
   const onDragStart = (e) => {
@@ -193,10 +199,7 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme }) {
             <TerminalPane
               resourceId={resourceId}
               sessionId={sessionId}
-              onDisconnected={() => {
-                setSessionId(null);
-                toast('会话已结束', { tone: 'warn' });
-              }}
+              onDisconnected={onTerminalDisconnected}
             />
           ) : (
             <EmptyState icon="terminal" title="输入 SSH 密码以连接"
