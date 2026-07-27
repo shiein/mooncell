@@ -93,12 +93,15 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
+      // 键盘输入：直达 ws.send，不经 Promise 链（低延迟关键路径）。
+      // ZMODEM 大块发送：串行 + 背压，避免撑爆 bufferedAmount。
+      const textEnc = new TextEncoder();
       let binarySendChain = Promise.resolve();
-      const sendBinary = (u8) => {
+      const sendBinaryBackpressured = (u8) => {
         const data = u8.slice();
         const send = async () => {
-          while (!disposed && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > 4 * 1024 * 1024) {
-            await new Promise((resolve) => setTimeout(resolve, 10));
+          while (!disposed && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > 512 * 1024) {
+            await new Promise((resolve) => setTimeout(resolve, 8));
           }
           if (disposed || ws.readyState !== WebSocket.OPEN) {
             throw new Error('终端连接已关闭');
@@ -108,6 +111,7 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
         binarySendChain = binarySendChain.then(send);
         return binarySendChain;
       };
+      const sendBinary = sendBinaryBackpressured;
 
       zmBridge = createZmodemBridge({
         sendToRemote: sendBinary,
@@ -188,24 +192,51 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
 
       term.onData((data) => {
         if (ws.readyState !== WebSocket.OPEN) return;
-        sendBinary(new TextEncoder().encode(data)).catch(() => {});
-      });
-
-      term.onResize(({ cols, rows }) => {
-        if (cols > 1 && rows > 1) {
-          sendCtrl({ type: 'resize', cols, rows });
+        // ZMODEM 进行中也允许 Ctrl+C 等；大流量时仍走背压路径
+        if (zmBridge && zmBridge.isBusy()) {
+          sendBinaryBackpressured(textEnc.encode(data)).catch(() => {});
+          return;
         }
+        try {
+          ws.send(textEnc.encode(data));
+        } catch (_) { /* ignore */ }
       });
 
-      const onWinResize = () => { fitAndNotify(); };
+      // resize 节流：避免 ResizeObserver 风暴打满控制帧
+      let resizeTimer = null;
+      let lastSentCols = 0;
+      let lastSentRows = 0;
+      term.onResize(({ cols, rows }) => {
+        if (cols <= 1 || rows <= 1) return;
+        if (cols === lastSentCols && rows === lastSentRows) return;
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          resizeTimer = null;
+          if (cols === lastSentCols && rows === lastSentRows) return;
+          lastSentCols = cols;
+          lastSentRows = rows;
+          sendCtrl({ type: 'resize', cols, rows });
+        }, 50);
+      });
+
+      let fitRaf = 0;
+      const onWinResize = () => {
+        if (fitRaf) cancelAnimationFrame(fitRaf);
+        fitRaf = requestAnimationFrame(() => {
+          fitRaf = 0;
+          fitAndNotify();
+        });
+      };
       window.addEventListener('resize', onWinResize);
       if (typeof ResizeObserver !== 'undefined' && hostRef.current) {
-        ro = new ResizeObserver(() => { fitAndNotify(); });
+        ro = new ResizeObserver(onWinResize);
         ro.observe(hostRef.current);
       }
       term.__mcCleanup = () => {
         window.removeEventListener('resize', onWinResize);
         if (ro) ro.disconnect();
+        if (resizeTimer) clearTimeout(resizeTimer);
+        if (fitRaf) cancelAnimationFrame(fitRaf);
         fitTimers.forEach((t) => clearTimeout(t));
       };
     })().catch((e) => {

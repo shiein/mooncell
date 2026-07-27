@@ -417,9 +417,21 @@ export function createZmodemBridge(opts) {
     }
   }
 
+  function bufferHasZPAD(u8) {
+    for (let i = 0; i < u8.length; i++) {
+      if (u8[i] === ZPAD) return true;
+    }
+    return false;
+  }
+
   function onTerminalOutput(u8) {
     if (!u8 || u8.length === 0) return processing;
-    // WebSocket message 回调不会等待 Promise；显式串行，防止并发 feed 同一状态机。
+    // 快路径：无活动 ZMODEM、无探测残留、本帧不含 `*` → 同步写终端，避免 Promise 微任务排队拖慢回显。
+    if (!active && detectBuf.length === 0 && holdTimer == null && !bufferHasZPAD(u8)) {
+      writeToTerm(u8);
+      return processing;
+    }
+    // 慢路径：可能进入/处于 ZMODEM，串行 feed 状态机。
     const copy = u8.slice();
     return enqueue(() => processTerminalOutput(copy));
   }

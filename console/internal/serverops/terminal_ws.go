@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -231,7 +232,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 写协程：所有 WS 写串行
+	// 写协程：所有 WS 写串行；小包合并减少帧开销，但等待上限极短以免拖慢回显。
 	var writeMu sync.Mutex
 	writeBin := func(data []byte) error {
 		writeMu.Lock()
@@ -246,9 +247,27 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		return writeWSJSONLocked(ctx, conn, v)
 	}
 
+	// 键入路径上的 Mooncell 登录续期：SQL 节流已有，但仍走 DB；额外 30s 内存节流避免每键一次 Exec。
+	var lastMCTouch atomic.Int64
+	touchActivity := func(forceMC bool) {
+		sess.Touch()
+		if s.touch == nil {
+			return
+		}
+		now := time.Now().Unix()
+		if !forceMC && now-lastMCTouch.Load() < 30 {
+			return
+		}
+		lastMCTouch.Store(now)
+		s.touch(user)
+	}
+
 	writeDone := make(chan struct{})
 	go func() {
 		defer close(writeDone)
+		// 非阻塞合并：有积压时拼帧，无积压立即写出 —— 不引入定时等待，避免拖慢键入回显。
+		const coalesceMax = 8 * 1024
+		buf := make([]byte, 0, coalesceMax)
 		for {
 			select {
 			case <-ctx.Done():
@@ -261,7 +280,23 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					return
 				}
-				if err := writeBin(c.b); err != nil {
+				buf = append(buf[:0], c.b...)
+			drain:
+				for len(buf) < coalesceMax {
+					select {
+					case more, ok2 := <-outCh:
+						if !ok2 {
+							if err := writeBin(buf); err != nil {
+								return
+							}
+							return
+						}
+						buf = append(buf, more.b...)
+					default:
+						break drain
+					}
+				}
+				if err := writeBin(buf); err != nil {
 					return
 				}
 			}
@@ -288,10 +323,8 @@ readLoop:
 			if _, err := stdin.Write(data); err != nil {
 				break
 			}
-			sess.Touch()
-			if s.touch != nil {
-				s.touch(user)
-			}
+			// 键入：只更新会话 idle 原子；Mooncell 登录续期 30s 节流
+			touchActivity(false)
 			continue
 		}
 		var ctrl struct {
@@ -306,10 +339,7 @@ readLoop:
 		case "resize":
 			if ctrl.Cols > 0 && ctrl.Rows > 0 {
 				_ = sshSess.WindowChange(ctrl.Rows, ctrl.Cols)
-				sess.Touch()
-				if s.touch != nil {
-					s.touch(user)
-				}
+				touchActivity(false)
 			}
 		case "ping":
 			_ = writeTxt(map[string]any{"type": "pong"})
