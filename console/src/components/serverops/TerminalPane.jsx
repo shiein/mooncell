@@ -18,7 +18,6 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
   const [status, setStatus] = React.useState('connecting'); // connecting | ready | closed
   const [zmInfo, setZmInfo] = React.useState(''); // 传输提示
 
-  // 始终指向最新回调/配置，不参与连接 effect 依赖。
   React.useEffect(() => { onDisconnectedRef.current = onDisconnected; }, [onDisconnected]);
   React.useEffect(() => { zmodemMaxRef.current = zmodemMaxMB; }, [zmodemMaxMB]);
 
@@ -30,6 +29,23 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
     let searchAddon;
     let ws;
     let zmBridge;
+    let ro;
+    let fitTimers = [];
+
+    const fitAndNotify = () => {
+      if (disposed || !fitAddon || !term) return null;
+      try {
+        fitAddon.fit();
+        const dims = fitAddon.proposeDimensions();
+        if (dims && dims.cols > 1 && dims.rows > 1) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+          }
+          return dims;
+        }
+      } catch (_) { /* ignore */ }
+      return null;
+    };
 
     (async () => {
       const [{ Terminal }, { FitAddon }, { SearchAddon }] = await Promise.all([
@@ -43,21 +59,31 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
       const styles = getComputedStyle(document.documentElement);
       term = new Terminal({
         cursorBlink: true,
-        fontFamily: styles.getPropertyValue('--font-mono')?.trim() || 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        convertEol: false,
+        // 依赖远端 ECHO；禁止本地回显，否则与 bash 回显叠加重影
+        disableStdin: false,
+        fontFamily: styles.getPropertyValue('--font-mono')?.trim()
+          || 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
         fontSize: 13,
+        lineHeight: 1.2,
         theme: {
           background: styles.getPropertyValue('--console-bg')?.trim() || '#0f1419',
           foreground: styles.getPropertyValue('--console-fg')?.trim() || '#e6edf3',
           cursor: styles.getPropertyValue('--console-fg')?.trim() || '#e6edf3',
         },
         allowProposedApi: true,
+        // 滚动缓冲，避免高速输出卡顿感
+        scrollback: 5000,
       });
       fitAddon = new FitAddon();
       searchAddon = new SearchAddon();
       term.loadAddon(fitAddon);
       term.loadAddon(searchAddon);
       term.open(hostRef.current);
-      fitAddon.fit();
+      // 布局稳定后再 fit：容器可能刚挂载或仍有连接中遮罩变化
+      requestAnimationFrame(() => {
+        if (!disposed) fitAndNotify();
+      });
       termRef.current = term;
       fitRef.current = fitAddon;
       searchRef.current = searchAddon;
@@ -69,7 +95,6 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
 
       let binarySendChain = Promise.resolve();
       const sendBinary = (u8) => {
-        // 拷贝后串行发送；缓冲过高时等待下降，不能静默丢弃 ZMODEM 帧。
         const data = u8.slice();
         const send = async () => {
           while (!disposed && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > 4 * 1024 * 1024) {
@@ -104,7 +129,6 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
           }
         },
       });
-      // 预加载库（失败不阻断终端）
       zmBridge.ensureLib().catch(() => {});
 
       const sendCtrl = (obj) => {
@@ -114,10 +138,10 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
       ws.onopen = () => {
         if (disposed) return;
         setStatus('connecting');
-        try {
-          const dims = fitAddon.proposeDimensions();
-          if (dims) sendCtrl({ type: 'resize', cols: dims.cols, rows: dims.rows });
-        } catch (_) { /* ignore */ }
+        // 多次 fit：初次布局、字体加载、遮罩消失后尺寸会变
+        fitAndNotify();
+        fitTimers.push(setTimeout(() => fitAndNotify(), 50));
+        fitTimers.push(setTimeout(() => fitAndNotify(), 200));
       };
 
       ws.onmessage = (ev) => {
@@ -128,6 +152,11 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
             if (msg.type === 'ready') {
               setReady(true);
               setStatus('ready');
+              // ready 后连接遮罩移除，必须再 fit 一次并通知远端 COLUMNS
+              requestAnimationFrame(() => {
+                fitAndNotify();
+                fitTimers.push(setTimeout(() => fitAndNotify(), 100));
+              });
             } else if (msg.type === 'exit' || msg.type === 'error') {
               setStatus('closed');
               if (msg.message) term.writeln(`\r\n\x1b[31m${msg.message}\x1b[0m`);
@@ -138,7 +167,6 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
           return;
         }
         const u8 = new Uint8Array(ev.data);
-        // ZMODEM 桥接：识别后接管，否则写终端
         if (zmBridge) {
           zmBridge.onTerminalOutput(u8);
         } else {
@@ -160,19 +188,26 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
 
       term.onData((data) => {
         if (ws.readyState !== WebSocket.OPEN) return;
-        // ZMODEM 传输期间仍允许键盘（取消等）；协议数据由 bridge 发 binary
         sendBinary(new TextEncoder().encode(data)).catch(() => {});
       });
 
       term.onResize(({ cols, rows }) => {
-        sendCtrl({ type: 'resize', cols, rows });
+        if (cols > 1 && rows > 1) {
+          sendCtrl({ type: 'resize', cols, rows });
+        }
       });
 
-      const onWinResize = () => {
-        try { fitAddon.fit(); } catch (_) { /* ignore */ }
-      };
+      const onWinResize = () => { fitAndNotify(); };
       window.addEventListener('resize', onWinResize);
-      term.__mcCleanup = () => window.removeEventListener('resize', onWinResize);
+      if (typeof ResizeObserver !== 'undefined' && hostRef.current) {
+        ro = new ResizeObserver(() => { fitAndNotify(); });
+        ro.observe(hostRef.current);
+      }
+      term.__mcCleanup = () => {
+        window.removeEventListener('resize', onWinResize);
+        if (ro) ro.disconnect();
+        fitTimers.forEach((t) => clearTimeout(t));
+      };
     })().catch((e) => {
       console.error(e);
       toast('终端组件加载失败', { tone: 'error' });
@@ -189,7 +224,6 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
       termRef.current = null;
       wsRef.current = null;
     };
-    // 仅资源/会话变化时重建连接；回调经 ref，进度更新不会拆 Shell。
   }, [resourceId, sessionId]);
 
   const doSearch = (dir) => {
@@ -227,9 +261,15 @@ export function TerminalPane({ resourceId, sessionId, onDisconnected, zmodemMaxM
           rz/sz
         </span>
       </div>
-      <div ref={hostRef} style={{ flex: 1, minHeight: 0, padding: 4, background: 'var(--console-bg)' }}>
+      {/* 终端容器独立：遮罩用 absolute，避免挤占 xterm 尺寸导致 COLUMNS 错误 */}
+      <div style={{ flex: 1, minHeight: 0, position: 'relative', background: 'var(--console-bg)' }}>
+        <div ref={hostRef} style={{ position: 'absolute', inset: 0, padding: 4 }} />
         {!ready && status === 'connecting' ? (
-          <div style={{ padding: 16, color: 'var(--muted-fg)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{
+            position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            gap: 8, color: 'var(--muted-fg)', pointerEvents: 'none', zIndex: 1,
+            background: 'var(--console-bg)',
+          }}>
             <Spinner size={14} /> 正在建立终端…
           </div>
         ) : null}

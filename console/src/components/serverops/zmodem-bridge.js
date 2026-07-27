@@ -11,8 +11,18 @@
 
 const ZPAD = 0x2a;
 const ZDLE = 0x18;
-// 简单探测窗口：避免误伤普通 `*` 输出
-const DETECT_LOOKAHEAD = 8;
+
+/**
+ * 仅保留「可能成为 ZMODEM 帧头前缀」的尾部字节数。
+ * 帧头形如 *\x18 或 **\x18B… —— 最多保留末尾 2 个 ZPAD。
+ * 绝不可固定扣住 N 字节：交互 shell 的 prompt 会因此被截断，回显错位。
+ */
+function zmodemHoldTail(u8) {
+  if (!u8.length) return 0;
+  if (u8[u8.length - 1] !== ZPAD) return 0;
+  if (u8.length >= 2 && u8[u8.length - 2] === ZPAD) return 2;
+  return 1;
+}
 
 /**
  * @param {object} opts
@@ -44,6 +54,34 @@ export function createZmodemBridge(opts) {
   let active = null;
   let detectBuf = new Uint8Array(0);
   let processing = Promise.resolve();
+  let holdTimer = null;
+
+  function clearHoldTimer() {
+    if (holdTimer != null) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+    }
+  }
+
+  function flushDetectExceptHold() {
+    const hold = zmodemHoldTail(detectBuf);
+    if (detectBuf.length > hold) {
+      writeToTerm(detectBuf.subarray(0, detectBuf.length - hold));
+      detectBuf = detectBuf.subarray(detectBuf.length - hold);
+    }
+  }
+
+  /** 尾部若只剩可能的 `*` 前缀，短时无后续数据则刷出，避免 prompt 永久缺字。 */
+  function scheduleHoldFlush() {
+    clearHoldTimer();
+    if (!detectBuf.length || active) return;
+    holdTimer = setTimeout(() => {
+      holdTimer = null;
+      if (active || !detectBuf.length) return;
+      writeToTerm(detectBuf);
+      detectBuf = new Uint8Array(0);
+    }, 30);
+  }
 
   async function ensureLib() {
     if (ready) return true;
@@ -321,19 +359,19 @@ export function createZmodemBridge(opts) {
 
     // 已在传输中：全部喂给状态机
     if (active) {
+      clearHoldTimer();
       await processActiveInput(u8);
       return;
     }
 
     // 探测阶段：合并缓冲寻找 ZMODEM 起头
+    clearHoldTimer();
     detectBuf = concat(detectBuf, u8);
     const idx = findZmodemStart(detectBuf);
     if (idx < 0) {
-      // 保留尾部少量字节以防帧跨包
-      if (detectBuf.length > DETECT_LOOKAHEAD) {
-        writeToTerm(detectBuf.subarray(0, detectBuf.length - DETECT_LOOKAHEAD));
-        detectBuf = detectBuf.subarray(detectBuf.length - DETECT_LOOKAHEAD);
-      }
+      // 只扣住末尾可能的 `*`/`**` 前缀，其余立即写终端（修复 prompt 截断/回显错位）
+      flushDetectExceptHold();
+      scheduleHoldFlush();
       return;
     }
 
@@ -344,14 +382,18 @@ export function createZmodemBridge(opts) {
     }
     const mode = guessMode(detectBuf);
     if (!mode) {
-      if (detectBuf.length > 64) {
-        writeToTerm(detectBuf.subarray(0, detectBuf.length - DETECT_LOOKAHEAD));
-        detectBuf = detectBuf.subarray(detectBuf.length - DETECT_LOOKAHEAD);
+      // 已见 *\x18 但类型字节未到：最多缓冲一小段；过长则当普通数据刷出
+      if (detectBuf.length > 16) {
+        writeToTerm(detectBuf);
+        detectBuf = new Uint8Array(0);
+      } else {
+        scheduleHoldFlush();
       }
       return;
     }
     const seed = detectBuf;
     detectBuf = new Uint8Array(0);
+    clearHoldTimer();
 
     try {
       await ensureLib();
@@ -423,8 +465,13 @@ export function createZmodemBridge(opts) {
   }
 
   function cancel() {
+    clearHoldTimer();
     if (active) active.cancelled = true;
     active = null;
+    if (detectBuf.length) {
+      writeToTerm(detectBuf);
+      detectBuf = new Uint8Array(0);
+    }
   }
 
   function isBusy() {

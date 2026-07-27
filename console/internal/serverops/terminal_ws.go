@@ -96,8 +96,20 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer finish(true)
 
+	// 完整一点的 termios，减少 bash/readline 在半残模式下的回显错位。
 	modes := ssh.TerminalModes{
-		ssh.ECHO:          1,
+		ssh.ECHO:          1, // 远端回显；浏览器侧不本地回显
+		ssh.ECHOE:         1,
+		ssh.ECHOK:         1,
+		ssh.ECHONL:        0,
+		ssh.ICANON:        1,
+		ssh.ISIG:          1,
+		ssh.ICRNL:         1,
+		ssh.ONLCR:         1,
+		ssh.OCRNL:         0,
+		ssh.ONOCR:         0,
+		ssh.ONLRET:        0,
+		ssh.CS8:           1,
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
