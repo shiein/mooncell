@@ -7,8 +7,8 @@
 ```bash
 # 交叉编译为目标机单二进制(无 CGO)。-ldflags 注入版本号:供 Console 自更新比对与展示,
 # 发布每个版本时把 vX.Y.Z 改成实际版本。
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.agentVersion=v0.2.0" -o agent .   # x86_64
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.agentVersion=v0.2.0" -o agent .   # arm64(UOS/麒麟)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.agentVersion=v0.2.2" -o agent .   # x86_64
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.agentVersion=v0.2.2" -o agent .   # arm64(UOS/麒麟)
 
 # 本机开发直接运行
 go run .

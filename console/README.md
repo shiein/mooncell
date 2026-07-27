@@ -3,6 +3,22 @@
 内网自动化部署平台控制台。前端 Vite + React 18 + Tailwind 经 `go:embed` 嵌入,Go 后端 + SQLite(`modernc.org/sqlite`,无 CGO),生产态打包为单二进制。
 
 ## 编译
+```bash
+go env -w GOARCH=amd64
+go env -w GOOS=windows
+go env -w CGO_ENABLED=0
+go build
+
+go env -w GOARCH=amd64
+go env -w GOOS=linux
+go env -w CGO_ENABLED=0
+go build
+
+go env -w GOARCH=arm64
+go env -w GOOS=linux
+go env -w CGO_ENABLED=0
+go build
+```
 
 ```bash
 # 开发态:前端 5173 热更新,Go 后端 8787,/api 走 Vite 代理
