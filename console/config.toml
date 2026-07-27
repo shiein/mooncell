@@ -1,4 +1,5 @@
 # Mooncell Console 服务配置
+# 可只写需要覆盖的段；未写字段使用代码内置默认值（见 internal/consoleapp/config.go loadConfig）。
 
 [server]
 addr = "127.0.0.1" # 监听地址;生产若改 0.0.0.0,必须同步修改默认密码/token
@@ -22,13 +23,50 @@ password = "1qaz@WSX"
 addr  = "127.0.0.1:9100"
 token = "mc_ag_change_me"
 
+[security]
+# 开启后拒绝注册非 loopback 的明文 http Agent(共享 token 过网风险)。
+# 远端 Agent 须先切到 https 或经 TLS 反代后再置 true。
+require_tls_agents = false
+
 [deploy]
 # 部署制品上传的传输层硬上限(MB)。超出在传输层截断并回 413,防超大制品撑爆磁盘。
-# 浏览器→Console 大文件(>16MB)走分块上传 + 断点续传(已实现);此上限同时约束分块总量。默认 1024MB。
+# 浏览器→Console 大文件(>16MB)走分块上传 + 断点续传;此上限同时约束分块总量。默认 1024。
 max_upload_mb = 1024
 
-# 服务器运维：远程 Linux SSH/SFTP/Web 终端。
-# 任意远程 shell 是高权限能力。升级后默认关闭，确认 HTTPS、网络可达与授权后再开启。
+[cabinet]
+# 文件柜:登录后上传/下载;可选匿名投递页 /drop。
+dir = "cabinet"           # 文件落盘目录
+anon_upload = false       # true 时允许免登录上传(公开投递)
+max_upload_mb = 300       # 单文件上限(MB)
+
+[agent_bin]
+# Agent 升级包(按架构)的存储目录。
+dir = "agentbin"
+
+[audit]
+# 审计日志保留条数;每小时裁剪,只留最近 keep 条(<=0 表示不裁剪)。
+keep = 5000
+
+[monitor]
+# 部署后持续健康巡检 + Agent 资源指标留存。
+interval_seconds = 30     # 巡检周期(秒);<=0 关闭
+metrics_keep_hours = 24   # 指标时序保留窗口(小时)
+
+[data_resource]
+# 数据资源模块:外部库连接与工作台。
+credential_key_file = "mooncell-data.key"  # 凭据加密密钥文件,须与 mooncell.db 分开备份
+import_max_mb = 100                        # CSV/XLSX 导入上限(MB)
+
+[demo]
+# 是否把前端 INITIAL_* 种子数据写库(演示用)。生产请保持 false。
+seed = false
+
+# 兼容读取旧版制品仓库目录,仅用于升级时一次性清理存量;无新制品功能。
+[artifact]
+dir = "artifacts"
+
+# 服务器运维:远程 Linux SSH/SFTP/Web 终端。
+# 任意远程 shell 是高权限能力。升级后默认关闭,确认 HTTPS、网络可达与授权后再开启。
 [server_operations]
 enabled = false
 connect_timeout_seconds = 15
@@ -41,4 +79,5 @@ sftp_max_download_mb = 2048
 sftp_max_transfers_per_user = 2
 sftp_max_transfers_total = 10
 transfer_resume_hours = 24
+# 浏览器端 rz/sz 软上限(MB);ZMODEM 走 PTY 字节流,服务端不强制,大文件请用 SFTP。
 zmodem_max_transfer_mb = 512

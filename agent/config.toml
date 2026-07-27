@@ -1,4 +1,5 @@
 # Mooncell Agent 配置
+# 可只写需要覆盖的段；未写字段使用代码内置默认值。
 
 [server]
 addr = "127.0.0.1" # 监听地址;生产若改 0.0.0.0,必须同步修改默认 token
@@ -8,6 +9,10 @@ port = 9100
 # Console 添加本 Agent 时录入的共享 token;所有请求须带 Authorization: Bearer <token>。
 # 生产环境务必改成高熵随机值。
 token = "mc_ag_change_me"
+# 可选:开启 HTTPS。非空时 Agent 以 TLS 监听;Console 侧 addr 用 https:// 或经 TLS 反代。
+# 与 Console security.require_tls_agents 配合使用。
+# tls_cert = "/path/to/cert.pem"
+# tls_key  = "/path/to/key.pem"
 
 [paths]
 # 安全边界:Agent 只允许在以下根目录内落盘 / 读日志,路径规范化后必须落在内(防穿越)。
