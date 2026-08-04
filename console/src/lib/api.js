@@ -162,9 +162,10 @@ async function updateAgentNode(id) {
 }
 
 // ---------- 文件柜(真实二进制存储)----------
-async function uploadCabinetFile(file, anon) {
+async function uploadCabinetFile(file, anon, expireDays = '7') {
   const fd = new FormData();
   fd.append('file', file);
+  fd.append('expireDays', String(expireDays));
   // 匿名走免登录公开端点(需 cabinet.anon_upload=true,否则后端 403);否则走登录端点。
   const r = await fetch(anon ? '/api/pub/cabinet' : '/api/cabinet', { method: 'POST', body: fd, credentials: 'same-origin' });
   const d = await r.json().catch(() => ({}));

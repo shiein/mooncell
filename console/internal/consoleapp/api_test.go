@@ -1,9 +1,11 @@
 package consoleapp
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -353,6 +355,109 @@ func TestUserAppACL(t *testing.T) {
 	}
 }
 
+func cabinetUploadRequest(t *testing.T, path, expireDays string) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, err := w.CreateFormFile("file", "test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("cabinet-test")); err != nil {
+		t.Fatal(err)
+	}
+	if expireDays != "" {
+		if err := w.WriteField("expireDays", expireDays); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
+func TestCabinetPermanentUploadRequiresAuthenticatedEndpoint(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	if err := s.createUser("cabinet-admin", "pw", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := s.createSession("cabinet-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &api{
+		store: s, cabinetDir: t.TempDir(), cabinetMaxBytes: 1 << 20,
+		anonUpload: true,
+	}
+
+	// 登录路由自身仍必须经过鉴权,不能仅依赖前端隐藏永久选项。
+	req := cabinetUploadRequest(t, "/api/cabinet", "0")
+	rec := httptest.NewRecorder()
+	a.requireRole("admin")(a.uploadCabinet)(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("未登录永久上传应 401,实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 已登录管理员选择 0 时,服务端持久化 expires=0 永久哨兵。
+	req = cabinetUploadRequest(t, "/api/cabinet", "0")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	rec = httptest.NewRecorder()
+	a.requireRole("admin")(a.uploadCabinet)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("登录后永久上传应 200,实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+	var meta struct {
+		ID      string `json:"id"`
+		Expires int64  `json:"expires"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.ID == "" || meta.Expires != 0 {
+		t.Fatalf("永久上传元数据错误: %+v", meta)
+	}
+	if _, err := os.Stat(a.storedPath(meta.ID)); err != nil {
+		t.Fatalf("永久文件未落盘: %v", err)
+	}
+
+	// 匿名入口即使显式伪造 expireDays=0 也必须拒绝,而不是创建永久文件或静默改成 7 天。
+	req = cabinetUploadRequest(t, "/api/pub/cabinet", "0")
+	rec = httptest.NewRecorder()
+	a.uploadCabinetAnon(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "仅限登录") {
+		t.Fatalf("匿名永久上传应明确拒绝,实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestParseCabinetExpiryDays(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		value          string
+		allowPermanent bool
+		want           int
+		wantErr        bool
+	}{
+		{name: "旧客户端缺省", value: "", want: 7},
+		{name: "一天", value: "1", want: 1},
+		{name: "七天", value: "7", want: 7},
+		{name: "三十天", value: "30", want: 30},
+		{name: "登录永久", value: "0", allowPermanent: true, want: 0},
+		{name: "匿名永久", value: "0", wantErr: true},
+		{name: "非白名单", value: "365", allowPermanent: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseExpiryDays(tc.value, tc.allowPermanent)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Fatalf("parseExpiryDays(%q, %v)=(%d, %v), want (%d, err=%v)", tc.value, tc.allowPermanent, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
 // 文件柜过期清理:过期条目(元数据 + 字节)删除,未过期保留。
 func TestCabinetExpiryCleanup(t *testing.T) {
 	s := testStore(t)
@@ -365,6 +470,8 @@ func TestCabinetExpiryCleanup(t *testing.T) {
 	s.putEntity("cabinet", "cf_old", []byte(fmt.Sprintf(`{"id":"cf_old","expires":%d}`, now-1000)))
 	os.WriteFile(filepath.Join(dir, "cf_new"), []byte("y"), 0644)
 	s.putEntity("cabinet", "cf_new", []byte(fmt.Sprintf(`{"id":"cf_new","expires":%d}`, now+100000)))
+	os.WriteFile(filepath.Join(dir, "cf_forever"), []byte("z"), 0644)
+	s.putEntity("cabinet", "cf_forever", []byte(`{"id":"cf_forever","expires":0}`))
 
 	if n := a.cleanupExpiredCabinet(); n != 1 {
 		t.Fatalf("应清理 1 个过期文件,得 %d", n)
@@ -375,8 +482,45 @@ func TestCabinetExpiryCleanup(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "cf_new")); err != nil {
 		t.Error("未过期文件应保留")
 	}
+	if _, err := os.Stat(filepath.Join(dir, "cf_forever")); err != nil {
+		t.Error("永久文件不应被过期清理")
+	}
 	if _, ok := s.getEntity("cabinet", "cf_old"); ok {
 		t.Error("过期条目元数据应被删除")
+	}
+}
+
+func TestCabinetDownloadEnforcesExpiryBeforeCleanup(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	dir := t.TempDir()
+	a := &api{store: s, cabinetDir: dir}
+	now := time.Now().UnixMilli()
+
+	os.WriteFile(filepath.Join(dir, "cf_expired"), []byte("expired"), 0644)
+	s.putEntity("cabinet", "cf_expired", []byte(fmt.Sprintf(`{"id":"cf_expired","name":"expired.txt","code":"OLD123","public":true,"expires":%d}`, now-1)))
+	req := httptest.NewRequest(http.MethodGet, "/api/cabinet/cf_expired/download", nil)
+	req.SetPathValue("id", "cf_expired")
+	rec := httptest.NewRecorder()
+	a.downloadCabinet(rec, req)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "已过期") {
+		t.Fatalf("清理 tick 前也必须拒绝过期下载,实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := s.cabinetByCode("OLD123"); ok {
+		t.Fatal("过期公开文件不应再能凭提取码访问")
+	}
+
+	os.WriteFile(filepath.Join(dir, "cf_forever"), []byte("forever"), 0644)
+	s.putEntity("cabinet", "cf_forever", []byte(`{"id":"cf_forever","name":"forever.txt","code":"KEEP01","public":true,"expires":0}`))
+	req = httptest.NewRequest(http.MethodGet, "/api/cabinet/cf_forever/download", nil)
+	req.SetPathValue("id", "cf_forever")
+	rec = httptest.NewRecorder()
+	a.downloadCabinet(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "forever" {
+		t.Fatalf("永久文件应可下载,实际 %d body=%q", rec.Code, rec.Body.String())
+	}
+	if _, ok := s.cabinetByCode("KEEP01"); !ok {
+		t.Fatal("永久公开文件应可凭提取码访问")
 	}
 }
 

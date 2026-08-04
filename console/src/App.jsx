@@ -393,7 +393,10 @@ function App() {
       const f = { ...meta, size: fmtBytes(meta.size), downloads: meta.downloads || 0 };
       setCabinet((s) => [f, ...s]);
       if (!anon) addAudit("上传文件", "文件柜 · " + f.name, "成功");
-      toast(`上传成功 · 提取码 ${f.code}(7 天后过期)`);
+      const expiryText = f.expires === 0
+        ? "永久存储"
+        : `${Math.max(1, Math.ceil((f.expires - Date.now()) / MC_DAY))} 天后过期`;
+      toast(`上传成功 · 提取码 ${f.code}（${expiryText}）`);
     },
 
     async deleteCabinetFile(f) {

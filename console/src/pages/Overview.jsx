@@ -213,11 +213,19 @@ function OverviewPage() {
 
 // ---------- 文件柜 ----------
 // 登录视图:看到所有上传(含匿名投递),可改公开/私有、删除。匿名投递走独立免登录页 /drop。
+const CABINET_EXPIRY_OPTIONS = [
+  { value: "1", label: "1 天后清理" },
+  { value: "7", label: "7 天后清理" },
+  { value: "30", label: "30 天后清理" },
+  { value: "0", label: "永不过期（永久存储）" },
+];
+
 function CabinetPage() {
   const store = useMC();
   const [uploading, setUploading] = React.useState(false);
   const [prog, setProg] = React.useState(0);
   const [limitMB, setLimitMB] = React.useState(300);
+  const [expireDays, setExpireDays] = React.useState("7");
   const fileRef = React.useRef(null);
   const canWrite = store.can("write");
 
@@ -233,7 +241,7 @@ function CabinetPage() {
     }
     setUploading(true); setProg(45);
     try {
-      const meta = await uploadCabinetFile(file, false);
+      const meta = await uploadCabinetFile(file, false, expireDays);
       setProg(100);
       store.pushCabinetFile(meta, false);
     } catch (e) {
@@ -267,7 +275,7 @@ function CabinetPage() {
           <Icon name="upload" size={20} style={{ color: "var(--muted-fg)" }} />
           <div style={{ fontWeight: 600, marginTop: 7, fontSize: 13.5 }}>{canWrite ? "拖拽文件到此处,或点击选择文件" : "当前角色为只读,无上传权限"}</div>
           <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 3 }}>
-            单文件 ≤ {limitMB} MB · 默认 7 天后自动清理 · 上传后获得提取码 + 直链
+            单文件 ≤ {limitMB} MB · 上传后获得提取码 + 直链
           </div>
         </React.Fragment>
       )}
@@ -280,6 +288,16 @@ function CabinetPage() {
         actions={<Btn icon="link" onClick={() => window.open("/drop", "_blank", "noopener")}>免登录投递页 · /drop</Btn>} />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10 }}>
+          <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>存储期限</span>
+          <Select
+            aria-label="存储期限"
+            value={expireDays}
+            onChange={setExpireDays}
+            disabled={!canWrite || uploading}
+            options={CABINET_EXPIRY_OPTIONS}
+          />
+        </div>
         {zone}
         <div className="card" style={{ overflow: "hidden" }}>
           <table className="table">
@@ -291,7 +309,7 @@ function CabinetPage() {
                   <td><span className="mono" style={{ fontSize: 12 }}>{fmtMB(f.size)}</span></td>
                   <td style={{ fontSize: 12.5 }}>{f.uploader}</td>
                   <td><span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{timeAgo(f.time)}</span></td>
-                  <td><span style={{ fontSize: 12, color: f.expires - MC_NOW < 3 * MC_DAY ? "var(--warn)" : "var(--muted-fg)" }}>{timeAgo(f.expires)}</span></td>
+                  <td><span style={{ fontSize: 12, color: f.expires > 0 && f.expires - MC_NOW < 3 * MC_DAY ? "var(--warn)" : "var(--muted-fg)" }}>{f.expires === 0 ? "永久" : timeAgo(f.expires)}</span></td>
                   <td><CopyChip text={f.code} /></td>
                   <td>{canWrite ? <Switch on={f.public} onChange={() => store.toggleCabinetPublic(f)} /> : <span style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.public ? "公开" : "私有"}</span>}</td>
                   <td><span className="mono" style={{ fontSize: 12, color: "var(--muted-fg)" }}>{f.downloads}</span></td>

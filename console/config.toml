@@ -34,7 +34,7 @@ require_tls_agents = false
 max_upload_mb = 1024
 
 [cabinet]
-# 文件柜:登录后上传/下载;可选匿名投递页 /drop。
+# 文件柜:登录上传可选 1/7/30 天或永久存储;匿名投递仅允许有限期限。
 dir = "cabinet"           # 文件落盘目录
 anon_upload = false       # true 时允许免登录上传(公开投递)
 max_upload_mb = 300       # 单文件上限(MB)

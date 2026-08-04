@@ -33,18 +33,25 @@ func cleanupMultipart(r *http.Request) {
 
 const cabinetExpiryDays = 7
 
-// allowedExpiryDays 是匿名/登录上传可选的过期天数白名单;白名单外一律回退默认 7 天(fail-safe)。
-var allowedExpiryDays = map[int]bool{1: true, 7: true, 30: true}
-
-// parseExpiryDays 解析上传表单里的 expireDays;非白名单值回退默认 7 天。
-func parseExpiryDays(s string) int {
+// parseExpiryDays 解析上传表单里的 expireDays。空值兼容旧客户端,仍按默认 7 天;
+// 0 表示永久存储,只允许登录上传入口显式开启。其它值必须命中白名单,不静默改写用户选择。
+func parseExpiryDays(s string, allowPermanent bool) (int, error) {
 	switch strings.TrimSpace(s) {
+	case "":
+		return cabinetExpiryDays, nil
+	case "0":
+		if !allowPermanent {
+			return 0, errors.New("永久存储仅限登录后使用")
+		}
+		return 0, nil
 	case "1":
-		return 1
+		return 1, nil
+	case "7":
+		return 7, nil
 	case "30":
-		return 30
+		return 30, nil
 	default:
-		return cabinetExpiryDays
+		return 0, errors.New("过期时间仅支持 1 天、7 天或 30 天")
 	}
 }
 
@@ -86,7 +93,8 @@ func (a *api) storedPath(id string) string {
 }
 
 // storeCabinetFile 落盘 + 写元数据的共享核心;public=true 时上传即公开(匿名场景凭码可下载)。
-func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader string, public bool) {
+// allowPermanent 只能由已通过登录鉴权的入口开启,防止匿名请求伪造 expireDays=0 占用永久空间。
+func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader string, public, allowPermanent bool) {
 	// 早拦:Content-Length 已超限就立刻回 413,不再读 body。浏览器不发 Expect:100-continue,
 	// 若等到 MaxBytesReader 在传输中途截断 + 关连接,客户端只会看到「网络错误」而读不到 413;
 	// 提前据声明长度拒绝能让客户端尽量拿到明确响应(客户端另有大小预检兜底)。
@@ -106,6 +114,11 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 		return
 	}
 	defer cleanupMultipart(r)
+	expiryDays, err := parseExpiryDays(r.FormValue("expireDays"), allowPermanent)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	file, hdr, err := r.FormFile("file")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 file 字段"})
@@ -136,10 +149,13 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 	}
 
 	now := time.Now()
-	expiryDays := parseExpiryDays(r.FormValue("expireDays")) // 表单可选 1/7/30 天,缺省/非法回退 7
+	expires := int64(0) // 0 是永久存储哨兵;过期清理和下载校验均显式保留。
+	if expiryDays > 0 {
+		expires = now.Add(time.Duration(expiryDays) * 24 * time.Hour).UnixMilli()
+	}
 	meta := map[string]any{
 		"id": id, "name": hdr.Filename, "size": n, "uploader": uploader,
-		"time": now.UnixMilli(), "expires": now.Add(time.Duration(expiryDays) * 24 * time.Hour).UnixMilli(),
+		"time": now.UnixMilli(), "expires": expires,
 		"code": genCode(), "public": public, "downloads": 0,
 	}
 	b, _ := json.Marshal(meta)
@@ -155,7 +171,7 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 // uploadCabinet 处理 POST /api/cabinet(write):登录用户上传。
 func (a *api) uploadCabinet(w http.ResponseWriter, r *http.Request) {
 	uploader, _, _ := a.currentUser(r)
-	a.storeCabinetFile(w, r, uploader, false)
+	a.storeCabinetFile(w, r, uploader, false, true)
 }
 
 // pubLimits 处理 GET /api/pub/limits(免登录):供 /drop 页展示真实上限、据此做客户端大小预检,
@@ -174,7 +190,7 @@ func (a *api) uploadCabinetAnon(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "匿名上传未开启(管理员需在 config.toml 设 cabinet.anon_upload=true)"})
 		return
 	}
-	a.storeCabinetFile(w, r, clientIP(r)+"(匿名)", true)
+	a.storeCabinetFile(w, r, clientIP(r)+"(匿名)", true, false)
 }
 
 // cleanupExpiredCabinet 删除已过期的文件柜条目(元数据 + 落盘字节);由后台定时任务调用。
@@ -237,8 +253,21 @@ func (a *api) downloadCabinet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var meta map[string]any
-	json.Unmarshal(raw, &meta)
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "文件元数据损坏"})
+		return
+	}
+	if cabinetExpired(meta, time.Now().UnixMilli()) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件已过期"})
+		return
+	}
 	a.serveFile(w, meta)
+}
+
+// cabinetExpired 在定时清理的两次 tick 之间也按元数据实时阻断访问;expires=0 表示永久。
+func cabinetExpired(meta map[string]any, nowMs int64) bool {
+	expires, ok := meta["expires"].(float64)
+	return ok && expires > 0 && int64(expires) <= nowMs
 }
 
 // downloadByCode 处理 GET /api/pubfile/{code}(免登录):仅当文件标记为公开时可凭码下载。

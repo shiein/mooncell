@@ -255,6 +255,7 @@
     }).catch(function () { setMsg("dlMsg", "网络错误", true); });
   }
   function expireText(ms) {
+    if (Number(ms) === 0) return "永久有效";
     var d = ms - Date.now();
     if (d <= 0) return "已过期";
     var days = Math.ceil(d / 86400000);

@@ -59,8 +59,8 @@ addr  = "127.0.0.1:9100"
 token = "mc_ag_change_me"   # 须与 Agent 端 token 一致;对外监听必须改,否则启动被拒
 
 [cabinet]
-dir           = "cabinet"   # 文件柜二进制落盘目录
-anon_upload   = false       # 是否允许免登录匿名上传(/drop 页 + POST /api/pub/cabinet)
+dir           = "cabinet"   # 文件柜二进制落盘目录;登录上传可选 1/7/30 天或永久存储
+anon_upload   = false       # 是否允许免登录匿名上传(/drop 页 + POST /api/pub/cabinet);不允许永久存储
 max_upload_mb = 300         # 文件柜单文件上限(MB)
 
 [agent_bin]

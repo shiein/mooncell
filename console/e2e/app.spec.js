@@ -55,6 +55,35 @@ test('登出回到登录页', async ({ page }) => {
   await expect(usernameInput(page)).toBeVisible({ timeout: 8000 });
 });
 
+test('登录后文件柜可选择永久存储并按永久状态展示', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: '文件柜', exact: true }).click();
+
+  const expiry = page.getByLabel('存储期限');
+  await expect(expiry.locator('option')).toHaveText([
+    '1 天后清理',
+    '7 天后清理',
+    '30 天后清理',
+    '永不过期（永久存储）',
+  ]);
+  await expiry.selectOption('0');
+
+  const responsePromise = page.waitForResponse((r) => r.url().endsWith('/api/cabinet') && r.request().method() === 'POST');
+  await page.locator('input[type="file"]').setInputFiles({
+    name: '永久文件.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('permanent-cabinet-file'),
+  });
+  const response = await responsePromise;
+  expect(response.ok()).toBeTruthy();
+  const meta = await response.json();
+  expect(meta.expires).toBe(0);
+
+  await expect(page.getByText('永久文件.txt')).toBeVisible();
+  await expect(page.getByText('永久', { exact: true })).toBeVisible();
+  await expect(page.getByText(/永久存储/).last()).toBeVisible();
+});
+
 test('admin 切换普通用户后只展示授权应用且不显示 Agent 功能', async ({ page }) => {
   await login(page);
   for (const app of [

@@ -274,6 +274,9 @@ func (s *Store) cabinetByCode(code string) (map[string]any, bool) {
 			continue
 		}
 		if c, _ := m["code"].(string); strings.EqualFold(c, code) {
+			if cabinetExpired(m, time.Now().UnixMilli()) {
+				continue
+			}
 			return m, true
 		}
 	}
