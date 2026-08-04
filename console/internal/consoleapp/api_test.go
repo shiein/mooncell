@@ -338,6 +338,34 @@ func TestCabinetExpiryCleanup(t *testing.T) {
 	}
 }
 
+func TestCabinetContentDispositionHasFallbackAndUTF8Name(t *testing.T) {
+	got := cabinetContentDisposition("现场截图.zip")
+	if !strings.Contains(got, `filename="____.zip"`) {
+		t.Fatalf("应包含兼容 filename fallback,实际 %q", got)
+	}
+	if !strings.Contains(got, "filename*=UTF-8''%E7%8E%B0%E5%9C%BA%E6%88%AA%E5%9B%BE.zip") {
+		t.Fatalf("应保留 UTF-8 filename*,实际 %q", got)
+	}
+}
+
+func TestSetCabinetPublicPersistsShareState(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s}
+	s.putEntity("cabinet", "cf1", []byte(`{"id":"cf1","name":"a.txt","code":"ABC123","public":false}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/cabinet/cf1/public", strings.NewReader(`{"public":true}`))
+	req.SetPathValue("id", "cf1")
+	w := httptest.NewRecorder()
+	a.setCabinetPublic(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("公开文件应返回 200,实际 %d body=%s", w.Code, w.Body.String())
+	}
+	raw, ok := s.getEntity("cabinet", "cf1")
+	if !ok || !strings.Contains(string(raw), `"public":true`) {
+		t.Fatalf("公开状态必须服务端持久化,实际 %s", raw)
+	}
+}
+
 // 幂等键按 (op, app_id, release_id) 隔离:同 releaseId 跨操作/跨 app 不得互相误命中。
 func TestDeployIdempotencyIsolation(t *testing.T) {
 	s := testStore(t)

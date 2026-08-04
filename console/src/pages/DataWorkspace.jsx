@@ -9,7 +9,7 @@ import {
   Btn, Icon, Spinner, EmptyState, Dialog, toast, Badge, Field, confirmDialog,
 } from '../components/primitives.jsx';
 import {
-  createWorkspace, deleteWorkspace, executeSQL, cancelWorkspaceSQL, patchAutoCommit, applyRowEdits,
+  deleteWorkspace, executeSQL, cancelWorkspaceSQL, patchAutoCommit, applyRowEdits,
   commitWorkspace, rollbackWorkspace, metadataChildren, metadataStructure, metadataDDL,
   sqlTemplate, listSavedSQL, createSavedSQL, updateSavedSQL, deleteSavedSQL,
   exportWorkspace, previewImport, selectImportSheet, executeImport, deleteImport,
@@ -207,16 +207,16 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function DataWorkspacePage({ resource, onBack }) {
+function DataWorkspacePage({ resource, initialWorkspace, onBack }) {
   const store = useMC();
   const dark = document.documentElement.getAttribute('data-theme') === 'dark';
   const canWrite = resource.accessMode === 'write' || resource.accessMode === 'admin' || store.can('admin');
   const editorRef = React.useRef(null);
   const runControllerRef = React.useRef(null);
 
-  const [wsId, setWsId] = React.useState(null);
-  const [autoCommit, setAutoCommit] = React.useState(true);
-  const [txState, setTxState] = React.useState('none');
+  const [wsId] = React.useState(initialWorkspace?.workspaceId || null);
+  const [autoCommit, setAutoCommit] = React.useState(initialWorkspace?.autoCommit !== false);
+  const [txState, setTxState] = React.useState(initialWorkspace?.txState || 'none');
   const [sqlText, setSqlText] = React.useState('SELECT 1');
   const [busy, setBusy] = React.useState(false);
   const [result, setResult] = React.useState(null);
@@ -294,17 +294,11 @@ function DataWorkspacePage({ resource, onBack }) {
 
   React.useEffect(() => {
     let alive = true;
-    let createdWorkspace = '';
-    createWorkspace(resource.id).then((d) => {
-      createdWorkspace = d.workspaceId;
-      if (!alive) {
-        deleteWorkspace(resource.id, createdWorkspace).catch(() => {});
-        return;
-      }
-      setWsId(createdWorkspace);
-      setAutoCommit(!!d.autoCommit);
-      setTxState(d.txState || 'none');
-    }).catch((e) => toast(e.message || '创建工作台失败', { tone: 'error' }));
+    const createdWorkspace = initialWorkspace?.workspaceId || '';
+    if (!createdWorkspace) {
+      toast('数据库连接已失效，请返回后重新输入密码', { tone: 'error' });
+      return undefined;
+    }
     getResourceCapabilities(resource.id).then((c) => {
       if (alive && c) setCaps({
         ddlSupported: c.ddlSupported !== false,
@@ -318,7 +312,7 @@ function DataWorkspacePage({ resource, onBack }) {
       runControllerRef.current?.abort();
       if (createdWorkspace) deleteWorkspace(resource.id, createdWorkspace).catch(() => {});
     };
-  }, [resource.id, refreshRoot, refreshSaved]);
+  }, [resource.id, initialWorkspace, refreshRoot, refreshSaved]);
 
   React.useEffect(() => {
     const close = () => setContextMenu(null);

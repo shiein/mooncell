@@ -1,4 +1,4 @@
-// 连接池管理器：每个数据资源维护一个懒加载 *sql.DB。
+// 连接池管理器：每个用户对每个数据资源维护一次内存连接。
 //
 // 设计文档第三节：
 //   - 默认 MaxOpenConns=5、MaxIdleConns=2、连接最大生命周期 30 分钟。
@@ -17,8 +17,10 @@
 package dataresource
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,7 +28,7 @@ import (
 // PoolManager 管理各数据资源的 *sql.DB 连接池。
 type PoolManager struct {
 	mu    sync.Mutex
-	pools map[string]*sql.DB // resourceID → *sql.DB
+	pools map[string]*sql.DB // resourceID + username → *sql.DB；密码不落盘
 	// activeTx 记录每个资源是否有活动手工事务（ref count）。
 	activeTx map[string]int
 	// activeOps 记录资源上正在执行的普通操作（自动 SQL、工作台创建等）。
@@ -35,18 +37,16 @@ type PoolManager struct {
 	importing map[string]int
 	// exclusive 配置变更占用（更新/删除资源），与事务、导入互斥。
 	exclusive map[string]int
-	credKey   *CredentialKey
 }
 
 // NewPoolManager 创建连接池管理器。
-func NewPoolManager(credKey *CredentialKey) *PoolManager {
+func NewPoolManager() *PoolManager {
 	return &PoolManager{
 		pools:     map[string]*sql.DB{},
 		activeTx:  map[string]int{},
 		activeOps: map[string]int{},
 		importing: map[string]int{},
 		exclusive: map[string]int{},
-		credKey:   credKey,
 	}
 }
 
@@ -56,45 +56,83 @@ const (
 	defaultConnMaxLifetime = 30 * time.Minute
 )
 
-// GetDB 获取或创建资源的 *sql.DB。password 从凭据密文解密。
-func (pm *PoolManager) GetDB(r DataResource) (*sql.DB, error) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+func userPoolKey(resourceID, username string) string { return resourceID + "\x00" + username }
 
-	if db, ok := pm.pools[r.ID]; ok {
-		return db, nil
+// ConnectUserDB 使用本次输入的密码建立并验证连接，再放入仅内存的用户连接池。
+// 调用方须先使该用户在资源上的旧工作台失效，避免替换连接时影响在途操作。
+func (pm *PoolManager) ConnectUserDB(ctx context.Context, r DataResource, username, password string) (*sql.DB, error) {
+	if password == "" {
+		return nil, fmt.Errorf("密码不能为空")
 	}
-
-	password, err := pm.credKey.Decrypt(r.CredentialCipher)
-	if err != nil {
-		return nil, fmt.Errorf("凭据解密失败")
-	}
-
-	driverName := DriverName(r.DBType)
 	dsn := BuildDSN(r, password)
 	if dsn == "" {
 		return nil, fmt.Errorf("不支持的数据库类型: %s", r.DBType)
 	}
-
-	db, err := sql.Open(driverName, dsn)
+	db, err := sql.Open(DriverName(r.DBType), dsn)
 	if err != nil {
 		return nil, fmt.Errorf("打开连接失败")
 	}
 	db.SetMaxOpenConns(defaultMaxOpenConns)
 	db.SetMaxIdleConns(defaultMaxIdleConns)
 	db.SetConnMaxLifetime(defaultConnMaxLifetime)
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
 
-	pm.pools[r.ID] = db
+	key := userPoolKey(r.ID, username)
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if old := pm.pools[key]; old != nil {
+		old.Close()
+	}
+	pm.pools[key] = db
 	return db, nil
+}
+
+// GetUserDB 获取用户已通过密码建立的当前连接。
+func (pm *PoolManager) GetUserDB(resourceID, username string) (*sql.DB, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	db := pm.pools[userPoolKey(resourceID, username)]
+	if db == nil {
+		return nil, fmt.Errorf("请先输入密码连接数据库")
+	}
+	return db, nil
+}
+
+func (pm *PoolManager) CloseUserDB(resourceID, username string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	key := userPoolKey(resourceID, username)
+	if db := pm.pools[key]; db != nil {
+		db.Close()
+		delete(pm.pools, key)
+	}
 }
 
 // CloseDB 关闭并移除资源的连接池。用于资源更新或删除时。
 func (pm *PoolManager) CloseDB(resourceID string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	if db, ok := pm.pools[resourceID]; ok {
-		db.Close()
-		delete(pm.pools, resourceID)
+	prefix := resourceID + "\x00"
+	for key, db := range pm.pools {
+		if strings.HasPrefix(key, prefix) {
+			db.Close()
+			delete(pm.pools, key)
+		}
+	}
+}
+
+func (pm *PoolManager) CloseUserDBs(username string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	suffix := "\x00" + username
+	for key, db := range pm.pools {
+		if strings.HasSuffix(key, suffix) {
+			db.Close()
+			delete(pm.pools, key)
+		}
 	}
 }
 

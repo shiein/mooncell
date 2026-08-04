@@ -7,6 +7,7 @@ import { useAsync } from '../lib/async.js';
 import {
   listDataResources, listDrivers, createDataResource, updateDataResource,
   deleteDataResource, testDataResource, testDataResourceConfig, testDataResourceDraft,
+  createWorkspace,
 } from '../lib/dataresource-api.js';
 
 /** 各驱动默认端口（与后端 DefaultPort / DriverCatalog.defaultPort 对齐） */
@@ -128,24 +129,11 @@ function DataResourcesPage({ onOpenWorkspace }) {
   const [drivers, setDrivers] = React.useState([]);
   const [edit, setEdit] = React.useState(null); // null | {} create | resource edit
   const [delRes, setDelRes] = React.useState(null);
+  const [passwordAction, setPasswordAction] = React.useState(null); // {resource, mode: connect|test}
 
   React.useEffect(() => {
     listDrivers().then(setDrivers).catch(() => setDrivers([]));
   }, []);
-
-  const onTest = async (r) => {
-    try {
-      const res = await testDataResource(r.id);
-      if (res.ok) {
-        toast(`连接成功 · ${res.latencyMs || 0}ms` + (res.readOnlyTxSupported ? ' · 只读事务可用' : ' · 只读事务不可用'));
-      } else {
-        toast(res.error || res.errorCode || '连接失败', { tone: 'error' });
-      }
-      retry();
-    } catch (e) {
-      toast(e.message || '测试失败', { tone: 'error' });
-    }
-  };
 
   return (
     <div>
@@ -186,10 +174,10 @@ function DataResourcesPage({ onOpenWorkspace }) {
                 <td style={{ fontSize: 12.5, color: 'var(--muted-fg)' }}>{r.lastTestInfo || '未测试'}</td>
                 <td>
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                    <Btn size="sm" variant="primary" onClick={() => onOpenWorkspace(r)}>进入</Btn>
+                    <Btn size="sm" variant="primary" onClick={() => setPasswordAction({ resource: r, mode: 'connect' })}>进入</Btn>
                     {isAdmin ? (
                       <React.Fragment>
-                        <Btn size="sm" variant="ghost" icon="activity" title="测试连接" onClick={() => onTest(r)} />
+                        <Btn size="sm" variant="ghost" icon="activity" title="测试连接" onClick={() => setPasswordAction({ resource: r, mode: 'test' })} />
                         <Btn size="sm" variant="ghost" icon="pencil" title="编辑" onClick={() => setEdit(r)} />
                         <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => setDelRes(r)} />
                       </React.Fragment>
@@ -223,6 +211,16 @@ function DataResourcesPage({ onOpenWorkspace }) {
         open={!!delRes}
         onClose={() => setDelRes(null)}
         onDeleted={() => { setDelRes(null); retry(); }}
+      />
+      <ConnectionPasswordDialog
+        action={passwordAction}
+        open={!!passwordAction}
+        onClose={() => setPasswordAction(null)}
+        onConnected={(resource, workspace) => {
+          setPasswordAction(null);
+          onOpenWorkspace(resource, workspace);
+        }}
+        onTested={() => { setPasswordAction(null); retry(); }}
       />
     </div>
   );
@@ -292,8 +290,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
 
   const onTestConfig = async () => {
     const f = currentForm();
-    // 新建必须有密码；编辑可空密码（服务端用已存密码 + 表单主机/库等）
-    const v = validateResourceForm(f, { requirePassword: !isEdit });
+    const v = validateResourceForm(f, { requirePassword: true });
     if (!v.ok) {
       toast(v.message, { tone: 'warn' });
       return;
@@ -303,8 +300,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
     try {
       let res;
       if (isEdit) {
-        // 始终测「当前表单配置」；密码空则 test-draft 用已保存凭据
-        if (!payload.password) delete payload.password;
+        // 始终测试「当前表单配置 + 本次输入密码」，密码不会保存。
         res = await testDataResourceDraft(resource.id, payload);
       } else {
         res = await testDataResourceConfig(payload);
@@ -325,7 +321,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
     const f = currentForm();
     // 同步 DOM 值回 state，避免自动填充后界面有值但 state 空
     setForm((prev) => ({ ...prev, ...f }));
-    const v = validateResourceForm(f, { requirePassword: !isEdit });
+    const v = validateResourceForm(f, { requirePassword: false });
     if (!v.ok) {
       toast(v.message, { tone: 'warn' });
       return;
@@ -333,7 +329,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
     setBusy(true);
     try {
       const payload = resourcePayloadFromForm(f);
-      if (!payload.password) delete payload.password;
+      delete payload.password; // 资源配置永不携带或保存数据库密码
       if (isEdit) await updateDataResource(resource.id, payload);
       else await createDataResource(payload);
       toast(isEdit ? '已更新资源' : '已创建资源');
@@ -359,7 +355,7 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
   return (
     <Dialog open={open} onClose={onClose} width={520}
       title={isEdit ? `编辑 · ${resource.name}` : '新建数据资源'}
-      desc="连接配置不开放任意 DSN；可先测试连接，保存后也需测试成功才可授予只读权限"
+      desc="只保存连接地址和用户名；数据库密码仅用于本次测试，不会保存"
       foot={<React.Fragment>
         <Btn variant="ghost" onClick={onClose} disabled={actionBusy}>取消</Btn>
         <Btn variant="outline" icon="activity" disabled={actionBusy} onClick={onTestConfig}>
@@ -427,8 +423,9 @@ function ResourceDialog({ open, resource, drivers, onClose, onSaved }) {
         <Field label="用户名">
           <input className="input" name="username" value={form.username || ''} onChange={(e) => set('username', e.target.value)} autoComplete="off" />
         </Field>
-        <Field label={isEdit ? '密码（留空保留原密码）' : '密码'}>
-          <input className="input" name="password" type="password" value={form.password || ''} onChange={(e) => set('password', e.target.value)} autoComplete="new-password" />
+        <Field label="测试密码（不保存）" hint="仅点击“测试连接”时使用；保存资源不会提交此密码">
+          <input className="input" name="password" type="password" value={form.password || ''}
+            onChange={(e) => set('password', e.target.value)} autoComplete="off" data-1p-ignore="true" data-lpignore="true" />
         </Field>
         <Field label="SSL" hint={dm ? '达梦当前仅支持 disable' : undefined}>
           <select
@@ -476,6 +473,62 @@ function DeleteDialog({ open, resource, onClose, onDeleted }) {
         <Btn variant="destructive" icon="trash" disabled={busy} onClick={submit}>{busy ? <Spinner size={12} /> : '删除'}</Btn>
       </React.Fragment>}>
       <Field label="资源名称"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+    </Dialog>
+  );
+}
+
+function ConnectionPasswordDialog({ action, open, onClose, onConnected, onTested }) {
+  const [password, setPassword] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  React.useEffect(() => {
+    if (open) {
+      setPassword('');
+      setBusy(false);
+    }
+  }, [open, action]);
+  if (!action?.resource) return null;
+  const isTest = action.mode === 'test';
+  const submit = async () => {
+    if (!password) {
+      toast('请输入数据库密码', { tone: 'warn' });
+      return;
+    }
+    setBusy(true);
+    try {
+      if (isTest) {
+        const result = await testDataResource(action.resource.id, password);
+        if (!result.ok) {
+          toast(result.error || result.errorCode || '连接失败', { tone: 'error' });
+          setBusy(false);
+          return;
+        }
+        toast(`连接成功 · ${result.latencyMs || 0}ms` + (result.readOnlyTxSupported ? ' · 只读事务可用' : ' · 只读事务不可用'));
+        onTested();
+      } else {
+        const workspace = await createWorkspace(action.resource.id, password);
+        onConnected(action.resource, workspace);
+      }
+    } catch (e) {
+      toast(e.message || (isTest ? '测试失败' : '连接失败'), { tone: 'error' });
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={open} onClose={onClose} width={420}
+      title={`${isTest ? '测试连接' : '连接数据库'} · ${action.resource.name}`}
+      desc="密码只用于本次连接，服务端不写入数据库；离开工作台后即关闭连接"
+      foot={<React.Fragment>
+        <Btn variant="ghost" onClick={onClose} disabled={busy}>取消</Btn>
+        <Btn variant="primary" icon={isTest ? 'activity' : 'check'} onClick={submit} disabled={busy}>
+          {busy ? <Spinner size={12} /> : (isTest ? '测试' : '连接')}
+        </Btn>
+      </React.Fragment>}>
+      <form onSubmit={(e) => { e.preventDefault(); submit(); }} autoComplete="off">
+        <Field label="数据库密码">
+          <input className="input" type="password" value={password} autoFocus
+            onChange={(e) => setPassword(e.target.value)} autoComplete="off" data-1p-ignore="true" data-lpignore="true" />
+        </Field>
+      </form>
     </Dialog>
   );
 }

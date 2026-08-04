@@ -19,15 +19,15 @@ type Config struct {
 	Agent    AgentConfig    `toml:"agent"`
 	Cabinet  CabinetConfig  `toml:"cabinet"`
 	// LegacyArtifact 仅用于升级时定位并清理已下线的制品仓库存量；不再提供任何制品仓库功能。
-	LegacyArtifact LegacyArtifactConfig `toml:"artifact"`
-	AgentBin       AgentBinConfig       `toml:"agent_bin"`
-	Demo           DemoConfig           `toml:"demo"`
-	Deploy         DeployUpload         `toml:"deploy"`
-	Audit          AuditConfig          `toml:"audit"`
-	Monitor        MonitorConfig        `toml:"monitor"`
-	Security          SecurityConfig          `toml:"security"`
-	DataResource      DataResourceConfig      `toml:"data_resource"`
-	ServerOperations  ServerOperationsConfig  `toml:"server_operations"`
+	LegacyArtifact   LegacyArtifactConfig   `toml:"artifact"`
+	AgentBin         AgentBinConfig         `toml:"agent_bin"`
+	Demo             DemoConfig             `toml:"demo"`
+	Deploy           DeployUpload           `toml:"deploy"`
+	Audit            AuditConfig            `toml:"audit"`
+	Monitor          MonitorConfig          `toml:"monitor"`
+	Security         SecurityConfig         `toml:"security"`
+	DataResource     DataResourceConfig     `toml:"data_resource"`
+	ServerOperations ServerOperationsConfig `toml:"server_operations"`
 }
 
 // ServerOperationsConfig 对应 [server_operations]：远程 Linux SSH/SFTP 运维。
@@ -63,11 +63,9 @@ type SecurityConfig struct {
 	RequireTLSAgents bool `toml:"require_tls_agents"`
 }
 
-// DataResourceConfig:数据资源模块配置。CredentialKeyFile 是凭据加密密钥文件路径,
-// 默认 mooncell-data.key,须与 mooncell.db 分开备份。ImportMaxMB 是 CSV/XLSX 导入上限。
+// DataResourceConfig:数据资源模块配置。ImportMaxMB 是 CSV/XLSX 导入上限。
 type DataResourceConfig struct {
-	CredentialKeyFile string `toml:"credential_key_file"`
-	ImportMaxMB       int    `toml:"import_max_mb"`
+	ImportMaxMB int `toml:"import_max_mb"`
 }
 
 // MonitorConfig:部署后持续健康巡检 + Agent 资源指标留存。
@@ -149,7 +147,7 @@ func loadConfig(path string) *Config {
 		Deploy:         DeployUpload{MaxUploadMB: 1024}, // 1GB:容纳常见 war/dist,又有界(分块上传是更优的长期方案)
 		Audit:          AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
 		Monitor:        MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
-		DataResource: DataResourceConfig{CredentialKeyFile: "mooncell-data.key", ImportMaxMB: 100},
+		DataResource:   DataResourceConfig{ImportMaxMB: 100},
 		// 服务器运维默认关闭；开启后暴露任意远程 shell，须确认 HTTPS 与授权模型。
 		ServerOperations: ServerOperationsConfig{
 			Enabled:                 false,

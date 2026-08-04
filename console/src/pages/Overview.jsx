@@ -1,7 +1,7 @@
 // Mooncell — 总览(系统监控)/ 文件柜 / 审计日志
 import React from 'react';
 import { useMC, AGENT, genSeries, timeAgo, fmtTime, fmtBytes, fmtMB, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
-import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, EmptyState, Select, Spinner, toast } from '../components/primitives.jsx';
+import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, copyText, EmptyState, Select, Spinner, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAgents } from '../lib/agent.js';
 import { uploadCabinetFile, getPubLimits, listAuditPage, getAgentMetrics } from '../lib/api.js';
@@ -298,8 +298,13 @@ function CabinetPage() {
                   <td>
                     <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                       <Btn size="sm" variant="ghost" icon="download" title="下载" onClick={() => dl(`/api/cabinet/${f.id}/download`)}></Btn>
-                      <Btn size="sm" variant="ghost" icon="link" title={f.public ? "复制公开直链" : "复制下载链接"}
-                        onClick={() => { navigator.clipboard?.writeText(location.origin + (f.public ? `/api/pubfile/${f.code}` : `/api/cabinet/${f.id}/download`)); toast("直链已复制到剪贴板"); }}></Btn>
+                      <Btn size="sm" variant="ghost" icon="link" title={f.public ? "复制公开直链" : "公开并复制分享地址"}
+                        onClick={async () => {
+                          const shared = f.public ? f : await store.toggleCabinetPublic(f, true);
+                          if (!shared) return;
+                          const copied = await copyText(location.origin + `/api/pubfile/${shared.code}`);
+                          toast(copied ? "公开分享地址已复制到剪贴板" : "复制失败，请手动复制地址", copied ? undefined : { tone: "error" });
+                        }}></Btn>
                       {canWrite ? <Btn size="sm" variant="ghost" icon="trash" title="删除" onClick={() => store.deleteCabinetFile(f)}></Btn> : null}
                     </div>
                   </td>

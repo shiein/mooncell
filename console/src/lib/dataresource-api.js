@@ -48,8 +48,12 @@ export async function deleteDataResource(id, name) {
   });
 }
 
-export async function testDataResource(id) {
-  return jsonFetch(`/api/data-resources/${encodeURIComponent(id)}/test`, { method: 'POST' });
+export async function testDataResource(id, password) {
+  return jsonFetch(`/api/data-resources/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
 }
 
 export async function testDataResourceConfig(payload) {
@@ -60,7 +64,7 @@ export async function testDataResourceConfig(payload) {
   });
 }
 
-/** 编辑草稿测试：表单配置 + 可选密码（空则服务端用已存密码） */
+/** 编辑草稿测试：表单配置 + 本次输入密码（服务端不保存） */
 export async function testDataResourceDraft(id, payload) {
   return jsonFetch(`/api/data-resources/${encodeURIComponent(id)}/test-draft`, {
     method: 'POST',
@@ -73,8 +77,12 @@ export async function getResourceCapabilities(resourceId) {
   return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/capabilities`);
 }
 
-export async function createWorkspace(resourceId) {
-  return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/workspaces`, { method: 'POST' });
+export async function createWorkspace(resourceId, password) {
+  return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/workspaces`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
 }
 
 export async function patchAutoCommit(resourceId, workspaceId, autoCommit) {

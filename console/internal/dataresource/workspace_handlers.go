@@ -77,12 +77,57 @@ func (s *Service) resolveWorkspaceForRequest(w http.ResponseWriter, r *http.Requ
 // CreateWorkspace 处理 POST /api/data-resources/{id}/workspaces
 func (s *Service) CreateWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	adapter, mode, release, ok := s.getAdapterForOperation(w, r)
+	user, role, ok := userFromCtx(r)
 	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
-	defer release()
-	user, _, _ := userFromCtx(r)
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := jsonDecodeBody(w, r, &body); err != nil || body.Password == "" {
+		writeErr(w, http.StatusBadRequest, "PASSWORD_REQUIRED", "请输入数据库密码")
+		return
+	}
+	res, found, err := GetDataResource(s.db, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源失败")
+		return
+	}
+	if !found {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
+		return
+	}
+	mode, err := UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
+	if mode == "" {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
+		return
+	}
+	if !s.pools.TryBeginOperation(id) {
+		writeErr(w, http.StatusConflict, "RESOURCE_BUSY", "资源正在导入或更新，请稍后再试")
+		return
+	}
+	defer s.pools.EndOperation(id)
+	// 同一用户重新连接前先关闭旧工作台和旧内存连接，保证新密码确实生效。
+	s.InvalidateUserResource(user, id)
+	ctx, cancel := context.WithTimeout(r.Context(), testTimeout)
+	defer cancel()
+	db, err := s.pools.ConnectUserDB(ctx, res, user, body.Password)
+	if err != nil {
+		code := classifyConnError(err)
+		writeErr(w, http.StatusBadRequest, code, formatConnError(code, err))
+		return
+	}
+	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))
+	if err != nil {
+		s.pools.CloseUserDB(id, user)
+		writeErr(w, http.StatusInternalServerError, "ADAPTER_ERROR", "创建适配器失败")
+		return
+	}
 	// 仅 AccessRead 标记为只读工作台；admin/write 可写
 	ws := s.workspaces.CreateWorkspace(id, user, adapter, mode == AccessRead)
 	writeOK(w, map[string]any{

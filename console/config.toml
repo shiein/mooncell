@@ -54,7 +54,6 @@ metrics_keep_hours = 24   # 指标时序保留窗口(小时)
 
 [data_resource]
 # 数据资源模块:外部库连接与工作台。
-credential_key_file = "mooncell-data.key"  # 凭据加密密钥文件,须与 mooncell.db 分开备份
 import_max_mb = 100                        # CSV/XLSX 导入上限(MB)
 
 [demo]

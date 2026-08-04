@@ -109,12 +109,7 @@ func TestDSNSSLRequire(t *testing.T) {
 func handlerTestEnv(t *testing.T) (*Service, *httptest.Server) {
 	t.Helper()
 	db := testDB(t)
-	keyPath := t.TempDir() + "/test.key"
-	credKey, err := LoadOrCreateCredentialKey(keyPath, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(db, credKey)
+	svc := NewService(db)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/data-resources", svc.ListResources)
 	mux.HandleFunc("POST /api/data-resources", svc.CreateResource)
@@ -155,6 +150,9 @@ func TestCreateAndGetResource(t *testing.T) {
 	// 不应返回密码
 	if _, hasPassword := out["hasPassword"]; !hasPassword {
 		t.Error("应返回 hasPassword 字段")
+	}
+	if out["hasPassword"] != false {
+		t.Errorf("密码不得持久化,hasPassword 应为 false,实际 %v", out["hasPassword"])
 	}
 	if _, hasCipher := out["credentialCipher"]; hasCipher {
 		t.Error("不应返回 credentialCipher")
@@ -211,16 +209,25 @@ func TestListResourcesAdmin(t *testing.T) {
 	}
 }
 
-func TestCreateResourcePasswordRequired(t *testing.T) {
-	_, server := handlerTestEnv(t)
+func TestCreateResourceDoesNotPersistPassword(t *testing.T) {
+	svc, server := handlerTestEnv(t)
 	body := `{"name":"PG","dbType":"pgx","host":"h","port":5432,"databaseName":"d","username":"u","password":"","sslMode":"disable"}`
 	resp, _ := http.Post(server.URL+"/api/data-resources", "application/json", strings.NewReader(body))
-	if resp.StatusCode != 400 {
-		t.Errorf("空密码应返回 400,实际 %d", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		t.Fatalf("配置不保存密码,空密码创建应返回 200,实际 %d", resp.StatusCode)
+	}
+	var out map[string]any
+	jsonDecode(resp.Body, &out)
+	stored, found, err := GetDataResource(svc.db, out["id"].(string))
+	if err != nil || !found {
+		t.Fatalf("读取已创建资源失败: found=%v err=%v", found, err)
+	}
+	if stored.CredentialCipher != "" {
+		t.Fatal("数据库密码不得写入 credential_cipher")
 	}
 }
 
-func TestUpdateResourceKeepPassword(t *testing.T) {
+func TestUpdateResourceKeepsPasswordEmpty(t *testing.T) {
 	_, server := handlerTestEnv(t)
 	// 创建
 	body := `{"name":"PG","dbType":"pgx","host":"h","port":5432,"databaseName":"d","username":"u","password":"p","sslMode":"disable"}`
@@ -229,7 +236,7 @@ func TestUpdateResourceKeepPassword(t *testing.T) {
 	jsonDecode(resp.Body, &out)
 	id, _ := out["id"].(string)
 
-	// 编辑：空密码表示保留
+	// 编辑后仍不得写入密码
 	updBody := `{"name":"PG2","dbType":"pgx","host":"h","port":5432,"databaseName":"d","username":"u","password":"","sslMode":"disable"}`
 	req, _ := http.NewRequest("PUT", server.URL+"/api/data-resources/"+id, strings.NewReader(updBody))
 	resp2, _ := http.DefaultClient.Do(req)

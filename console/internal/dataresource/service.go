@@ -1,4 +1,4 @@
-// Service 是数据资源模块的业务服务层，持有 SQLite 句柄和凭据密钥。
+// Service 是数据资源模块的业务服务层。数据库密码仅存在于用户本次内存连接中。
 // 由 consoleapp 在启动时创建，handler 方法注册到 HTTP mux。
 package dataresource
 
@@ -18,7 +18,6 @@ type AuditFunc func(user, action, target, result string)
 // Service 持有数据资源模块的运行时依赖。
 type Service struct {
 	db             *sql.DB
-	credKey        *CredentialKey
 	pools          *PoolManager
 	workspaces     *WorkspaceManager
 	importMu       sync.Mutex
@@ -27,12 +26,11 @@ type Service struct {
 	audit          AuditFunc
 }
 
-// NewService 创建数据资源服务。credKey 不可为 nil（由 consoleapp 启动时保证）。
-func NewService(db *sql.DB, credKey *CredentialKey) *Service {
-	pool := NewPoolManager(credKey)
+// NewService 创建数据资源服务。
+func NewService(db *sql.DB) *Service {
+	pool := NewPoolManager()
 	return &Service{
 		db:             db,
-		credKey:        credKey,
 		pools:          pool,
 		workspaces:     NewWorkspaceManager(pool),
 		importSessions: map[string]*ImportSession{},
@@ -126,6 +124,9 @@ func (s *Service) InvalidateAllForUser(username string) {
 	})
 	if s.workspaces != nil {
 		s.workspaces.InvalidateAllForUser(username)
+	}
+	if s.pools != nil {
+		s.pools.CloseUserDBs(username)
 	}
 }
 

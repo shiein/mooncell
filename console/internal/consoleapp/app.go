@@ -74,8 +74,8 @@ func Run(distFS fs.FS, version string, args []string) {
 	}
 	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}, appMu: map[string]*sync.Mutex{}, appEpoch: map[string]uint64{}, requireTLSAgents: cfg.Security.RequireTLSAgents}
 
-	// 数据资源模块服务：持有 SQLite 句柄和凭据密钥。
-	dataResSvc := dataresource.NewService(store.db, store.credKey)
+	// 数据资源模块服务：密码由用户每次连接输入，仅保存在当前内存连接中。
+	dataResSvc := dataresource.NewService(store.db)
 	defer dataResSvc.Close()
 	a.dataResSvc = dataResSvc
 	dataResSvc.SetImportMaxMB(cfg.DataResource.ImportMaxMB)
@@ -272,6 +272,7 @@ func Run(distFS fs.FS, version string, args []string) {
 	// 文件柜:仅 admin;公开文件凭码免登录下载。
 	mux.HandleFunc("POST /api/cabinet", adminOnly(a.uploadCabinet))
 	mux.HandleFunc("GET /api/cabinet/{id}/download", adminOnly(a.downloadCabinet))
+	mux.HandleFunc("PATCH /api/cabinet/{id}/public", adminOnly(a.setCabinetPublic))
 	mux.HandleFunc("DELETE /api/cabinet/{id}", adminOnly(a.deleteCabinet))
 	mux.HandleFunc("GET /api/pubfile/{code}", a.downloadByCode)   // 独立前缀,避免与 /api/cabinet/{id}/... 冲突
 	mux.HandleFunc("GET /api/pubfile/{code}/meta", a.pubfileMeta) // 凭码校验 + 文件信息(不计下载数),供 /drop 页用

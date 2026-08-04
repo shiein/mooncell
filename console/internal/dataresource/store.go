@@ -15,7 +15,7 @@ import (
 // MigrateDataResources 在 SQLite 中创建数据资源模块所需的三张表。
 // 幂等：已存在则跳过。由 consoleapp.openDB 在启动时调用。
 func MigrateDataResources(db *sql.DB) error {
-	_, err := db.Exec(`
+	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS data_resources (
 			id                TEXT    PRIMARY KEY,
 			name              TEXT    NOT NULL,
@@ -55,7 +55,11 @@ func MigrateDataResources(db *sql.DB) error {
 			updated_at  INTEGER NOT NULL,
 			UNIQUE(username, resource_id, name)
 		);
-	`)
+	`); err != nil {
+		return err
+	}
+	// v2：数据库密码不再持久化。启动迁移不可逆清空历史密文；列仅保留用于兼容旧库结构。
+	_, err := db.Exec(`UPDATE data_resources SET credential_cipher = '' WHERE credential_cipher <> ''`)
 	return err
 }
 
@@ -78,7 +82,7 @@ type DataResource struct {
 	LastTestAt       int64  `json:"lastTestAt"`
 }
 
-// DataResourceOut 是对外 API 形态：不含密码，只有 hasPassword 标记。
+// DataResourceOut 是对外 API 形态：不含密码。HasPassword 固定为 false，仅保留协议兼容。
 type DataResourceOut struct {
 	DataResource
 	HasPassword  bool   `json:"hasPassword"`
@@ -86,7 +90,7 @@ type DataResourceOut struct {
 	LastTestInfo string `json:"lastTestInfo"` // 可读的最近测试结果摘要
 }
 
-// DataResourceInput 是创建/编辑资源时的请求体。Password 为空表示保留原密码。
+// DataResourceInput 是创建/编辑/测试资源时的请求体。Password 只用于当次连接测试，绝不落库。
 type DataResourceInput struct {
 	Name          string `json:"name"`
 	DBType        string `json:"dbType"`
@@ -95,7 +99,7 @@ type DataResourceInput struct {
 	DatabaseName  string `json:"databaseName"`
 	DefaultSchema string `json:"defaultSchema"`
 	Username      string `json:"username"`
-	Password      string `json:"password"` // 空表示保留原密码（编辑时）
+	Password      string `json:"password"`
 	SSLMode       string `json:"sslMode"`
 }
 
@@ -120,22 +124,13 @@ func validSSLMode(mode string) bool {
 	return mode == "disable" || mode == "require"
 }
 
-// HasExistingResources 检查是否已有数据资源记录（用于密钥生成决策）。
-func HasExistingResources(db *sql.DB) (bool, error) {
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM data_resources").Scan(&n); err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// CreateDataResource 插入一条数据资源。credentialCipher 为加密后的密码密文。
+// CreateDataResource 插入一条数据资源。credential_cipher 固定为空，防止任何调用路径持久化密码。
 func CreateDataResource(db *sql.DB, r DataResource) error {
 	_, err := db.Exec(`INSERT INTO data_resources
 		(id, name, db_type, host, port, database_name, default_schema, username, credential_cipher, ssl_mode, created_by, created_at, updated_at, last_test_status, last_test_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Name, r.DBType, r.Host, r.Port, r.DatabaseName, r.DefaultSchema,
-		r.Username, r.CredentialCipher, r.SSLMode, r.CreatedBy, r.CreatedAt, r.UpdatedAt,
+		r.Username, "", r.SSLMode, r.CreatedBy, r.CreatedAt, r.UpdatedAt,
 		r.LastTestStatus, r.LastTestAt,
 	)
 	return err
@@ -182,12 +177,8 @@ func ListDataResources(db *sql.DB) ([]DataResource, error) {
 }
 
 // authAffectingChanged 是否影响「只读事务实测 + read 授权」有效性。
-// 不含 name、defaultSchema：改显示名/默认模式不撤权。
-// 密码由 credentialCipher 非空表示。
-func authAffectingChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
-	if credentialCipher != "" {
-		return true
-	}
+// 不含 name、defaultSchema：改显示名/默认模式不撤权。密码不持久化，因此不属于资源配置。
+func authAffectingChanged(prev DataResource, input DataResourceInput) bool {
 	return prev.DBType != input.DBType ||
 		prev.Host != input.Host ||
 		prev.Port != input.Port ||
@@ -199,60 +190,37 @@ func authAffectingChanged(prev DataResource, input DataResourceInput, credential
 // poolAffectingChanged 是否必须关闭连接池并失效工作台。
 // 达梦 defaultSchema 写入 DSN（SET SCHEMA），变更后旧连接仍绑在旧模式；
 // 元数据树按新 owner 查、执行却打到旧模式 → 必须重建池。
-func poolAffectingChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
-	if authAffectingChanged(prev, input, credentialCipher) {
+func poolAffectingChanged(prev DataResource, input DataResourceInput) bool {
+	if authAffectingChanged(prev, input) {
 		return true
 	}
 	return prev.DefaultSchema != input.DefaultSchema
 }
 
-// connectionFieldsChanged 兼容旧名：等同 authAffectingChanged。
-func connectionFieldsChanged(prev DataResource, input DataResourceInput, credentialCipher string) bool {
-	return authAffectingChanged(prev, input, credentialCipher)
-}
-
-// UpdateDataResource 更新资源。credentialCipher 为空表示保留原密码。
+// UpdateDataResource 更新资源；密码一律不落库。
 // 仅 authAffecting 变化时清空 last_test_status 并撤销 read；defaultSchema 单独变化不撤权。
-func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, credentialCipher string, prev DataResource) error {
+func UpdateDataResource(db *sql.DB, id string, input DataResourceInput, prev DataResource) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	authChanged := authAffectingChanged(prev, input, credentialCipher)
-	if credentialCipher != "" {
-		if authChanged {
-			_, err = tx.Exec(`UPDATE data_resources SET
-				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
-				credential_cipher=?, ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
-				WHERE id=?`,
-				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
-				input.Username, credentialCipher, input.SSLMode, now, id)
-		} else {
-			_, err = tx.Exec(`UPDATE data_resources SET
-				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
-				credential_cipher=?, ssl_mode=?, updated_at=?
-				WHERE id=?`,
-				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
-				input.Username, credentialCipher, input.SSLMode, now, id)
-		}
+	authChanged := authAffectingChanged(prev, input)
+	if authChanged {
+		_, err = tx.Exec(`UPDATE data_resources SET
+			name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
+			credential_cipher='', ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
+			WHERE id=?`,
+			input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
+			input.Username, input.SSLMode, now, id)
 	} else {
-		if authChanged {
-			_, err = tx.Exec(`UPDATE data_resources SET
-				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
-				ssl_mode=?, updated_at=?, last_test_status='', last_test_at=0
-				WHERE id=?`,
-				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
-				input.Username, input.SSLMode, now, id)
-		} else {
-			_, err = tx.Exec(`UPDATE data_resources SET
-				name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
-				ssl_mode=?, updated_at=?
-				WHERE id=?`,
-				input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
-				input.Username, input.SSLMode, now, id)
-		}
+		_, err = tx.Exec(`UPDATE data_resources SET
+			name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
+			credential_cipher='', ssl_mode=?, updated_at=?
+			WHERE id=?`,
+			input.Name, input.DBType, input.Host, input.Port, input.DatabaseName, input.DefaultSchema,
+			input.Username, input.SSLMode, now, id)
 	}
 	if err != nil {
 		return err
@@ -286,9 +254,8 @@ func DeleteDataResource(db *sql.DB, id string) error {
 	return tx.Commit()
 }
 
-// UpdateTestStatus 更新资源的最近测试状态（无 CAS）。
-// 用于创建/更新资源后的 persistConnectionTest；不与 updated_at 做乐观锁。
-// 配置变更与测试结果的竞态请用 UpdateTestStatusAndRevokeRead（带 expectedUpdatedAt）。
+// UpdateTestStatus 更新资源的最近测试状态（无 CAS），供迁移/测试数据使用。
+// 在线测试结果必须用 UpdateTestStatusAndRevokeRead（带 expectedUpdatedAt）。
 func UpdateTestStatus(db *sql.DB, id, status string) error {
 	_, err := db.Exec("UPDATE data_resources SET last_test_status=?, last_test_at=? WHERE id=?",
 		status, time.Now().UnixMilli(), id)

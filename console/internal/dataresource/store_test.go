@@ -45,8 +45,26 @@ func TestCreateGetResource(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("查询失败: err=%v ok=%v", err, ok)
 	}
-	if got.Name != "PG Prod" || got.CredentialCipher != "cipher" {
+	if got.Name != "PG Prod" || got.CredentialCipher != "" {
 		t.Errorf("查询结果不符: %+v", got)
+	}
+}
+
+func TestMigrateClearsLegacyCredentialCipher(t *testing.T) {
+	db := testDB(t)
+	r := DataResource{ID: "legacy", Name: "Legacy", DBType: DriverPostgreSQL, Host: "h", Port: 5432, DatabaseName: "d", Username: "u", SSLMode: "disable", CreatedBy: "a", CreatedAt: 1, UpdatedAt: 1}
+	if err := CreateDataResource(db, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE data_resources SET credential_cipher = 'legacy-secret' WHERE id = 'legacy'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateDataResources(db); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := GetDataResource(db, "legacy")
+	if err != nil || !ok || got.CredentialCipher != "" {
+		t.Fatalf("迁移必须清空历史密码密文: ok=%v err=%v cipher=%q", ok, err, got.CredentialCipher)
 	}
 }
 
@@ -266,17 +284,17 @@ func TestAuthVsPoolAffectingChanged(t *testing.T) {
 		Name: "R", DBType: DriverDM, Host: "h", Port: 5236, DefaultSchema: "NEW",
 		Username: "u", SSLMode: "disable",
 	}
-	if authAffectingChanged(prev, in, "") {
+	if authAffectingChanged(prev, in) {
 		t.Fatal("仅改 defaultSchema 不应 authAffecting")
 	}
-	if !poolAffectingChanged(prev, in, "") {
+	if !poolAffectingChanged(prev, in) {
 		t.Fatal("仅改 defaultSchema 应对达梦 poolAffecting（DSN schema）")
 	}
 	// 改 host：两者皆 true
 	in2 := in
 	in2.Host = "h2"
 	in2.DefaultSchema = "OLD"
-	if !authAffectingChanged(prev, in2, "") || !poolAffectingChanged(prev, in2, "") {
+	if !authAffectingChanged(prev, in2) || !poolAffectingChanged(prev, in2) {
 		t.Fatal("改 host 应同时影响 auth 与 pool")
 	}
 	// 纯改名
@@ -285,7 +303,7 @@ func TestAuthVsPoolAffectingChanged(t *testing.T) {
 		DatabaseName: prev.DatabaseName, DefaultSchema: prev.DefaultSchema,
 		Username: prev.Username, SSLMode: prev.SSLMode,
 	}
-	if authAffectingChanged(prev, in3, "") || poolAffectingChanged(prev, in3, "") {
+	if authAffectingChanged(prev, in3) || poolAffectingChanged(prev, in3) {
 		t.Fatal("纯改名不应影响 auth/pool")
 	}
 }

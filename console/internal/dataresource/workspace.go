@@ -215,13 +215,14 @@ func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 // finishInvalidation 等待在途请求退出并回滚手工事务。
 func (wm *WorkspaceManager) finishInvalidation(ws *Workspace) {
 	ws.mu.Lock()
-	defer ws.mu.Unlock()
 	if ws.Tx != nil {
 		_ = ws.Tx.Rollback()
 		ws.clearTxLocked(true, wm.pool)
-		return
+	} else {
+		ws.clearTxLocked(false, nil)
 	}
-	ws.clearTxLocked(false, nil)
+	ws.mu.Unlock()
+	wm.pool.CloseUserDB(ws.ResourceID, ws.Username)
 }
 
 // invalidateMatching 在 manager 锁内一次性标记并移除匹配工作台，
@@ -338,6 +339,7 @@ func (wm *WorkspaceManager) deleteWorkspaceIfIdle(ws *Workspace, now time.Time) 
 	delete(wm.workspaces, ws.ID)
 	ws.closed.Store(true)
 	ws.clearTxLocked(false, nil)
+	wm.pool.CloseUserDB(ws.ResourceID, ws.Username)
 	return true
 }
 

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,8 +205,27 @@ func (a *api) serveFile(w http.ResponseWriter, meta map[string]any) {
 		}
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", urlEscape(name)))
+	w.Header().Set("Content-Disposition", cabinetContentDisposition(name))
 	io.Copy(w, f)
+}
+
+// cabinetContentDisposition 同时提供 ASCII filename fallback 与 RFC 5987 filename*。
+// 部分浏览器、WebView 和反向代理只识别 filename；仅发送 filename* 时会把文件保存为 download。
+func cabinetContentDisposition(name string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r == '\r' || r == '\n' || r == '"' || r == '\\':
+			return -1
+		case r >= 0x20 && r <= 0x7e:
+			return r
+		default:
+			return '_'
+		}
+	}, name)
+	if strings.TrimSpace(safe) == "" {
+		safe = "download"
+	}
+	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, safe, urlEscape(name))
 }
 
 // downloadCabinet 处理 GET /api/cabinet/{id}/download(登录,任意角色):按 id 下载。
@@ -263,8 +283,38 @@ func (a *api) deleteCabinet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// urlEscape 仅转义 Content-Disposition filename* 所需的少量字符。
+// setCabinetPublic 处理 PATCH /api/cabinet/{id}/public。
+// 分享状态必须由服务端确认后再更新前端，避免仅本地显示“已公开”而匿名地址仍返回 403。
+func (a *api) setCabinetPublic(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	raw, ok := a.store.getEntity("cabinet", id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
+		return
+	}
+	var body struct {
+		Public bool `json:"public"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
+		return
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "文件元数据损坏"})
+		return
+	}
+	meta["public"] = body.Public
+	b, err := json.Marshal(meta)
+	if err != nil || a.store.putEntity("cabinet", id, b) != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新分享状态失败"})
+		return
+	}
+	writeJSON(w, http.StatusOK, meta)
+}
+
+// urlEscape 按 RFC 5987 对 UTF-8 文件名做百分号编码。
 func urlEscape(s string) string {
-	r := strings.NewReplacer(" ", "%20", "\"", "%22", "\\", "%5C", "\n", "", "\r", "")
-	return r.Replace(s)
+	s = strings.NewReplacer("\n", "", "\r", "").Replace(s)
+	return url.PathEscape(s)
 }

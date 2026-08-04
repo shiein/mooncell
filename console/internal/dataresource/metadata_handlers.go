@@ -56,10 +56,10 @@ func (s *Service) getAdapterForRequest(w http.ResponseWriter, r *http.Request) (
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return nil, "", false
 	}
-	// 获取或创建连接池
-	db, err := s.pools.GetDB(res)
+	// 仅使用当前用户本次输入密码建立的内存连接；不存在时要求重新连接。
+	db, err := s.pools.GetUserDB(res.ID, user)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "POOL_ERROR", "获取数据库连接失败")
+		writeErr(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "请先输入密码连接数据库")
 		return nil, "", false
 	}
 	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))

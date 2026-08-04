@@ -611,9 +611,9 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
-	db, err := s.pools.GetDB(res)
+	db, err := s.pools.GetUserDB(res.ID, user)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "POOL_ERROR", "获取连接失败")
+		writeErr(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "当前数据库连接已关闭，请重新进入工作台")
 		return
 	}
 	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))

@@ -16,8 +16,6 @@ import (
 type Store struct {
 	db  *sql.DB
 	ttl time.Duration
-	// credKey 数据资源凭据加密密钥;无数据资源模块时为 nil。
-	credKey *dataresource.CredentialKey
 }
 
 func openDB(cfg *Config) *Store {
@@ -103,8 +101,7 @@ func openDB(cfg *Config) *Store {
 
 	store := &Store{db: db, ttl: time.Duration(cfg.Session.TTLHours) * time.Hour}
 
-	// 数据资源模块:迁移三张表 + 加载/生成凭据密钥。
-	// 密钥文件丢失但已有资源时拒绝启动(不生成新密钥伪装成功)。
+	// 数据资源模块迁移会清空旧版本遗留的 credential_cipher，密码不再持久化。
 	if err := dataresource.MigrateDataResources(db); err != nil {
 		log.Fatalf("[db] 数据资源迁移失败: %v", err)
 	}
@@ -112,23 +109,6 @@ func openDB(cfg *Config) *Store {
 	if err := serverops.Migrate(db); err != nil {
 		log.Fatalf("[db] 服务器运维迁移失败: %v", err)
 	}
-	keyFile := cfg.DataResource.CredentialKeyFile
-	if keyFile == "" {
-		keyFile = "mooncell-data.key"
-	}
-	hasRes, err := dataresource.HasExistingResources(db)
-	if err != nil {
-		log.Fatalf("[db] 检查数据资源失败: %v", err)
-	}
-	credKey, err := dataresource.LoadOrCreateCredentialKey(keyFile, hasRes)
-	if err != nil {
-		log.Fatalf("[db] 凭据密钥初始化失败: %v", err)
-	}
-	store.credKey = credKey
-	if !hasRes {
-		log.Printf("[db] 数据资源凭据密钥就绪: %s", keyFile)
-	}
-
 	return store
 }
 

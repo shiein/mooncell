@@ -306,9 +306,10 @@ function CopyChip({ text, label }) {
   const [ok, setOk] = React.useState(false);
   return (
     <button className="link-btn mono" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}
-      onClick={() => {
-        try { navigator.clipboard && navigator.clipboard.writeText(text); } catch (e) {}
-        setOk(true); setTimeout(() => setOk(false), 1500);
+      onClick={async () => {
+        if (await copyText(text)) {
+          setOk(true); setTimeout(() => setOk(false), 1500);
+        }
       }}>
       {label || text}
       <Icon name={ok ? "check" : "copy"} size={12} />
@@ -316,8 +317,29 @@ function CopyChip({ text, label }) {
   );
 }
 
+// 内网 HTTP 页面通常没有 Clipboard API；用受控 textarea 兼容复制，且只在确实成功时提示。
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(String(text));
+      return true;
+    }
+  } catch (e) { /* insecure context / permission denied 时走兼容路径 */ }
+  const input = document.createElement('textarea');
+  input.value = String(text);
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  let copied = false;
+  try { copied = document.execCommand('copy'); } catch (e) { copied = false; }
+  input.remove();
+  return copied;
+}
+
 export {
   Icon, Spinner, Btn, Badge, StatusBadge, TypeBadge, Field, Select, Switch, Checkbox,
   Tabs, Seg, Dialog, Progress, Sparkline, EmptyState, ToastHost, toast,
-  ConfirmHost, confirmDialog, CopyChip,
+  ConfirmHost, confirmDialog, CopyChip, copyText,
 };

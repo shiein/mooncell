@@ -18,7 +18,7 @@ import { DataResourcesPage } from './pages/DataResources.jsx';
 import { DataWorkspacePage } from './pages/DataWorkspace.jsx';
 import { ServerResourcesPage } from './pages/ServerResources.jsx';
 import { ServerWorkspacePage } from './pages/ServerWorkspace.jsx';
-import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setAppLifecycle } from './lib/api.js';
+import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setCabinetFilePublic, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -83,6 +83,7 @@ function App() {
       tab: opts.tab || (page === "app-detail" ? (opts.tab || "overview") : undefined),
       resourceId: opts.resourceId,
       resource: opts.resource,
+      workspace: opts.workspace,
     }, role, features);
     setRoute(r);
     try {
@@ -90,6 +91,7 @@ function App() {
       // 服务器工作台使用独立 hash，不写 mc_route
       const persist = { ...r };
       delete persist.resource;
+      delete persist.workspace;
       localStorage.setItem("mc_route", JSON.stringify(persist));
     } catch (e) {}
   };
@@ -402,10 +404,18 @@ function App() {
       toast("文件已删除", { icon: "trash" });
     },
 
-    toggleCabinetPublic(f) {
-      const next = { ...f, public: !f.public };
-      setCabinet((s) => s.map((x) => (x.id === f.id ? next : x))); persist("cabinet", next);
-      toast(f.public ? `「${f.name}」已设为私有` : `「${f.name}」已公开,匿名可见`);
+    async toggleCabinetPublic(f, forcePublic) {
+      const isPublic = typeof forcePublic === "boolean" ? forcePublic : !f.public;
+      try {
+        const saved = await setCabinetFilePublic(f.id, isPublic);
+        const next = { ...f, ...saved, public: isPublic };
+        setCabinet((s) => s.map((x) => (x.id === f.id ? next : x)));
+        toast(isPublic ? `「${f.name}」已公开,匿名可访问` : `「${f.name}」已设为私有`);
+        return next;
+      } catch (e) {
+        toast(e.message || "更新分享状态失败", { tone: "error" });
+        return null;
+      }
     },
 
   };
@@ -506,13 +516,13 @@ function App() {
                 onTab={(tab) => nav("app-detail", { appId: route.appId, tab })} />
             ) : null}
             {route.page === "data-resources" ? (
-              <DataResourcesPage onOpenWorkspace={(res) => nav("data-workspace", { resourceId: res.id, resource: res })} />
+              <DataResourcesPage onOpenWorkspace={(res, workspace) => nav("data-workspace", { resourceId: res.id, resource: res, workspace })} />
             ) : null}
             {route.page === "data-workspace" && route.resource ? (
-              <DataWorkspacePage resource={route.resource} onBack={() => nav("data-resources")} />
+              <DataWorkspacePage resource={route.resource} initialWorkspace={route.workspace} onBack={() => nav("data-resources")} />
             ) : null}
             {route.page === "data-workspace" && !route.resource ? (
-              <DataResourcesPage onOpenWorkspace={(res) => nav("data-workspace", { resourceId: res.id, resource: res })} />
+              <DataResourcesPage onOpenWorkspace={(res, workspace) => nav("data-workspace", { resourceId: res.id, resource: res, workspace })} />
             ) : null}
             {route.page === "server-operations" ? <ServerResourcesPage /> : null}
             {route.page === "cabinet" ? <CabinetPage /> : null}

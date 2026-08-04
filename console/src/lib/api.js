@@ -177,6 +177,18 @@ async function removeCabinetFile(id) {
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); }
 }
 
+async function setCabinetFilePublic(id, isPublic) {
+  const r = await fetch(`/api/cabinet/${encodeURIComponent(id)}/public`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public: !!isPublic }),
+    credentials: 'same-origin',
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || '更新分享状态失败');
+  return d;
+}
+
 // 公开:文件柜上限(MB)+ 匿名开关;用于上传前客户端大小预检。失败返回 null。
 async function getPubLimits() {
   try {
@@ -512,7 +524,7 @@ export {
   listUsers, createUser, updateUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
-  uploadCabinetFile, removeCabinetFile, getPubLimits,
+  uploadCabinetFile, removeCabinetFile, setCabinetFilePublic, getPubLimits,
   getAgentCapabilities, getAgentSystem, getAgentPing, getAgentMetrics, precheckApp, getAppStatus, setAppLifecycle,
   hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,

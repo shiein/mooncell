@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -67,11 +66,11 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// toOut 将内部 DataResource 转为对外形态（不含密码，含 hasPassword 和 accessMode）。
+// toOut 将内部 DataResource 转为对外形态。密码从不持久化，hasPassword 固定为 false。
 func toOut(r DataResource, accessMode string) DataResourceOut {
 	return DataResourceOut{
 		DataResource: r,
-		HasPassword:  r.CredentialCipher != "",
+		HasPassword:  false,
 		AccessMode:   accessMode,
 		LastTestInfo: formatTestInfo(r.LastTestStatus, r.LastTestAt),
 	}
@@ -148,21 +147,12 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
-	if input.Password == "" {
-		writeErr(w, http.StatusBadRequest, "PASSWORD_REQUIRED", "创建资源时密码不能为空")
-		return
-	}
-	cipher, err := s.credKey.Encrypt(input.Password)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "ENCRYPT_ERROR", "凭据加密失败")
-		return
-	}
 	now := time.Now().UnixMilli()
 	res := DataResource{
 		ID: newID(), Name: input.Name, DBType: input.DBType,
 		Host: input.Host, Port: input.Port, DatabaseName: input.DatabaseName,
 		DefaultSchema: input.DefaultSchema, Username: input.Username,
-		CredentialCipher: cipher, SSLMode: input.SSLMode,
+		CredentialCipher: "", SSLMode: input.SSLMode,
 		CreatedBy: user, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := CreateDataResource(s.db, res); err != nil {
@@ -171,12 +161,6 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "创建资源失败")
-		return
-	}
-	// 创建后自动测连并落库 last_test_status（授权 read 依赖 ok；对话框测试不写库）
-	res, err = s.persistConnectionTest(res, input.Password)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "资源已创建，但保存连接测试状态失败")
 		return
 	}
 	s.auditLog(user, "创建数据资源", res.Name, "成功")
@@ -249,18 +233,8 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
-	// 空密码表示保留原密码
-	var cipher string
-	if input.Password != "" {
-		cipher, err = s.credKey.Encrypt(input.Password)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "ENCRYPT_ERROR", "凭据加密失败")
-			return
-		}
-	}
-	authChanged := authAffectingChanged(prev, input, cipher)
-	poolChanged := poolAffectingChanged(prev, input, cipher)
-	if err := UpdateDataResource(s.db, id, input, cipher, prev); err != nil {
+	poolChanged := poolAffectingChanged(prev, input)
+	if err := UpdateDataResource(s.db, id, input, prev); err != nil {
 		if isUniqueConstraint(err) {
 			writeErr(w, http.StatusConflict, "NAME_DUPLICATE", "资源名称已存在")
 			return
@@ -278,40 +252,8 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新后读取资源失败")
 		return
 	}
-	if authChanged {
-		password := input.Password
-		if password == "" {
-			password, err = s.credKey.Decrypt(res.CredentialCipher)
-			if err != nil {
-				writeErr(w, http.StatusInternalServerError, "DECRYPT_ERROR", "凭据解密失败")
-				return
-			}
-		}
-		res, err = s.persistConnectionTest(res, password)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "DB_ERROR", "资源已更新，但保存连接测试状态失败")
-			return
-		}
-	}
 	s.auditLog(user, "更新数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
-}
-
-// persistConnectionTest 对资源跑一次连接测试并写入 last_test_status/at，返回刷新后的资源视图。
-func (s *Service) persistConnectionTest(res DataResource, password string) (DataResource, error) {
-	result := TestConnection(res, password)
-	status := result.PersistStatus()
-	if err := UpdateTestStatus(s.db, res.ID, status); err != nil {
-		return res, err
-	}
-	updated, found, err := GetDataResource(s.db, res.ID)
-	if err != nil {
-		return res, err
-	}
-	if !found {
-		return res, fmt.Errorf("资源不存在")
-	}
-	return updated, nil
 }
 
 // DeleteResource 处理 DELETE /api/data-resources/{id}（仅 admin）。
@@ -400,7 +342,7 @@ func (s *Service) TestConnectionHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // TestResourceDraftHandler 处理 POST /api/data-resources/{id}/test-draft（仅 admin）。
-// 用请求体中的连接字段测试；密码可空，空则使用该资源已保存凭据。
+// 用请求体中的连接字段测试；密码必须由用户本次输入，且不保存。
 // 用于编辑对话框：改了主机/库等但未改密码时，必须测「新配置 + 旧密码」，不能测整条旧记录。
 // 不写 last_test_status（草稿测试不污染已保存资源的测试状态）。
 func (s *Service) TestResourceDraftHandler(w http.ResponseWriter, r *http.Request) {
@@ -414,7 +356,7 @@ func (s *Service) TestResourceDraftHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := r.PathValue("id")
-	existing, found, err := GetDataResource(s.db, id)
+	_, found, err := GetDataResource(s.db, id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源失败")
 		return
@@ -432,24 +374,20 @@ func (s *Service) TestResourceDraftHandler(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		return
 	}
-	password := input.Password
-	if password == "" {
-		password, err = s.credKey.Decrypt(existing.CredentialCipher)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "DECRYPT_ERROR", "凭据解密失败")
-			return
-		}
+	if input.Password == "" {
+		writeErr(w, http.StatusBadRequest, "PASSWORD_REQUIRED", "测试连接时密码不能为空")
+		return
 	}
 	res := DataResource{
 		DBType: input.DBType, Host: input.Host, Port: input.Port,
 		DatabaseName: input.DatabaseName, DefaultSchema: input.DefaultSchema,
 		Username: input.Username, SSLMode: input.SSLMode,
 	}
-	result := TestConnection(res, password)
+	result := TestConnection(res, input.Password)
 	writeOK(w, testResultResponse(result))
 }
 
-// TestExistingConnection 处理 POST /api/data-resources/{id}/test（仅 admin，用已保存的配置测试）。
+// TestExistingConnection 处理 POST /api/data-resources/{id}/test（仅 admin，用本次输入密码测试）。
 func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request) {
 	_, role, ok := userFromCtx(r)
 	if !ok {
@@ -472,12 +410,14 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 	}
 	// 快照配置版本：测试可能长达 10s，写回时用 CAS 防止旧结果覆盖新配置
 	configVersion := res.UpdatedAt
-	password, err := s.credKey.Decrypt(res.CredentialCipher)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "DECRYPT_ERROR", "凭据解密失败")
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Password == "" {
+		writeErr(w, http.StatusBadRequest, "PASSWORD_REQUIRED", "测试连接时密码不能为空")
 		return
 	}
-	result := TestConnection(res, password)
+	result := TestConnection(res, body.Password)
 	status := result.PersistStatus()
 	revoked, err := UpdateTestStatusAndRevokeRead(s.db, id, status, configVersion)
 	if err != nil {

@@ -173,7 +173,7 @@ func (a *blockingAdapter) Capabilities() Capabilities { return Capabilities{} }
 func TestCancelWorkspaceStatementUnblocksExecute(t *testing.T) {
 	started := make(chan struct{})
 	adapter := &blockingAdapter{started: started}
-	pool := NewPoolManager(nil)
+	pool := NewPoolManager()
 	wm := NewWorkspaceManager(pool)
 	ws := wm.CreateWorkspace("res-cancel", "dave", adapter, false)
 
@@ -219,7 +219,7 @@ func TestCancelWorkspaceStatementUnblocksExecute(t *testing.T) {
 func TestCancelWorkspaceHandlerUnblocksExecute(t *testing.T) {
 	started := make(chan struct{})
 	adapter := &blockingAdapter{started: started}
-	pool := NewPoolManager(nil)
+	pool := NewPoolManager()
 	wm := NewWorkspaceManager(pool)
 	svc := &Service{db: testDB(t), pools: pool, workspaces: wm}
 	ws := wm.CreateWorkspace("res-handler-cancel", "admin", adapter, false)
@@ -276,7 +276,7 @@ func TestCancelWorkspaceHandlerUnblocksExecute(t *testing.T) {
 }
 
 func TestDeleteWorkspaceIfIdleRechecksCurrentActivity(t *testing.T) {
-	wm := NewWorkspaceManager(NewPoolManager(nil))
+	wm := NewWorkspaceManager(NewPoolManager())
 	ws := wm.CreateWorkspace("res-idle", "alice", &blockingAdapter{started: make(chan struct{})}, false)
 	now := time.Now()
 
@@ -302,7 +302,7 @@ func TestDeleteWorkspaceIfIdleRechecksCurrentActivity(t *testing.T) {
 }
 
 func TestPoolOperationBlocksImportAndExclusive(t *testing.T) {
-	pool := NewPoolManager(nil)
+	pool := NewPoolManager()
 	if !pool.TryBeginOperation("res-op") || !pool.TryBeginOperation("res-op") {
 		t.Fatal("普通资源操作之间应允许并发")
 	}
@@ -393,7 +393,7 @@ func TestManualTxSurvivesRequestContextCancel(t *testing.T) {
 	db, adapter := openTestSQLite(t)
 	defer db.Close()
 
-	pool := NewPoolManager(nil)
+	pool := NewPoolManager()
 	wm := NewWorkspaceManager(pool)
 	ws := wm.CreateWorkspace("res-1", "alice", adapter, false)
 	if _, err := wm.SetAutoCommit(ws, false); err != nil {
@@ -436,7 +436,7 @@ func TestManualTxRollbackReleasesBusy(t *testing.T) {
 	db, adapter := openTestSQLite(t)
 	defer db.Close()
 
-	pool := NewPoolManager(nil)
+	pool := NewPoolManager()
 	wm := NewWorkspaceManager(pool)
 	ws := wm.CreateWorkspace("res-2", "bob", adapter, false)
 	_, _ = wm.SetAutoCommit(ws, false)
@@ -466,7 +466,7 @@ func TestRequestCancelDoesNotKillManualTx(t *testing.T) {
 	db, adapter := openTestSQLite(t)
 	defer db.Close()
 
-	pool := NewPoolManager(nil)
+	pool := NewPoolManager()
 	wm := NewWorkspaceManager(pool)
 	ws := wm.CreateWorkspace("res-3", "carol", adapter, false)
 	_, _ = wm.SetAutoCommit(ws, false)
