@@ -35,7 +35,7 @@ function OverviewTab({ app, releases }) {
     const iv = setInterval(tick, 10000);
     return () => { alive = false; clearInterval(iv); };
   }, [app.id, real]);
-  // 容器/软链托管(tomcat/static):真实类型但平台不托管进程,不能显示「未运行」误导。
+  // 容器/软链托管(tomcat/tongweb/static):真实类型但平台不托管进程,不能显示「未运行」误导。
   const nonProcessReal = isRealType(app.type) && !isProcessType(app.type);
   // 真实进程类的进程行优先用 live;失败时显式标"状态未知",不伪装。
   const procRow = real
@@ -43,7 +43,9 @@ function OverviewTab({ app, releases }) {
       : live ? (live.active ? `pid ${live.pid || "?"} · ${live.state}` : `未运行 · ${live.state || "inactive"}`)
       : "查询中…")
     : nonProcessReal
-      ? (app.type === "tomcat-war" ? "Tomcat 容器托管 · 无平台进程" : "nginx 软链托管 · 无平台进程")
+      ? (app.type === "tomcat-war" ? "Tomcat 容器托管 · 无平台进程"
+        : app.type === "tongweb-war" ? "TongWeb 自动部署 · 无平台进程"
+        : "nginx 软链托管 · 无平台进程")
       : (app.pid ? `pid ${app.pid} · 运行 ${app.uptime}` : "未运行");
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
@@ -65,7 +67,9 @@ function OverviewTab({ app, releases }) {
         {app.status === "failed" ? (
           <div style={{ marginTop: 14, display: "flex", gap: 8, padding: "9px 12px", borderRadius: 8, background: "var(--error-soft)", color: "var(--error)", fontSize: 12.5 }}>
             <Icon name="alert" size={14} style={{ flex: "none", marginTop: 1 }} />
-            <span>最近一次部署健康检查失败,已自动回滚;当前进程异常退出。建议查看实时日志定位后重新部署。</span>
+            <span>{app.type === "tongweb-war"
+              ? "最近一次 TongWeb 部署未通过健康检查；有旧 WAR 时已尝试自动回滚，请查看部署记录确认结果。"
+              : "最近一次部署健康检查失败,已自动回滚;当前进程异常退出。建议查看实时日志定位后重新部署。"}</span>
           </div>
         ) : null}
       </div>
@@ -351,7 +355,7 @@ function LogViewer({ app }) {
         ? <EmptyState icon="alert" title="无法读取实时日志" desc="Agent 不可达或日志流中断。真实应用不展示模拟日志,请确认 Agent 在线后重试。"
             action={<Btn icon="rotate" onClick={() => { setRealFailed(false); setLines([]); }}>重试</Btn>} />
         : noRealSource
-          ? <EmptyState icon="terminal" title="无可跟随的日志源" desc={app.type === "static-nginx" || app.type === "tomcat-war"
+          ? <EmptyState icon="terminal" title="无可跟随的日志源" desc={app.type === "static-nginx" || app.type === "tomcat-war" || app.type === "tongweb-war"
               ? "该类型无进程 journal;在「配置」声明具体日志文件路径(不支持通配/~)后即可在线 tail。"
               : "未声明具体日志文件,且进程日志暂不可用。可在「配置」补充日志文件路径。"} />
           : <Console lines={shown} filter={filter} height={460} />}
@@ -430,7 +434,7 @@ function ConfigTab({ app }) {
     getAgentCapabilities(app.agentId).then((c) => setCaps(c && c.capabilities ? c.capabilities : null));
   }, [app.agentId]);
   const capOk = (r) => {
-    if (r === "无进程" || r === "软链" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有(与新建向导一致)
+    if (r === "无进程" || r === "软链" || r === "nohup" || r === "tongweb") return true; // TongWeb 由路径+部署后 HTTP 探活确认
     if (!caps) return true;
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : false;
@@ -447,10 +451,17 @@ function ConfigTab({ app }) {
   const save = async () => {
     if (realType) {
       if (!runners.some(capOk)) { toast("所选 Agent 不支持该类型任何 Runner,无法保存", { tone: "error", icon: "alert" }); return; }
+      if (app.type === "tongweb-war") {
+        const h = String(draft.health || "").trim();
+        if (!h.startsWith("http://") && !h.startsWith("https://")) {
+          toast("TongWeb WAR 必须填写 http(s) 健康检查 URL", { tone: "error", icon: "alert" });
+          return;
+        }
+      }
       setSaving(true);
       const binPath = (String(draft.path || "").split(/\s+/)[0]) || "";
-      // static-nginx 不传端口:端口由 nginx 占用属常态,传了会导致配置永远保存不了(与新建向导同口径)。
-      const params = new URLSearchParams({ binPath, port: app.type === "static-nginx" ? "" : String(draft.port || ""), type: app.type, runner: draft.runner || runners[0], agent: app.agentId || "default" });
+      // static-nginx/TongWeb 不传端口:端口由现有 Web/容器进程占用属常态。
+      const params = new URLSearchParams({ binPath, port: app.type === "static-nginx" || app.type === "tongweb-war" ? "" : String(draft.port || ""), type: app.type, runner: draft.runner || runners[0], agent: app.agentId || "default" });
       const res = await precheckApp(params.toString());
       setSaving(false);
       if (res && res.checks) {
@@ -462,10 +473,12 @@ function ConfigTab({ app }) {
     }
     // 落库成功才退出编辑;失败由 updateApp 据实报错并保留旧值(不乐观骗"已保存")。
     // nohup runner 不支持启动用户:清空 user 字段,避免旧值残留导致部署时被后端拒绝。
-    const toSave = draft.runner === "nohup" ? { ...draft, user: "" } : draft;
+    const toSave = app.type === "tongweb-war"
+      ? { ...draft, runner: "tongweb", healthType: "HTTP 200", reload: false, user: "", workdir: "", jvm: "", env: {}, envVars: [] }
+      : draft.runner === "nohup" ? { ...draft, user: "" } : draft;
     const r = await store.updateApp(app.id, toSave);
     if (r && r.error) return;
-    if (draft.runner === "nohup") setDraft(toSave);
+    if (draft.runner === "nohup" || app.type === "tongweb-war") setDraft(toSave);
     if (r && r.error) return;
     setEdit(false);
   };
@@ -492,10 +505,10 @@ function ConfigTab({ app }) {
             <Select value={draft.runner} onChange={(v) => set("runner", v)} disabled={!edit}
               options={runners.map((r) => ({ value: r, label: capOk(r) ? r : r + "(Agent 未检测到)", disabled: !capOk(r) }))} />
           </Field>
-          <Field label="启动用户" hint={draft.runner === "nohup" ? "nohup 不支持启动用户(进程继承 Agent 用户,不降权)" : undefined}>
-            <input className="input" disabled={!edit || draft.runner === "nohup"} value={draft.runner === "nohup" ? "" : (draft.user || "")}
+          <Field label="启动用户" hint={app.type === "tongweb-war" ? "TongWeb 容器由运维独立管理" : draft.runner === "nohup" ? "nohup 不支持启动用户(进程继承 Agent 用户,不降权)" : undefined}>
+            <input className="input" disabled={!edit || draft.runner === "nohup" || app.type === "tongweb-war"} value={draft.runner === "nohup" || app.type === "tongweb-war" ? "" : (draft.user || "")}
               onChange={(e) => set("user", e.target.value)}
-              placeholder={draft.runner === "nohup" ? "nohup 不支持" : "appuser"} />
+              placeholder={app.type === "tongweb-war" ? "不适用" : draft.runner === "nohup" ? "nohup 不支持" : "appuser"} />
           </Field>
           <Field label="端口"><input className="input mono" disabled={!edit} value={draft.port || ""} onChange={(e) => set("port", e.target.value)} /></Field>
           <Field label="环境分组" hint="仅用于分组/筛选与批量操作,不影响部署行为">
@@ -505,15 +518,21 @@ function ConfigTab({ app }) {
         </div>
         <div style={sec}>路径与启动</div>
         <Field label="制品路径">{ipt("path")}</Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <Field label="工作目录">{ipt("workdir")}</Field>
-          <Field label={app.type === "java-jar" || app.type === "tomcat-war" ? "JVM 参数" : "启动参数 / 备注"}>{ipt("jvm")}</Field>
-        </div>
+        {app.type !== "tongweb-war" ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="工作目录">{ipt("workdir")}</Field>
+            <Field label={app.type === "java-jar" || app.type === "tomcat-war" ? "JVM 参数" : "启动参数 / 备注"}>{ipt("jvm")}</Field>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11.5, color: "var(--muted-fg)", background: "var(--muted)", borderRadius: 8, padding: "8px 12px", lineHeight: 1.65 }}>
+            完整路径须指向 TongWeb <span className="mono">deployment</span> 目录中的独立 WAR 文件。Mooncell 仅原子替换该文件，不重启共享容器、不删除展开目录。
+          </div>
+        )}
         <div style={sec}>健康检查</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Field label="方式">
-            <Select value={draft.healthType} onChange={(v) => set("healthType", v)} disabled={!edit}
-              options={["HTTP 200", "端口探活", "进程存活", "无"]} />
+            <Select value={app.type === "tongweb-war" ? "HTTP 200" : draft.healthType} onChange={(v) => set("healthType", v)} disabled={!edit}
+              options={app.type === "tongweb-war" ? ["HTTP 200"] : ["HTTP 200", "端口探活", "进程存活", "无"]} />
           </Field>
           {draft.healthType === "端口探活" ? (
             <Field label="目标" hint="对「端口」做 TCP 探活,无需另填地址">
@@ -524,7 +543,7 @@ function ConfigTab({ app }) {
               <input className="input" disabled value={draft.healthType === "无" ? "跳过探活(仅判进程存活)" : "仅判进程存活"} />
             </Field>
           ) : (
-            <Field label="健康检查 URL">{ipt("health")}</Field>
+            <Field label="健康检查 URL" hint={app.type === "tongweb-war" ? "必须由目标应用直接返回 2xx；重定向不算通过" : undefined}>{ipt("health")}</Field>
           )}
         </div>
         <div style={sec}>备份与钩子</div>
@@ -557,9 +576,11 @@ function ConfigTab({ app }) {
               value={draft.pm2Name || ""} onChange={(e) => set("pm2Name", e.target.value)} />
           </Field>
         ) : null}
-        <Field label="环境变量" hint="标记为「敏感」的值在配置页掩码回显、不进审计明文;下发 Agent 时一律作为进程环境注入">
-          <EnvEditor vars={draft.envVars} editable={edit} onChange={(v) => set("envVars", v)} />
-        </Field>
+        {app.type !== "tongweb-war" ? (
+          <Field label="环境变量" hint="标记为「敏感」的值在配置页掩码回显、不进审计明文;下发 Agent 时一律作为进程环境注入">
+            <EnvEditor vars={draft.envVars} editable={edit} onChange={(v) => set("envVars", v)} />
+          </Field>
+        ) : null}
         <Field label="日志文件路径(每行一条,在线 tail 需具体文件,不支持通配/~)">
           <textarea className="textarea mono" style={{ fontSize: 12.5 }} rows={2} disabled={!edit}
             value={(draft.logPaths || []).join("\n")} onChange={(e) => set("logPaths", e.target.value.split("\n").filter(Boolean))}></textarea>

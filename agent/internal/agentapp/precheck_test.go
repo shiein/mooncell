@@ -5,6 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -89,6 +92,38 @@ func TestPrecheckProcessPortOccupiedFails(t *testing.T) {
 	}
 	if ok, _ := c["ok"].(bool); ok {
 		t.Fatalf("进程类应用端口被占用应判 fail,却得到 ok=true,detail=%v", c["detail"])
+	}
+}
+
+func TestPrecheckTongWebUsesPathAndSkipsOccupiedPort(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, ".mc-precheck")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "deployment", "frontend.war")
+	q := url.Values{
+		"type":    {"tongweb-war"},
+		"runner":  {"tongweb"},
+		"binPath": {target},
+		"port":    {itoa(ln.Addr().(*net.TCPAddr).Port)},
+	}
+	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{dir}}}}
+	rr := httptest.NewRecorder()
+	a.precheck(rr, httptest.NewRequest(http.MethodGet, "/api/precheck?"+q.Encode(), nil))
+	if c := findCheck(t, rr.Body.Bytes(), "TongWeb WAR 路径"); c == nil || c["ok"] != true {
+		t.Fatalf("合法完整 WAR 路径应通过,check=%v body=%s", c, rr.Body.String())
+	}
+	if c := findCheck(t, rr.Body.Bytes(), "端口"); c == nil || c["ok"] != true {
+		t.Fatalf("TongWeb 已占用端口应跳过空闲检查,check=%v body=%s", c, rr.Body.String())
+	}
+	if body, err := os.ReadFile(sentinel); err != nil || string(body) != "keep" {
+		t.Fatalf("预检不得覆盖或删除已有 .mc-precheck 文件,body=%q err=%v", body, err)
 	}
 }
 

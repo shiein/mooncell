@@ -303,7 +303,8 @@ func (a *agent) appLifecycle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "active": isActive(id), "state": state, "pid": pid, "cpu": cpu, "mem": mem})
 }
 
-// undeploy 处理 DELETE /api/apps/{id}:停止并移除 unit/pm2/nohup spec/软链(保留制品与备份)。
+// undeploy 处理 DELETE /api/apps/{id}:停止并移除 unit/pm2/nohup spec/软链(保留制品与备份)；
+// runner=container 时只注销平台管理关系,不停止共享容器、不删除在役 WAR。
 //
 // 曾经无差别跑完所有清理路径后固定返回 200 {"ok":true}——stop 真失败(权限/D 态/SIGKILL 免疫)
 // 或"stop 返 0 但进程仍在"的伪成功都被吞掉,Console 收到成功即删元数据,留下失管进程。
@@ -330,7 +331,14 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 	binPath := strings.TrimSpace(r.URL.Query().Get("binPath"))
 
 	var steps []Step
-	add := func(name string, ok bool, logs ...string) { steps = append(steps, Step{Name: name, OK: ok, Logs: logs}) }
+	add := func(name string, ok bool, logs ...string) {
+		steps = append(steps, Step{Name: name, OK: ok, Logs: logs})
+	}
+	if runner == "container" {
+		add("注销容器托管应用", true, "保留共享容器与在役 WAR,仅由 Console 删除管理记录")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "steps": steps})
+		return
+	}
 
 	// systemd 托管清理:managed(deploy-<id>)是真实动作;pm2/nohup/软链接管时此 unit 本不存在,
 	// stop/disable 失败是无害 no-op——故仅在纯 systemd 托管(无 runner/pm2Name/binPath)时记为关键 step。
@@ -379,6 +387,8 @@ func (a *agent) undeploy(w http.ResponseWriter, r *http.Request) {
 // static-nginx 软链(runner 空但有 binPath)→查对外软链是否还在;其余→systemd is-active。
 func (a *agent) undeployStillAlive(id, runner, pm2Name, binPath string) (bool, string) {
 	switch {
+	case runner == "container":
+		return false, "" // Tomcat/TongWeb 由外部容器托管,删除应用记录不触碰共享容器或 WAR
 	case runner == "pm2":
 		name := unitName(id)
 		if pm2Name != "" && containerNameRe.MatchString(pm2Name) && !isUnsafePm2Name(pm2Name) {

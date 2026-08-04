@@ -2,9 +2,11 @@ package agentapp
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,90 @@ import (
 	"testing"
 	"time"
 )
+
+func makeTestWAR(t *testing.T, path, version string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for name, body := range map[string]string{
+		"WEB-INF/web.xml": "<web-app/>",
+		"version.txt":     version,
+	} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func makeWARWithEntries(t *testing.T, warPath string, names ...string) {
+	t.Helper()
+	f, err := os.Create(warPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for _, name := range names {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readTestWARVersion(path string) (string, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return "", err
+	}
+	defer zr.Close()
+	for _, zf := range zr.File {
+		if zf.Name != "version.txt" {
+			continue
+		}
+		r, err := zf.Open()
+		if err != nil {
+			return "", err
+		}
+		b, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+	return "", fmt.Errorf("WAR 中缺少 version.txt")
+}
+
+func testWARVersion(t *testing.T, path string) string {
+	t.Helper()
+	v, err := readTestWARVersion(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
 
 // execStart:native-binary / python(venv 解释器)的命令生成。
 func TestExecStart(t *testing.T) {
@@ -206,6 +292,458 @@ func TestProcessHealthyRequiresManagedProcessEvenWithHealth(t *testing.T) {
 	logs = nil
 	if !processHealthy(srv.URL, true, &logs) {
 		t.Fatal("托管进程运行且 HTTP health 通过,应判成功")
+	}
+}
+
+func TestValidateWARRejectsInvalidAndTraversal(t *testing.T) {
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "valid.war")
+	makeTestWAR(t, valid, "v1")
+	if err := validateWAR(valid); err != nil {
+		t.Fatalf("合法 WAR 应通过: %v", err)
+	}
+
+	invalid := filepath.Join(dir, "invalid.war")
+	os.WriteFile(invalid, []byte("not-a-zip"), 0644)
+	if err := validateWAR(invalid); err == nil || !strings.Contains(err.Error(), "有效 ZIP") {
+		t.Fatalf("非 ZIP 应被拒绝,got %v", err)
+	}
+
+	traversal := filepath.Join(dir, "traversal.war")
+	f, err := os.Create(traversal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, _ := zw.Create("../evil.class")
+	w.Write([]byte("x"))
+	zw.Close()
+	f.Close()
+	if err := validateWAR(traversal); err == nil || (!strings.Contains(err.Error(), "穿越") && !strings.Contains(err.Error(), "非法分段")) {
+		t.Fatalf("含穿越路径的 WAR 应被拒绝,got %v", err)
+	}
+
+	internalTraversal := filepath.Join(dir, "internal-traversal.war")
+	makeWARWithEntries(t, internalTraversal, "WEB-INF/../evil.class")
+	if err := validateWAR(internalTraversal); err == nil || !strings.Contains(err.Error(), "非法分段") {
+		t.Fatalf("含内部 .. 分段的 WAR 应被拒绝,got %v", err)
+	}
+
+	duplicate := filepath.Join(dir, "duplicate.war")
+	makeWARWithEntries(t, duplicate, "WEB-INF/web.xml", "WEB-INF/web.xml")
+	if err := validateWAR(duplicate); err == nil || !strings.Contains(err.Error(), "重复条目") {
+		t.Fatalf("含重复路径的 WAR 应被拒绝,got %v", err)
+	}
+
+	symlinkWAR := filepath.Join(dir, "symlink.war")
+	f, err = os.Create(symlinkWAR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw = zip.NewWriter(f)
+	header := &zip.FileHeader{Name: "WEB-INF/link"}
+	header.SetMode(os.ModeSymlink | 0777)
+	w, err = zw.CreateHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write([]byte("../../outside"))
+	zw.Close()
+	f.Close()
+	if err := validateWAR(symlinkWAR); err == nil || !strings.Contains(err.Error(), "符号链接") {
+		t.Fatalf("含符号链接的 WAR 应被拒绝,got %v", err)
+	}
+}
+
+func TestValidateTongWebConfigRejectsInvalidHealthURL(t *testing.T) {
+	base := DeployConfig{Type: "tongweb-war", Runner: "tongweb", BinPath: "/opt/TongWeb/deployment/app.war", Health: "http://127.0.0.1/app"}
+	if err := validateTongWebConfig(base); err != nil {
+		t.Fatalf("合法 TongWeb 配置应通过: %v", err)
+	}
+	for _, health := range []string{"http:///health", "http://user:pass@127.0.0.1/app", "ftp://127.0.0.1/app"} {
+		cfg := base
+		cfg.Health = health
+		if err := validateTongWebConfig(cfg); err == nil {
+			t.Errorf("非法健康检查 URL 应拒绝: %q", health)
+		}
+	}
+}
+
+func TestValidateTongWebConfigRejectsUnsafeExistingTarget(t *testing.T) {
+	dir := t.TempDir()
+	realTarget := filepath.Join(dir, "real.war")
+	makeTestWAR(t, realTarget, "old")
+	linkTarget := filepath.Join(dir, "link.war")
+	if err := os.Symlink(realTarget, linkTarget); err != nil {
+		t.Fatal(err)
+	}
+	base := DeployConfig{Type: "tongweb-war", Runner: "tongweb", Health: "http://127.0.0.1/health"}
+	base.BinPath = linkTarget
+	if err := validateTongWebConfig(base); err == nil || !strings.Contains(err.Error(), "符号链接") {
+		t.Fatalf("现有符号链接目标必须在备份前拒绝,got %v", err)
+	}
+	directoryTarget := filepath.Join(dir, "directory.war")
+	if err := os.Mkdir(directoryTarget, 0755); err != nil {
+		t.Fatal(err)
+	}
+	base.BinPath = directoryTarget
+	if err := validateTongWebConfig(base); err == nil || !strings.Contains(err.Error(), "普通文件") {
+		t.Fatalf("现有目录目标必须在备份前拒绝,got %v", err)
+	}
+}
+
+func TestWriteVersionDoesNotFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "app.war")
+	outside := filepath.Join(dir, "outside-secret")
+	if err := os.WriteFile(outside, []byte("do-not-touch"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, verSidecar(binPath)); err != nil {
+		t.Fatal(err)
+	}
+	if got := currentVersion(binPath); got != "" {
+		t.Fatalf("currentVersion 不得跟随旁车软链读取外部文件,got %q", got)
+	}
+	if err := writeVersion(binPath, "v1"); err != nil {
+		t.Fatalf("原子替换版本旁车失败: %v", err)
+	}
+	if body, _ := os.ReadFile(outside); string(body) != "do-not-touch" {
+		t.Fatalf("版本写入不得覆盖软链外部目标,got %q", body)
+	}
+	if fi, err := os.Lstat(verSidecar(binPath)); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("版本旁车应成为普通文件,fi=%v err=%v", fi, err)
+	}
+	if got := currentVersion(binPath); got != "v1" {
+		t.Fatalf("版本旁车=%q,want v1", got)
+	}
+}
+
+func TestBackupCurrentDoesNotTreatStatErrorsAsFirstDeploy(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(notDir, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(dir, "backups")}}}
+	_, err := a.backupCurrent(DeployConfig{ID: "app", BinPath: filepath.Join(notDir, "app.war")}, false)
+	if err == nil || !strings.Contains(err.Error(), "检查当前制品失败") {
+		t.Fatalf("ENOTDIR 等 stat 错误不能当作首次部署,got %v", err)
+	}
+}
+
+func TestTongWebTargetLockResolvesParentSymlinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real-deployment")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(dir, "deployment-alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Fatal(err)
+	}
+	realPath := filepath.Join(realDir, "app.war")
+	aliasPath := filepath.Join(aliasDir, "app.war")
+	if got, want := deployTargetLockKey(aliasPath), deployTargetLockKey(realPath); got != want {
+		t.Fatalf("同一目标的父目录软链别名必须共用锁: got %q want %q", got, want)
+	}
+}
+
+func TestEnsureTongWebTargetStillMatchesBackup(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "app.war")
+	backupDir := filepath.Join(dir, "backup")
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	makeTestWAR(t, target, "old")
+	makeTestWAR(t, filepath.Join(backupDir, "app"), "old")
+	if err := ensureTongWebTargetStillMatchesBackup(target, backupDir); err != nil {
+		t.Fatalf("目标未变化时应通过复核: %v", err)
+	}
+	makeTestWAR(t, target, "external")
+	if err := ensureTongWebTargetStillMatchesBackup(target, backupDir); err == nil || !strings.Contains(err.Error(), "外部改写") {
+		t.Fatalf("备份后被外部改写的目标必须拒绝覆盖,got %v", err)
+	}
+	firstTarget := filepath.Join(dir, "first.war")
+	if err := ensureTongWebTargetStillMatchesBackup(firstTarget, ""); err != nil {
+		t.Fatalf("首次部署且目标仍不存在应通过: %v", err)
+	}
+	makeTestWAR(t, firstTarget, "external")
+	if err := ensureTongWebTargetStillMatchesBackup(firstTarget, ""); err == nil || !strings.Contains(err.Error(), "外部创建") {
+		t.Fatalf("首次部署备份后被外部创建的目标必须拒绝覆盖,got %v", err)
+	}
+}
+
+func TestTongWebDeploySuccessPreservesMode(t *testing.T) {
+	oldDelay := tongwebHealthInitialDelay
+	tongwebHealthInitialDelay = 0
+	defer func() { tongwebHealthInitialDelay = oldDelay }()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "deployment", "frontend.war")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	makeTestWAR(t, target, "old")
+	if err := os.Chmod(target, 0640); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(verSidecar(target), []byte("v0"), 0644)
+	artifact := filepath.Join(dir, "frontend-v1.war")
+	makeTestWAR(t, artifact, "new")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	defer srv.Close()
+
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(dir, "backups")}}}
+	cfg := DeployConfig{ID: "frontend", Type: "tongweb-war", Runner: "tongweb", BinPath: target, Health: srv.URL, Version: "v1", BackupKeep: 10}
+	res := a.runDeployTongWeb(cfg, artifact, func(Step) {})
+	if res.Result != "success" {
+		t.Fatalf("TongWeb 部署应成功,got %s steps=%+v", res.Result, res.Steps)
+	}
+	if got := testWARVersion(t, target); got != "new" {
+		t.Fatalf("目标 WAR 版本=%q,want new", got)
+	}
+	if fi, err := os.Stat(target); err != nil || fi.Mode().Perm() != 0640 {
+		t.Fatalf("目标 mode 应保留 0640,fi=%v err=%v", fi, err)
+	}
+	if b, _ := os.ReadFile(verSidecar(target)); string(b) != "v1" {
+		t.Fatalf("版本旁车=%q,want v1", b)
+	}
+}
+
+func TestAtomicReplacePreserveRejectsSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	realTarget := filepath.Join(dir, "real.war")
+	makeTestWAR(t, realTarget, "old")
+	link := filepath.Join(dir, "app.war")
+	if err := os.Symlink(realTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(dir, "new.war")
+	makeTestWAR(t, artifact, "new")
+	if err := atomicReplacePreserve(artifact, link, 0644); err == nil || !strings.Contains(err.Error(), "符号链接") {
+		t.Fatalf("TongWeb 目标符号链接应被拒绝,got %v", err)
+	}
+	if got := testWARVersion(t, realTarget); got != "old" {
+		t.Fatalf("拒绝后真实目标不应改变,got %q", got)
+	}
+}
+
+func TestTongWebDeployHealthFailureRollsBackWAR(t *testing.T) {
+	oldRetries, oldInterval, oldDelay := tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay
+	tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = 1, time.Millisecond, 0
+	defer func() {
+		tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = oldRetries, oldInterval, oldDelay
+	}()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "deployment", "backend.war")
+	os.MkdirAll(filepath.Dir(target), 0755)
+	makeTestWAR(t, target, "old")
+	os.WriteFile(verSidecar(target), []byte("v0"), 0644)
+	artifact := filepath.Join(dir, "backend-v1.war")
+	makeTestWAR(t, artifact, "new")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		version, err := readTestWARVersion(target)
+		if err == nil && version == "old" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(dir, "backups")}}}
+	cfg := DeployConfig{ID: "backend", Type: "tongweb-war", Runner: "tongweb", BinPath: target, Health: srv.URL, Version: "v1", BackupKeep: 10}
+	res := a.runDeployTongWeb(cfg, artifact, func(Step) {})
+	if res.Result != "rolledback" {
+		t.Fatalf("健康失败应回滚,got %s steps=%+v", res.Result, res.Steps)
+	}
+	if got := testWARVersion(t, target); got != "old" {
+		t.Fatalf("回滚后目标 WAR=%q,want old", got)
+	}
+	if b, _ := os.ReadFile(verSidecar(target)); string(b) != "v0" {
+		t.Fatalf("回滚后版本旁车=%q,want v0", b)
+	}
+}
+
+func TestTongWebFailedHealthDoesNotOverwriteExternalWAR(t *testing.T) {
+	oldRetries, oldInterval, oldDelay := tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay
+	tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = 1, time.Millisecond, 0
+	defer func() {
+		tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = oldRetries, oldInterval, oldDelay
+	}()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "deployment", "backend.war")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	makeTestWAR(t, target, "old")
+	os.WriteFile(verSidecar(target), []byte("v0"), 0644)
+	artifact := filepath.Join(dir, "backend-v1.war")
+	makeTestWAR(t, artifact, "new")
+	external := filepath.Join(dir, "operator-v2.war")
+	makeTestWAR(t, external, "external")
+	replaceErr := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		replaceErr <- os.Rename(external, target)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(dir, "backups")}}}
+	cfg := DeployConfig{ID: "backend", Type: "tongweb-war", Runner: "tongweb", BinPath: target, Health: srv.URL, Version: "v1", BackupKeep: 10}
+	res := a.runDeployTongWeb(cfg, artifact, func(Step) {})
+	select {
+	case err := <-replaceErr:
+		if err != nil {
+			t.Fatalf("模拟外部替换失败: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("健康检查未触发模拟外部替换")
+	}
+	if res.Result != "failed" {
+		t.Fatalf("外部并发替换后应停止自动回滚,got %s steps=%+v", res.Result, res.Steps)
+	}
+	if got := testWARVersion(t, target); got != "external" {
+		t.Fatalf("不得用旧备份覆盖外部版本,got %q", got)
+	}
+	foundGuard := false
+	for _, step := range res.Steps {
+		foundGuard = foundGuard || step.Name == "回滚 · 保护并发版本"
+	}
+	if !foundGuard {
+		t.Fatalf("结果应明确记录并发版本保护,steps=%+v", res.Steps)
+	}
+}
+
+func TestTongWebRollbackDoesNotClaimExternallyReplacedWAR(t *testing.T) {
+	oldRetries, oldInterval, oldDelay := tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay
+	tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = 1, time.Millisecond, 0
+	defer func() {
+		tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = oldRetries, oldInterval, oldDelay
+	}()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "deployment", "backend.war")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	makeTestWAR(t, target, "old")
+	os.WriteFile(verSidecar(target), []byte("v0"), 0644)
+	artifact := filepath.Join(dir, "backend-v1.war")
+	makeTestWAR(t, artifact, "new")
+	external := filepath.Join(dir, "operator-v2.war")
+	makeTestWAR(t, external, "external")
+	replaceErr := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		version, _ := readTestWARVersion(target)
+		if version == "old" {
+			replaceErr <- os.Rename(external, target)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(dir, "backups")}}}
+	cfg := DeployConfig{ID: "backend", Type: "tongweb-war", Runner: "tongweb", BinPath: target, Health: srv.URL, Version: "v1", BackupKeep: 10}
+	res := a.runDeployTongWeb(cfg, artifact, func(Step) {})
+	select {
+	case err := <-replaceErr:
+		if err != nil {
+			t.Fatalf("模拟回滚期间外部替换失败: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("回滚健康检查未触发模拟外部替换")
+	}
+	if res.Result != "failed" {
+		t.Fatalf("回滚探活期间被外部替换后不能声称 rolledback,got %s steps=%+v", res.Result, res.Steps)
+	}
+	if got := testWARVersion(t, target); got != "external" {
+		t.Fatalf("不得覆盖回滚期间写入的外部版本,got %q", got)
+	}
+	if got := currentVersion(target); got != "v0" {
+		t.Fatalf("不得把外部 WAR 标成旧回滚版本；原标记应保持 v0,got %q", got)
+	}
+}
+
+func TestTongWebHealthRequiresDirect2xx(t *testing.T) {
+	oldRetries, oldInterval, oldDelay := tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay
+	tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = 1, time.Millisecond, 0
+	defer func() {
+		tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = oldRetries, oldInterval, oldDelay
+	}()
+
+	for _, tc := range []struct {
+		code int
+		want bool
+	}{{http.StatusNoContent, true}, {http.StatusFound, false}, {http.StatusUnauthorized, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.code) }))
+		var logs []string
+		got := tongwebHealthCheck(srv.URL, &logs)
+		srv.Close()
+		if got != tc.want {
+			t.Errorf("TongWeb health 状态码 %d: got %v want %v logs=%v", tc.code, got, tc.want, logs)
+		}
+	}
+}
+
+func TestTongWebFirstDeployFailureRemovesWAR(t *testing.T) {
+	oldRetries, oldInterval, oldDelay := tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay
+	tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = 1, time.Millisecond, 0
+	defer func() {
+		tongwebHealthRetries, tongwebHealthInterval, tongwebHealthInitialDelay = oldRetries, oldInterval, oldDelay
+	}()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "deployment", "frontend.war")
+	artifact := filepath.Join(dir, "frontend-v1.war")
+	makeTestWAR(t, artifact, "new")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	defer srv.Close()
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: filepath.Join(dir, "backups")}}}
+	cfg := DeployConfig{ID: "frontend", Type: "tongweb-war", Runner: "tongweb", BinPath: target, Health: srv.URL, Version: "v1", BackupKeep: 10}
+	res := a.runDeployTongWeb(cfg, artifact, func(Step) {})
+	if res.Result != "failed" {
+		t.Fatalf("首次部署探活失败应 failed,got %s", res.Result)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("首次部署失败应移除新 WAR,err=%v", err)
+	}
+}
+
+func TestTongWebManualRestoreUsesManagedWARPipeline(t *testing.T) {
+	oldDelay := tongwebHealthInitialDelay
+	tongwebHealthInitialDelay = 0
+	defer func() { tongwebHealthInitialDelay = oldDelay }()
+
+	dir := t.TempDir()
+	backupRoot := filepath.Join(dir, "backups")
+	target := filepath.Join(dir, "deployment", "backend.war")
+	os.MkdirAll(filepath.Dir(target), 0755)
+	makeTestWAR(t, target, "current")
+	os.WriteFile(verSidecar(target), []byte("v1"), 0644)
+	backupName := "20260804_120000.000000000"
+	backupDir := filepath.Join(backupRoot, "backend", backupName)
+	os.MkdirAll(backupDir, 0755)
+	oldWAR := filepath.Join(backupDir, "app")
+	makeTestWAR(t, oldWAR, "old")
+	meta := fmt.Sprintf(`{"version":"v0","sha256":%q,"time":1,"operator":"console"}`, sha256File(oldWAR))
+	os.WriteFile(filepath.Join(backupDir, "meta.json"), []byte(meta), 0644)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	defer srv.Close()
+
+	a := &agent{cfg: &Config{Paths: PathsConfig{BackupDir: backupRoot}}}
+	cfg := DeployConfig{ID: "backend", Type: "tongweb-war", Runner: "tongweb", BinPath: target, Health: srv.URL, Version: "v0", ReleaseID: "restore-v0", BackupKeep: 10}
+	res := a.runRestore(cfg, backupName, func(Step) {})
+	if res.Result != "success" || res.Version != "v0" {
+		t.Fatalf("TongWeb 手工还原应成功,got result=%s version=%s steps=%+v", res.Result, res.Version, res.Steps)
+	}
+	if got := testWARVersion(t, target); got != "old" {
+		t.Fatalf("还原后 WAR=%q,want old", got)
 	}
 }
 

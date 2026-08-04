@@ -1,40 +1,31 @@
 #!/bin/sh
-# 一键前端 E2E:构建前端 + 内嵌的 Console 二进制 → 临时空库起服务 → 跑 Playwright → 收尾。
-# 依赖 go / pnpm / curl 在 PATH。端口 8765。
+# 一键前端 E2E:构建前端 + 内嵌的 Console 二进制 → Playwright 起临时 Console → 跑用例 → 收尾。
+# 依赖 go / pnpm 在 PATH。端口 8765。
 set -e
 cd "$(dirname "$0")/.."  # console/
-PORT=8765
 BIN=/tmp/mc-console-e2e
 
 echo "[e2e] 构建前端 + Console 二进制…"
 pnpm build >/dev/null
-go build -o "$BIN" .
+# CI/开发终端及 `go env -w` 可能固定了交叉编译目标；E2E 二进制必须按真实宿主机构建。
+HOST_GOOS="$(go env GOHOSTOS)"
+HOST_GOARCH="$(go env GOHOSTARCH)"
+CGO_ENABLED=0 GOOS="$HOST_GOOS" GOARCH="$HOST_GOARCH" go build -o "$BIN" .
 
-FAKE_AGENT_PORT=9111
+export FAKE_AGENT_PORT=9111
+# 本地开发环境可能注入 http_proxy/all_proxy。Playwright 的 webServer 就绪探测若走代理，
+# 会把代理返回的 4xx 误认成本地服务已启动，随后浏览器直连得到 ERR_CONNECTION_REFUSED。
+export NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}"
+export no_proxy="127.0.0.1,localhost,${no_proxy:-}"
 # 假 Agent:让 Console 有真实能力清单与可控错误态(能力过滤 / 备份失败态 E2E)。
 node e2e/fake-agent.mjs >/tmp/mc-fake-agent.log 2>&1 &
 FAKE_PID=$!
 
-DIR="$(mktemp -d)"
-printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n[agent]\naddr="127.0.0.1:%s"\ntoken="tok"\n' "$PORT" "$DIR" "$FAKE_AGENT_PORT" > "$DIR/config.toml"
-( cd "$DIR" && "$BIN" >"$DIR/console.log" 2>&1 & echo $! > "$DIR/pid" )
-
 cleanup() {
-  # 先 TERM 优雅退出并 wait 收割,避免 SIGKILL 的「Killed: 9」噪音;再兜底 pkill。
-  [ -f "$DIR/pid" ] && kill "$(cat "$DIR/pid")" 2>/dev/null || true
+  # Console 由 Playwright webServer 管理；这里只按已知 PID 收尾假 Agent。
   [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null || true
   wait 2>/dev/null || true
-  pkill -f mc-console-e2e 2>/dev/null || true
-  pkill -f "e2e/fake-agent.mjs" 2>/dev/null || true
-  rm -rf "$DIR"
 }
 trap cleanup EXIT INT TERM
-
-echo "[e2e] 等待 Console 就绪…"
-i=0
-while [ $i -lt 40 ]; do
-  if curl -s -o /dev/null "http://127.0.0.1:$PORT/api/session"; then break; fi
-  i=$((i + 1)); sleep 0.5
-done
 
 pnpm exec playwright test "$@"

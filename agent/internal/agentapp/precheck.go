@@ -30,29 +30,50 @@ func (a *agent) precheck(w http.ResponseWriter, r *http.Request) {
 			for anc != "/" && anc != "." && !fileExists(anc) {
 				anc = filepath.Dir(anc)
 			}
-			probe := filepath.Join(anc, ".mc-precheck")
-			if err := os.WriteFile(probe, []byte("x"), 0644); err != nil {
+			probe, err := os.CreateTemp(anc, ".mc-precheck-*")
+			if err != nil {
 				add("目标目录可写", false, anc+" 不可写: "+err.Error())
 			} else {
-				os.Remove(probe)
-				detail := anc
-				if anc != dir {
-					detail = anc + "(将创建 " + dir + ")"
+				probePath := probe.Name()
+				closeErr := probe.Close()
+				removeErr := os.Remove(probePath)
+				if closeErr != nil || removeErr != nil {
+					detail := "关闭/清理预检临时文件失败"
+					if closeErr != nil {
+						detail += ": " + closeErr.Error()
+					} else {
+						detail += ": " + removeErr.Error()
+					}
+					add("目标目录可写", false, detail)
+				} else {
+					detail := anc
+					if anc != dir {
+						detail = anc + "(将创建 " + dir + ")"
+					}
+					add("目标目录可写", true, detail)
 				}
-				add("目标目录可写", true, detail)
+			}
+		}
+		if q.Get("type") == "tongweb-war" {
+			if !filepath.IsAbs(binPath) {
+				add("TongWeb WAR 路径", false, "须填写 deployment 目录下的完整绝对路径")
+			} else if !strings.EqualFold(filepath.Ext(binPath), ".war") {
+				add("TongWeb WAR 路径", false, "目标必须是带 .war 文件名的完整路径")
+			} else {
+				add("TongWeb WAR 路径", true, binPath)
 			}
 		}
 	}
 
 	// 2. 端口空闲。pm2 接管模式下端口被占用是预期的(被接管进程正在跑),
 	//    只要占用者就是被接管的那个 pm2 进程(或其子进程),就不算冲突——否则用户得先停掉自己的进程才能预检过,本末倒置。
-	//    static-nginx 无自有进程:端口是 nginx 对外的监听口,被占用正是常态(nginx 已在跑),
+	//    static-nginx/TongWeb 无自有平台进程:端口由已有容器占用正是常态,
 	//    检查空闲反而永远过不了——与 healthSpec 不对 static 做端口探活同一口径,直接跳过。
 	if port := q.Get("port"); port != "" && port != "0" {
 		adoptName := strings.TrimSpace(q.Get("pm2Name"))
 		switch {
-		case q.Get("type") == "static-nginx":
-			add("端口检查 :"+port, true, "静态站点无独立进程,端口由 nginx 对外服务,跳过空闲检查")
+		case q.Get("type") == "static-nginx" || q.Get("type") == "tongweb-war":
+			add("端口检查 :"+port, true, "容器托管应用无独立平台进程,端口由现有容器服务,跳过空闲检查")
 		case portFree(port):
 			add("端口空闲 :"+port, true, "")
 		case q.Get("runner") == "pm2" && containerNameRe.MatchString(adoptName):
@@ -80,6 +101,9 @@ func (a *agent) precheck(w http.ResponseWriter, r *http.Request) {
 	case "tomcat-war":
 		need["java"] = "Java 运行时"
 		need["tomcat"] = "Tomcat 容器" // 目标机须有 Tomcat,否则换 WAR/健康检查阶段才暴露
+	case "tongweb-war":
+		// TongWeb 无稳定通用 CLI/安装目录可探测；目标 deployment 路径白名单与可写性是
+		// Agent 的真实前置能力，容器是否完成部署由部署后的强制 HTTP 健康检查判定。
 	case "python":
 		need["python"] = "Python 运行时"
 	case "node":

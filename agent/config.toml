@@ -16,6 +16,7 @@ token = "mc_ag_change_me"
 
 [paths]
 # 安全边界:Agent 只允许在以下根目录内落盘 / 读日志,路径规范化后必须落在内(防穿越)。
+# 使用 TongWeb 时请把实际 <TongWeb安装目录>/deployment 加入 deploy_roots。
 deploy_roots = ["/srv/apps", "/data/web"]
 log_roots    = ["/srv/apps", "/var/log"]
 backup_dir   = "/opt/deploy-agent/backups"

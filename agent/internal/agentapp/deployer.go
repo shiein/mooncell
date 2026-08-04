@@ -11,8 +11,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -57,8 +59,8 @@ func validIDAndRelease(id, rid string) (string, bool) {
 type DeployConfig struct {
 	ID             string            `json:"id"`
 	Name           string            `json:"name"`
-	Type           string            `json:"type"`    // native-binary | java-jar | static-nginx;空默认 native-binary
-	BinPath        string            `json:"binPath"` // go/java:制品落盘路径;static:对外 web root 软链路径
+	Type           string            `json:"type"`    // native-binary | java-jar | static-nginx | tomcat-war | tongweb-war
+	BinPath        string            `json:"binPath"` // 进程类:制品路径;static:对外软链;容器 WAR:完整 .war 路径
 	Workdir        string            `json:"workdir"`
 	Runner         string            `json:"runner"`      // systemd(默认)| pm2;决定进程托管方式
 	Interpreter    string            `json:"interpreter"` // python:解释器路径(支持 venv,如 .../venv/bin/python);空则 python3
@@ -71,7 +73,7 @@ type DeployConfig struct {
 	ReleaseID      string            `json:"releaseId"`      // 幂等键:Agent 本地记录已成功的 releaseId,重复请求直接返回缓存结果
 	ExpectedSha256 string            `json:"expectedSha256"` // 非空则部署前强校验制品 sha256,不匹配直接失败
 	BackupKeep     int               `json:"backupKeep"`
-	ReloadCmd      string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子,白名单动作名(nginx-reload 等),非自由 shell
+	ReloadCmd      string            `json:"reloadCmd"` // static/tomcat:部署后 reload 钩子;TongWeb 自动部署不使用
 	ReloadArg      string            `json:"reloadArg"` // 部分 reload 动作的受校验参数(如 docker 部署的 nginx 容器名);仅作为 argv 末位追加,不经 shell
 	Pm2Name        string            `json:"pm2Name"`   // pm2 接管模式:非空则操作该已有进程(仅 restart,不写 ecosystem);空=Mooncell 托管(deploy-<id>)
 	LogPath        string            `json:"logPath"`   // nohup runner:stdout/stderr 重定向目标日志文件(须在 log_roots 白名单内);空则退回 <binPath>.nohup.log
@@ -94,6 +96,13 @@ type DeployResult struct {
 // 误判为失败并回滚(现场表现:健康检查不过,但手动起又正常)。retries×interval ≈ 30s 宽限。
 const healthRetries = 15
 const healthInterval = 2 * time.Second
+
+// TongWeb 监听 deployment 目录后还需完成解包、类加载和应用初始化,比普通进程 bind 端口更慢。
+// 默认给 180 秒窗口；变量仅用于把失败/回滚单测收敛到毫秒级。
+var tongwebHealthRetries = 90
+var tongwebHealthInterval = 2 * time.Second
+var tongwebHealthInitialDelay = 5 * time.Second
+var tongwebHealthTimeout = 180 * time.Second
 
 // ---------- systemd Runner ----------
 
@@ -325,13 +334,57 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return out.Close()
 }
 
-// atomicReplace 先落到 tmp、校验后 rename,避免半成品状态。
+// atomicReplace 先落到 tmp、校验后 rename,避免半成品状态。进程制品历史上按 0755 落盘。
 func atomicReplace(src, dst string) error {
 	tmp := dst + ".tmp"
 	if err := copyFile(src, tmp, 0755); err != nil {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+// atomicReplacePreserve 供容器读取型制品使用:首次部署用 defaultMode；覆盖既有文件时保留
+// 原 mode 和 owner/group,再在同目录 rename 原子替换。无法保留既有所有权时拒绝替换，
+// 避免表面部署成功但 TongWeb 因权限变化读不到 WAR。
+func atomicReplacePreserve(src, dst string, defaultMode os.FileMode) error {
+	mode := defaultMode.Perm()
+	var old os.FileInfo
+	if fi, err := os.Lstat(dst); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("目标文件不能是符号链接: %s", dst)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if fi, err := os.Stat(dst); err == nil {
+		old = fi
+		mode = fi.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	defer os.Remove(tmpPath)
+	if err := copyFile(src, tmpPath, mode); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return err
+	}
+	if old != nil {
+		if err := preserveFileOwner(tmpPath, old); err != nil {
+			return err
+		}
+	}
+	return os.Rename(tmpPath, dst)
 }
 
 // withinRoots 是安全边界:目标路径解析真实路径(EvalSymlinks)后必须落在某个白名单根目录内。
@@ -388,11 +441,49 @@ func verSidecar(binPath string) string { return binPath + ".ver" }
 
 // currentVersion 读取制品旁车记录的版本;无旁车(早期部署/首次)返回空。
 func currentVersion(binPath string) string {
-	b, err := os.ReadFile(verSidecar(binPath))
+	p := verSidecar(binPath)
+	fi, err := os.Lstat(p)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return ""
+	}
+	f, err := os.Open(p)
 	if err != nil {
 		return ""
 	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(fi, opened) {
+		return "" // Lstat 与 Open 之间被替换,拒绝跟随竞态目标
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(b) > 4096 {
+		return ""
+	}
 	return strings.TrimSpace(string(b))
+}
+
+// writeVersion 通过同目录临时文件 + rename 原子更新版本旁车。即便旁车路径被预先放成软链，
+// rename 也只会替换软链本身，不会跟随它覆盖白名单外文件。
+func writeVersion(binPath, version string) error {
+	dst := verSidecar(binPath)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := io.WriteString(tmp, version); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, dst)
 }
 
 // scriptArchived 判断本次 python/node 部署是否为多文件压缩包(决定解包到目录还是单文件替换)。
@@ -508,7 +599,10 @@ func (a *agent) restoreArtifactFrom(cfg DeployConfig, bkDir string) error {
 // meta.version 取旧制品旁车记录的版本(被备份的就是这个版本),不是正在部署的新版本。
 func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 	if _, err := os.Stat(cfg.BinPath); err != nil {
-		return "", nil // 首次部署
+		if os.IsNotExist(err) {
+			return "", nil // 首次部署
+		}
+		return "", fmt.Errorf("检查当前制品失败 %s: %w", cfg.BinPath, err)
 	}
 	// 纳秒精度:避免同秒内连续部署/还原撞同一目录名而互相覆盖,丢失备份。字典序仍 = 时间序。
 	ts := time.Now().Format("20060102_150405.000000000")
@@ -516,6 +610,12 @@ func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.RemoveAll(dir) // 仅清理由本次调用新建、尚未完成的备份目录
+		}
+	}()
 	if archived {
 		if err := tarDir(filepath.Dir(cfg.BinPath), filepath.Join(dir, "app.tar.gz")); err != nil {
 			return "", err
@@ -526,17 +626,26 @@ func (a *agent) backupCurrent(cfg DeployConfig, archived bool) (string, error) {
 	// 一并备份当前运行期配置(systemd unit 或 pm2 ecosystem):回滚要连配置一起还原,
 	// 否则旧制品会跑在新部署改过的配置下(如 env 变更),回滚后行为仍是错的。
 	if up := unitPath(cfg.ID); fileExists(up) {
-		copyFile(up, filepath.Join(dir, "unit.service"), 0644)
+		if err := copyFile(up, filepath.Join(dir, "unit.service"), 0644); err != nil {
+			return "", fmt.Errorf("备份 systemd unit 失败: %w", err)
+		}
 	}
 	if eco := pm2EcoPath(cfg.BinPath); fileExists(eco) {
-		copyFile(eco, filepath.Join(dir, "ecosystem.json"), 0644)
+		if err := copyFile(eco, filepath.Join(dir, "ecosystem.json"), 0644); err != nil {
+			return "", fmt.Errorf("备份 pm2 配置失败: %w", err)
+		}
 	}
 	if sp := nohupSpecPath(cfg.BinPath); fileExists(sp) {
-		copyFile(sp, filepath.Join(dir, "nohup.json"), 0644)
+		if err := copyFile(sp, filepath.Join(dir, "nohup.json"), 0644); err != nil {
+			return "", fmt.Errorf("备份 nohup 配置失败: %w", err)
+		}
 	}
 	meta := fmt.Sprintf(`{"version":%q,"sha256":%q,"time":%d,"operator":"console"}`,
 		currentVersion(cfg.BinPath), sha256File(cfg.BinPath), time.Now().UnixMilli())
-	os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0644); err != nil {
+		return "", fmt.Errorf("写备份元数据失败: %w", err)
+	}
+	complete = true
 	a.rotateBackups(cfg.ID, cfg.BackupKeep)
 	return dir, nil
 }
@@ -572,24 +681,35 @@ func (a *agent) rotateBackups(id string, keep int) {
 
 // ---------- 健康检查 ----------
 
-// httpHealthy:HTTP 探活。2xx/3xx(< 400)即视为存活——只认 200 会把返回 204/302/401
-// 等正常端点误判为失败触发回滚。不跟随重定向(用最后一跳的状态码判定)。
-func httpHealthy(url string) bool {
+// httpHealthyStatusWithTimeout 发起一次 HTTP 探活并按状态码上界判定。不跟随重定向，
+// 避免跳到统一登录页后把代理层可用误认为目标应用可用。
+func httpHealthyStatusWithTimeout(rawURL string, timeout time.Duration, statusUpperBound int) bool {
 	c := &http.Client{
-		Timeout:       3 * time.Second,
+		Timeout:       timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	resp, err := c.Get(url)
+	resp, err := c.Get(rawURL)
 	if err != nil {
 		return false
 	}
 	resp.Body.Close()
-	return resp.StatusCode < 400
+	return resp.StatusCode >= 200 && resp.StatusCode < statusUpperBound
 }
 
+// 普通进程沿用既有语义:2xx/3xx 通过；TongWeb 使用严格的 2xx 健康端点。
+func httpHealthyWithTimeout(rawURL string, timeout time.Duration) bool {
+	return httpHealthyStatusWithTimeout(rawURL, timeout, 400)
+}
+
+func httpHealthy2xxWithTimeout(rawURL string, timeout time.Duration) bool {
+	return httpHealthyStatusWithTimeout(rawURL, timeout, 300)
+}
+
+func httpHealthy(url string) bool { return httpHealthyWithTimeout(url, 3*time.Second) }
+
 // tcpHealthy:TCP 端口探活,能建连即视为存活(UI 的"端口探活"由此真正落地)。
-func tcpHealthy(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+func tcpHealthyWithTimeout(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return false
 	}
@@ -597,34 +717,91 @@ func tcpHealthy(addr string) bool {
 	return true
 }
 
+func tcpHealthy(addr string) bool { return tcpHealthyWithTimeout(addr, 3*time.Second) }
+
 // probeOnce 按 spec 探活一次:tcp://host:port 走 TCP 连接,其余按 HTTP(s) URL。
 func probeOnce(spec string) bool {
-	if strings.HasPrefix(spec, "tcp://") {
-		return tcpHealthy(strings.TrimPrefix(spec, "tcp://"))
-	}
-	return httpHealthy(spec)
+	return probeOnceWithTimeout(spec, 3*time.Second)
 }
 
-// healthCheck 按健康检查规格探活(带重试):空跳过;tcp:// 端口探活;http(s) HTTP 探活(2xx/3xx 通过)。
-func healthCheck(spec string, logs *[]string) bool {
+func probeOnceWithTimeout(spec string, timeout time.Duration) bool {
+	if strings.HasPrefix(spec, "tcp://") {
+		return tcpHealthyWithTimeout(strings.TrimPrefix(spec, "tcp://"), timeout)
+	}
+	return httpHealthyWithTimeout(spec, timeout)
+}
+
+// healthCheckWithPolicy 按指定窗口探活。容器自动部署可使用更长窗口,普通进程保留原 30 秒。
+func healthCheckWithPolicy(spec string, retries int, interval time.Duration, logs *[]string) bool {
 	if strings.TrimSpace(spec) == "" {
 		*logs = append(*logs, "未配置健康检查,跳过")
 		return true
+	}
+	if retries <= 0 {
+		retries = 1
 	}
 	kind := "HTTP"
 	if strings.HasPrefix(spec, "tcp://") {
 		kind = "TCP"
 	}
-	for i := 1; i <= healthRetries; i++ {
+	for i := 1; i <= retries; i++ {
 		if probeOnce(spec) {
 			*logs = append(*logs, fmt.Sprintf("%s %s → 通过(第 %d 次)", kind, spec, i))
 			return true
 		}
-		*logs = append(*logs, fmt.Sprintf("%s %s → 未通过,%s 后重试(%d/%d)", kind, spec, healthInterval, i, healthRetries))
-		if i < healthRetries {
-			time.Sleep(healthInterval)
+		*logs = append(*logs, fmt.Sprintf("%s %s → 未通过,%s 后重试(%d/%d)", kind, spec, interval, i, retries))
+		if i < retries {
+			time.Sleep(interval)
 		}
 	}
+	return false
+}
+
+// healthCheck 按健康检查规格探活(带重试):空跳过;tcp:// 端口探活;http(s) HTTP 探活(2xx/3xx 通过)。
+func healthCheck(spec string, logs *[]string) bool {
+	return healthCheckWithPolicy(spec, healthRetries, healthInterval, logs)
+}
+
+func tongwebHealthCheck(spec string, logs *[]string) bool {
+	deadline := time.Now().Add(tongwebHealthTimeout)
+	if tongwebHealthInitialDelay > 0 {
+		delay := tongwebHealthInitialDelay
+		if delay > tongwebHealthTimeout {
+			delay = tongwebHealthTimeout
+		}
+		*logs = append(*logs, fmt.Sprintf("等待 %s 让 TongWeb 发现 WAR 并开始自动部署", delay))
+		time.Sleep(delay)
+	}
+	kind := "HTTP"
+	for i := 1; i <= tongwebHealthRetries; i++ {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			*logs = append(*logs, fmt.Sprintf("%s %s → 探活窗口 %s 已耗尽", kind, spec, tongwebHealthTimeout))
+			return false
+		}
+		probeTimeout := 3 * time.Second
+		if remaining < probeTimeout {
+			probeTimeout = remaining
+		}
+		if httpHealthy2xxWithTimeout(spec, probeTimeout) {
+			*logs = append(*logs, fmt.Sprintf("%s %s → 通过(第 %d 次)", kind, spec, i))
+			return true
+		}
+		if i == tongwebHealthRetries {
+			break
+		}
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		wait := tongwebHealthInterval
+		if remaining < wait {
+			wait = remaining
+		}
+		*logs = append(*logs, fmt.Sprintf("%s %s → 未通过,%s 后重试(%d/%d)", kind, spec, wait, i, tongwebHealthRetries))
+		time.Sleep(wait)
+	}
+	*logs = append(*logs, fmt.Sprintf("%s %s → 未通过,探活结束", kind, spec))
 	return false
 }
 
@@ -771,12 +948,28 @@ func (a *agent) recordRelease(op, appID, rid, fp string, res DeployResult) {
 	os.WriteFile(p, b, 0644)
 }
 
-// lockApp 串行化对同一应用的部署/还原(防并发同 ID 同时执行、防共用 unit/binPath 冲突)。返回解锁函数。
-func (a *agent) lockApp(id string) func() {
-	mu, _ := a.locks.LoadOrStore(id, &sync.Mutex{})
+func (a *agent) lockOperation(key string) func() {
+	mu, _ := a.locks.LoadOrStore(key, &sync.Mutex{})
 	m := mu.(*sync.Mutex)
 	m.Lock()
 	return m.Unlock
+}
+
+// lockApp 串行化对同一应用的部署/还原/生命周期操作。
+func (a *agent) lockApp(id string) func() { return a.lockOperation("app:" + id) }
+
+// lockDeployTarget 额外串行化不同应用 ID 对同一落盘目标的操作。Console 会拒绝重复配置，
+// Agent 仍需守住并发请求、旧配置或多个 Console 实例直接调用造成的同 WAR 竞争。
+func deployTargetLockKey(target string) string {
+	key := filepath.Clean(target)
+	if abs, err := filepath.Abs(target); err == nil {
+		key = resolveExisting(abs)
+	}
+	return "target:" + key
+}
+
+func (a *agent) lockDeployTarget(target string) func() {
+	return a.lockOperation(deployTargetLockKey(target))
 }
 
 // runIdempotent 是幂等执行骨架:按 op/appId 隔离的 releaseId 幂等 + 同应用串行锁。
@@ -796,6 +989,9 @@ func (a *agent) runIdempotent(op string, cfg DeployConfig, fpExtra string, emit 
 	}
 	defer a.endOp()
 	defer a.lockApp(cfg.ID)() // 同应用串行,临界区内做幂等检查 + 执行 + 记录
+	if cfg.Type == "tongweb-war" {
+		defer a.lockDeployTarget(cfg.BinPath)()
+	}
 	fp := releaseFingerprint(cfg, fpExtra)
 	if cfg.ReleaseID != "" {
 		if cached, cfp, ok := a.releaseDone(op, cfg.ID, cfg.ReleaseID); ok {
@@ -820,7 +1016,7 @@ func (a *agent) runDeployIdempotent(op string, cfg DeployConfig, artifact string
 	return a.runIdempotent(op, cfg, "", emit, func(e func(Step)) DeployResult { return a.runDeploy(cfg, artifact, e) })
 }
 
-// runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war 走容器 WAR 替换,
+// runDeploy 按应用类型分发:static-nginx 走软链切换,tomcat-war/TongWeb 走各自容器 WAR 替换,
 // 其余(native-binary/java-jar/python)复用 systemd 进程流水线。
 // emit 在每步完成时回调(用于 SSE 实时流);同步 JSON 端点传 nil 即可。
 func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
@@ -855,6 +1051,8 @@ func (a *agent) runDeploy(cfg DeployConfig, artifact string, emit func(Step)) De
 		return a.runDeployStatic(cfg, artifact, emit)
 	case "tomcat-war":
 		return a.runDeployTomcat(cfg, artifact, emit)
+	case "tongweb-war":
+		return a.runDeployTongWeb(cfg, artifact, emit)
 	default:
 		switch cfg.Runner {
 		case "pm2":
@@ -941,7 +1139,7 @@ func (a *agent) runDeployProcess(cfg DeployConfig, artifact string, emit func(St
 	if processHealthy(cfg.Health, isActive(cfg.ID), &hlog) {
 		add("健康检查", true, hlog...)
 		// 记录当前落盘版本到旁车,供下次部署/还原备份时正确标注被备份的版本。
-		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
+		_ = writeVersion(cfg.BinPath, cfg.Version)
 		res.Result = "success"
 		return res
 	}
@@ -1491,7 +1689,7 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	var hlog []string
 	if reloadOK && healthCheck(cfg.Health, &hlog) {
 		add("健康检查", true, hlog...)
-		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
+		_ = writeVersion(cfg.BinPath, cfg.Version)
 		res.Result = "success"
 		return res
 	}
@@ -1524,6 +1722,257 @@ func (a *agent) runDeployTomcat(cfg DeployConfig, artifact string, emit func(Ste
 	ok := rerr == nil && healthCheck(cfg.Health, &rh)
 	rlog = append(rlog, rh...)
 	add("回滚 · 还原 WAR", ok, rlog...)
+	if ok {
+		res.Result = "rolledback"
+	} else {
+		res.Result = "failed"
+	}
+	return res
+}
+
+// ---------- TongWeb WAR(容器自动部署)----------
+
+// validateTongWebConfig 固化 TongWeb 的边界:目标是 deployment 下的完整 WAR 路径，Runner 只表达
+// 容器托管，不允许夹带 reload；部署成功必须由 HTTP 健康检查确认，不能仅凭复制成功判成功。
+func validateTongWebConfig(cfg DeployConfig) error {
+	if cfg.Runner != "tongweb" {
+		return fmt.Errorf("TongWeb WAR 的 runner 必须为 tongweb")
+	}
+	if !filepath.IsAbs(cfg.BinPath) {
+		return fmt.Errorf("TongWeb WAR 目标路径必须是绝对路径")
+	}
+	if !strings.EqualFold(filepath.Ext(cfg.BinPath), ".war") {
+		return fmt.Errorf("TongWeb WAR 目标路径必须包含 .war 文件名")
+	}
+	if strings.TrimSpace(cfg.ReloadCmd) != "" || strings.TrimSpace(cfg.ReloadArg) != "" {
+		return fmt.Errorf("TongWeb 自动部署不允许配置 reload/restart 动作")
+	}
+	if fi, err := os.Lstat(cfg.BinPath); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("TongWeb WAR 目标文件不能是符号链接")
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("TongWeb WAR 目标已存在但不是普通文件")
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("检查 TongWeb WAR 目标失败: %w", err)
+	}
+	h := strings.TrimSpace(cfg.Health)
+	u, err := url.ParseRequestURI(h)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("TongWeb WAR 必须配置有效的 http(s) 健康检查 URL")
+	}
+	if u.User != nil {
+		return fmt.Errorf("TongWeb 健康检查 URL 不允许包含用户名或密码")
+	}
+	return nil
+}
+
+// validateWAR 完整读取 ZIP/WAR 条目以校验结构、CRC、路径与展开规模。Mooncell 不自行展开 WAR，
+// 但仍需在交给 TongWeb 前拦截损坏包、zip-slip、符号链接和明显压缩炸弹。
+func validateWAR(path string) error {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return fmt.Errorf("WAR 不是有效 ZIP: %w", err)
+	}
+	defer zr.Close()
+	lim := &extractLimits{}
+	files := 0
+	seen := make(map[string]struct{}, len(zr.File))
+	for _, zf := range zr.File {
+		name := zf.Name
+		if name == "" {
+			return fmt.Errorf("WAR 含空条目名")
+		}
+		if strings.Contains(zf.Name, "\\") {
+			return fmt.Errorf("WAR 条目路径含反斜杠: %s", zf.Name)
+		}
+		trimmed := strings.TrimSuffix(name, "/")
+		for _, component := range strings.Split(trimmed, "/") {
+			if component == "" || component == "." || component == ".." {
+				return fmt.Errorf("WAR 条目路径含非法分段: %s", name)
+			}
+		}
+		cleanName := strings.TrimSuffix(pathpkg.Clean(name), "/")
+		if _, ok := seen[cleanName]; ok {
+			return fmt.Errorf("WAR 含重复条目路径: %s", name)
+		}
+		seen[cleanName] = struct{}{}
+		if zf.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("WAR 内含符号链接: %s", zf.Name)
+		}
+		if !zf.FileInfo().IsDir() && !zf.Mode().IsRegular() {
+			return fmt.Errorf("WAR 内含不支持的特殊文件: %s", zf.Name)
+		}
+		if _, err := safeJoin("/war", zf.Name); err != nil {
+			return err
+		}
+		if err := lim.check(zf.Name); err != nil {
+			return err
+		}
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		files++
+		if zf.UncompressedSize64 > uint64(maxEntryBytes) {
+			return fmt.Errorf("WAR 单文件展开大小超出上限 %d 字节: %s", maxEntryBytes, zf.Name)
+		}
+		if err := lim.addBytes(int64(zf.UncompressedSize64)); err != nil {
+			return err
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return fmt.Errorf("读取 WAR 条目失败 %s: %w", zf.Name, err)
+		}
+		n, readErr := io.Copy(io.Discard, io.LimitReader(rc, maxEntryBytes+1))
+		closeErr := rc.Close()
+		if readErr != nil {
+			return fmt.Errorf("WAR 条目校验失败 %s: %w", zf.Name, readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("关闭 WAR 条目失败 %s: %w", zf.Name, closeErr)
+		}
+		if n > maxEntryBytes || uint64(n) != zf.UncompressedSize64 {
+			return fmt.Errorf("WAR 条目大小不一致: %s", zf.Name)
+		}
+	}
+	if files == 0 {
+		return fmt.Errorf("WAR 不含任何文件")
+	}
+	return nil
+}
+
+// ensureTongWebTargetStillMatchesBackup 关闭“备份完成 → 替换新 WAR”之间的外部写入窗口。
+// 有备份时当前目标必须仍与备份字节一致；首次部署时目标必须仍不存在。
+func ensureTongWebTargetStillMatchesBackup(target, backupDir string) error {
+	if backupDir == "" {
+		if _, err := os.Lstat(target); err == nil {
+			return fmt.Errorf("首次部署备份后目标 WAR 被外部创建,拒绝覆盖")
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("复核首次部署目标失败: %w", err)
+		}
+		return nil
+	}
+	backupSHA := sha256File(filepath.Join(backupDir, "app"))
+	actualSHA := sha256File(target)
+	if backupSHA == "" || !strings.EqualFold(actualSHA, backupSHA) {
+		return fmt.Errorf("备份后目标 WAR 已被外部改写(备份 %s 当前 %s),拒绝覆盖", short(backupSHA), short(actualSHA))
+	}
+	return nil
+}
+
+// runDeployTongWeb 把一个应用的 WAR 原子替换到 TongWeb deployment 目录。TongWeb 进程由运维
+// 长驻并自动监听目录，Mooncell 不启停共享容器、不删除展开目录；复制后约等待 180 秒探活。
+// 前端和后端作为两个独立应用分别调用本流水线，各自拥有版本、备份和回滚记录。
+func (a *agent) runDeployTongWeb(cfg DeployConfig, artifact string, emit func(Step)) DeployResult {
+	res := DeployResult{Version: cfg.Version}
+	add := func(name string, ok bool, logs ...string) {
+		s := Step{Name: name, OK: ok, Logs: logs}
+		res.Steps = append(res.Steps, s)
+		emit(s)
+	}
+
+	if err := validateTongWebConfig(cfg); err != nil {
+		add("校验配置", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	cfg.Health = strings.TrimSpace(cfg.Health)
+	if err := validateWAR(artifact); err != nil {
+		add("校验 WAR", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	artifactSHA := sha256File(artifact)
+	add("校验 WAR", true, "sha256 "+short(artifactSHA), "结构与 CRC 校验通过", "目标 "+cfg.BinPath)
+
+	oldVersion := currentVersion(cfg.BinPath)
+	bkDir, err := a.backupCurrent(cfg, false)
+	if err != nil {
+		add("备份当前版本", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	if bkDir == "" {
+		add("备份当前版本", true, "首次部署,无当前 WAR 需备份")
+	} else {
+		add("备份当前版本", true, "备份 → "+bkDir+" · 滚动保留 "+fmt.Sprint(cfg.BackupKeep)+" 份")
+	}
+	if err := ensureTongWebTargetStillMatchesBackup(cfg.BinPath, bkDir); err != nil {
+		add("复核目标 WAR", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+
+	if err := atomicReplacePreserve(artifact, cfg.BinPath, 0644); err != nil {
+		add("替换 WAR", false, err.Error())
+		res.Result = "failed"
+		return res
+	}
+	add("替换 WAR", true, "原子替换 "+cfg.BinPath, "等待 TongWeb 自动发现并部署(不重启共享容器)")
+
+	var hlog []string
+	if tongwebHealthCheck(cfg.Health, &hlog) {
+		add("健康检查", true, hlog...)
+		if actual := sha256File(cfg.BinPath); !strings.EqualFold(actual, artifactSHA) {
+			add("确认目标 WAR", false, "健康检查后目标 WAR 已被并发改写(期望 "+short(artifactSHA)+" 实得 "+short(actual)+"),停止自动回滚以免覆盖外部版本")
+			res.Result = "failed"
+			return res
+		}
+		if err := writeVersion(cfg.BinPath, cfg.Version); err == nil {
+			res.Result = "success"
+			return res
+		} else {
+			add("记录版本", false, err.Error()+";将回滚,避免在役版本与平台记录不一致")
+		}
+	} else {
+		add("健康检查", false, hlog...)
+	}
+
+	// 健康检查可能持续数分钟。期间若运维或另一个部署器替换/删除了目标 WAR，
+	// Mooncell 不能再按自己的旧备份回滚，否则会覆盖不属于本次事务的外部版本。
+	if actual := sha256File(cfg.BinPath); !strings.EqualFold(actual, artifactSHA) {
+		add("回滚 · 保护并发版本", false, "目标 WAR 已被并发改写或移除(期望 "+short(artifactSHA)+" 实得 "+short(actual)+"),拒绝自动覆盖外部版本")
+		res.Result = "failed"
+		return res
+	}
+
+	if bkDir == "" {
+		warErr := os.Remove(cfg.BinPath)
+		verErr := os.Remove(verSidecar(cfg.BinPath))
+		if warErr != nil && !os.IsNotExist(warErr) {
+			add("回滚 · 移除首次部署 WAR", false, warErr.Error())
+		} else if verErr != nil && !os.IsNotExist(verErr) {
+			add("回滚 · 移除首次部署 WAR", false, "WAR 已移除,但清理版本标记失败: "+verErr.Error())
+		} else {
+			add("回滚 · 移除首次部署 WAR", true, "无旧版本可还原,已移除未通过探活的新 WAR")
+		}
+		res.Result = "failed"
+		return res
+	}
+
+	backupWAR := filepath.Join(bkDir, "app")
+	backupSHA := sha256File(backupWAR)
+	rlogs := []string{"读取 " + bkDir, "原子还原备份 WAR", "等待 TongWeb 自动重新部署旧版本"}
+	if err := atomicReplacePreserve(backupWAR, cfg.BinPath, 0644); err != nil {
+		rlogs = append(rlogs, "还原失败: "+err.Error())
+		add("回滚 · 还原 WAR", false, rlogs...)
+		res.Result = "failed"
+		return res
+	}
+	var rh []string
+	ok := tongwebHealthCheck(cfg.Health, &rh)
+	rlogs = append(rlogs, rh...)
+	if ok {
+		if actual := sha256File(cfg.BinPath); !strings.EqualFold(actual, backupSHA) {
+			ok = false
+			rlogs = append(rlogs, "回滚探活期间目标 WAR 已被并发改写(期望 "+short(backupSHA)+" 实得 "+short(actual)+"),不覆盖外部版本标记")
+		} else if err := writeVersion(cfg.BinPath, oldVersion); err != nil {
+			ok = false
+			rlogs = append(rlogs, "恢复旧版本标记失败: "+err.Error())
+		}
+	}
+	add("回滚 · 还原 WAR", ok, rlogs...)
 	if ok {
 		res.Result = "rolledback"
 	} else {

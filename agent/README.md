@@ -38,3 +38,13 @@ backup_dir   = "/opt/deploy-agent/backups"
 [deploy]
 max_upload_mb = 1024           # 部署制品上传传输层硬上限(MB),超限 413
 ```
+
+使用 `tongweb-war` 时，把实际 TongWeb `deployment` 目录加入 `deploy_roots`，例如：
+
+```toml
+[paths]
+deploy_roots = ["/srv/apps", "/data/web", "/opt/TongWeb/deployment"]
+```
+
+每个前端/后端应用分别配置一个不同的完整 `.war` 目标路径。Agent 不启停 TongWeb；目标目录须允许 Agent
+创建临时文件并原子替换 WAR，覆盖旧文件时还须有权限保留原 owner/group。

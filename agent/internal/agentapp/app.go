@@ -20,7 +20,7 @@ type agent struct {
 	cfg          *Config
 	caps         []Capability
 	started      time.Time
-	locks        sync.Map     // appId → *sync.Mutex,同应用部署/还原串行
+	locks        sync.Map     // namespaced key → *sync.Mutex,同应用及同部署目标操作串行
 	selfUpdateMu sync.Mutex   // 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
 	logStreams   atomic.Int64 // 活跃日志 SSE 流计数:限并发,防 viewer 大量长连接耗尽 fd/子进程
 	opMu         sync.Mutex   // 保护 opsInFlight/draining:自更新 drain 门禁与部署/还原/启停/下线协调

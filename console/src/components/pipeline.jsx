@@ -9,7 +9,15 @@ import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
 function hostingDesc(app) {
   if (app.type === "static-nginx") return "已原子切换软链对外暴露";
   if (app.type === "tomcat-war") return "WAR 已替换,Tomcat 容器自动展开新版本";
+  if (app.type === "tongweb-war") return "WAR 已替换,TongWeb 已自动部署并通过健康检查";
   return `Agent 已落盘并由 ${app.runner === "pm2" ? "pm2" : "systemd"} 托管`;
+}
+
+function deploymentFlow(app) {
+  if (app.type === "tongweb-war") return "校验 WAR → 备份 → 原子替换 → 等待 TongWeb 自动部署 → HTTP 健康检查";
+  if (app.type === "static-nginx") return "校验制品 → 解包 release → 原子切换软链 → 健康检查";
+  if (app.type === "tomcat-war") return "校验制品 → 备份 → 原子替换 WAR → 容器部署 → 健康检查";
+  return "备份 → 停止 → 原子替换 → 启动 → 健康检查";
 }
 
 // 把 Agent 返回的真实部署/还原结果({result, steps:[{name,ok,logs}]})转成 PipelineView 可渲染的形状,
@@ -386,7 +394,7 @@ function DeployDialog({ app, open, onClose }) {
     <Dialog open={open} onClose={onClose} noClose={running} width={stage === "pipeline" ? 860 : 560}
       title={`部署 · ${app.name}`}
       desc={stage === "upload"
-        ? (isReal ? `${app.type} · 将下发到 Agent 真机部署:备份 → 停止 → 替换 → 启动 → 健康检查` : "上传制品后将自动执行:备份 → 停止 → 替换 → 启动 → 健康检查")
+        ? (realTypeApp ? `${app.type} · 将下发到 Agent 真机部署:${deploymentFlow(app)}` : `上传制品后将自动执行:${deploymentFlow(app)}`)
         : `Release ${version} · 操作人 ${store.user}`}
       foot={stage === "upload" ? (
         <React.Fragment>
@@ -472,7 +480,7 @@ function DeployDialog({ app, open, onClose }) {
               <Spinner size={16} />
               <div>
                 <div style={{ fontWeight: 600, fontSize: 13.5 }}>正在向 Agent 下发部署 · {version}</div>
-                <div style={{ fontSize: 12, color: "var(--muted-fg)" }}>备份 → 停止 → 原子替换 → 启动 → 健康检查(失败将自动回滚)</div>
+                <div style={{ fontSize: 12, color: "var(--muted-fg)" }}>{deploymentFlow(app)}(失败将自动回滚)</div>
               </div>
             </div>
           ) : real.error ? (

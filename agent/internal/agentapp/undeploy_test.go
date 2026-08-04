@@ -115,3 +115,15 @@ func TestUndeployStillAlive_SymlinkGuardedByRoots(t *testing.T) {
 		t.Fatalf("越界软链不应被判仍存活(否则应用永远删不掉),detail=%s", detail)
 	}
 }
+
+func TestUndeployContainerOnlyUnregisters(t *testing.T) {
+	a := &agent{cfg: &Config{Paths: PathsConfig{DeployRoots: []string{t.TempDir()}}}}
+	code, body := callUndeploy(t, a, "tongweb-app", "runner=container")
+	if code != http.StatusOK || body["ok"] != true {
+		t.Fatalf("容器托管注销应成功,code=%d body=%v", code, body)
+	}
+	steps, _ := body["steps"].([]any)
+	if len(steps) != 1 {
+		t.Fatalf("容器托管注销不应执行 systemd/pm2/WAR 清理,steps=%v", steps)
+	}
+}

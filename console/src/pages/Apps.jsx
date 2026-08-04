@@ -19,6 +19,9 @@ const APP_SCHEMAS = {
     { key: "path", label: "WAR 目标路径(webapps 下)", ph: "/opt/tomcat/webapps/report.war", mono: true, required: true },
     { key: "reload", label: "部署后 systemctl restart tomcat", type: "switch", def: false },
   ],
+  "tongweb-war": [
+    { key: "path", label: "WAR 目标路径(TongWeb deployment 下的完整文件路径)", ph: "/opt/TongWeb/deployment/frontend.war", mono: true, required: true, hint: "前端、后端分别创建应用并填写各自 WAR 文件路径" },
+  ],
   "native-binary": [
     { key: "path", label: "二进制目标路径(完整文件路径)", ph: "/srv/apps/my-app/server", mono: true, required: true, hint: "任意语言(Go/Rust/C++…)为目标机编译的自包含可执行文件;部署前校验架构匹配" },
     { key: "args", label: "启动参数", ph: "--config config.toml", mono: true },
@@ -84,11 +87,11 @@ function CreateAppDialog({ open, onClose }) {
   // 静默 fallback 到 /srv/apps/<id>/app 这类隐藏路径——用户填的制品"找不到"多由此而来。
   const requiredMissing = () => {
     if (type === "python" || type === "node") { if (!(form.entry || "").trim()) return true; }
-    else if (isProcessType(type) || type === "static-nginx" || type === "tomcat-war") { if (!(form.path || "").trim()) return true; }
+    else if (isProcessType(type) || type === "static-nginx" || type === "tomcat-war" || type === "tongweb-war") { if (!(form.path || "").trim()) return true; }
     // 健康检查 fail-closed(与后端 validateAppConfig 一致):选了 HTTP/端口就必须给出可用目标,
     // 否则会被后端拒绝(且新建流程不回查结果会"假建")。
-    if (isProcessType(type) || type === "tomcat-war") {
-      const ht = form.healthType || "端口探活";
+    if (isProcessType(type) || type === "tomcat-war" || type === "tongweb-war") {
+      const ht = type === "tongweb-war" ? "HTTP 200" : (form.healthType || "端口探活");
       if (ht === "HTTP 200") {
         const h = (form.health || "").trim();
         if (!h.startsWith("http://") && !h.startsWith("https://")) return true;
@@ -106,7 +109,7 @@ function CreateAppDialog({ open, onClose }) {
     // static-nginx 不传端口:端口由 nginx 占用属常态,空闲检查永远过不了(Agent 端同样会跳过,
     // 这里不传是兼容尚未自更新的旧 Agent)。
     const params = new URLSearchParams({
-      binPath, port: type === "static-nginx" ? "" : (form.port || ""), type,
+      binPath, port: type === "static-nginx" || type === "tongweb-war" ? "" : (form.port || ""), type,
       runner: selectedRunner(),
       agent: form.agentId || "default",
     });
@@ -133,13 +136,13 @@ function CreateAppDialog({ open, onClose }) {
     const res = await store.addApp({
       id: id + "-" + Math.random().toString(36).slice(2, 5),
       name: form.name || "未命名应用", type, runner: selectedRunner(),
-      status: "stopped", version: "—", pid: null, port: +(form.port || 8080),
-      path, interp, workdir: form.workdir || `/srv/apps/${id}`,
+      status: "stopped", version: "—", pid: null, port: +(form.port || (type === "tongweb-war" ? 0 : 8080)),
+      path, interp, workdir: type === "tongweb-war" ? "" : (form.workdir || `/srv/apps/${id}`),
       // 健康检查默认按类型收敛:进程类/tomcat 无目标时默认「端口探活」;static-nginx 无独立进程,
       // 端口是 nginx 对外服务口——默认「无」(不探活),否则后端 validateAppConfig 会以「端口探活须填有效端口」拒绝落库。
-      health: form.health || "", healthType: form.healthType || (form.health ? "HTTP 200" : (isProcessType(type) || type === "tomcat-war") ? "端口探活" : "无"),
-      logPaths: [form.logs || `/srv/apps/${id}/logs/app.log`],
-      jvm: form.jvm || form.args || "", user: selectedRunner() === "nohup" ? "" : (form.user || "appuser"),
+      health: form.health || "", healthType: type === "tongweb-war" ? "HTTP 200" : (form.healthType || (form.health ? "HTTP 200" : (isProcessType(type) || type === "tomcat-war") ? "端口探活" : "无")),
+      logPaths: type === "tongweb-war" ? [] : [form.logs || `/srv/apps/${id}/logs/app.log`],
+      jvm: type === "tongweb-war" ? "" : (form.jvm || form.args || ""), user: type === "tongweb-war" || selectedRunner() === "nohup" ? "" : (form.user || "appuser"),
       agentId: form.agentId || "default",
       stage: form.stage || "prod",
       reload: !!form.reload,
@@ -160,7 +163,7 @@ function CreateAppDialog({ open, onClose }) {
   // tomcat/pm2/systemd 等均按 caps 判定。能力未知(caps===null=Agent 不可达)才降级不禁用、留预检兜底;
   // caps 已加载但缺该 key → fail-closed 视为不可用(与 Agent 预检一致,不放过未自检出的能力)。
   const capOk = (r) => {
-    if (r === "无进程" || r === "软链" || r === "nohup") return true; // nohup 仅需 sh/nohup/kill,linux 恒有
+    if (r === "无进程" || r === "软链" || r === "nohup" || r === "tongweb") return true; // TongWeb 由目标路径+部署后 HTTP 探活确认
     if (!caps) return true; // Agent 不可达降级
     const c = caps.find((x) => x.key === r);
     return c ? c.ok : false; // caps 已加载却无此 key → fail-closed
@@ -177,7 +180,7 @@ function CreateAppDialog({ open, onClose }) {
     const r = form.runner;
     const inType = (type ? DEPLOY_TYPES[type].runners : []).includes(r);
     let available = true;
-    if (r !== "无进程" && r !== "软链" && r !== "nohup" && caps) {
+    if (r !== "无进程" && r !== "软链" && r !== "nohup" && r !== "tongweb" && caps) {
       const c = caps.find((x) => x.key === r);
       available = c ? c.ok : false; // 与 capOk 一致:caps 已加载却缺 key → 不可用
     }
@@ -253,15 +256,15 @@ function CreateAppDialog({ open, onClose }) {
                 value={form.workdir || ""} onChange={(e) => setForm({ ...form, workdir: e.target.value })} />
             </Field>
           ) : null}
-          {isProcessType(type) || type === "tomcat-war" ? (
+          {isProcessType(type) || type === "tomcat-war" || type === "tongweb-war" ? (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <Field label="健康检查方式">
-                <Select value={form.healthType || "端口探活"} onChange={(v) => setForm({ ...form, healthType: v })} options={HEALTH_TYPES} />
+                <Select value={type === "tongweb-war" ? "HTTP 200" : (form.healthType || "端口探活")} onChange={(v) => setForm({ ...form, healthType: v })} options={type === "tongweb-war" ? ["HTTP 200"] : HEALTH_TYPES} />
               </Field>
               {(() => {
-                const ht = form.healthType || "端口探活";
+                const ht = type === "tongweb-war" ? "HTTP 200" : (form.healthType || "端口探活");
                 if (ht === "HTTP 200") return (
-                  <Field label="健康检查 URL" hint="返回 2xx/3xx 即通过">
+                  <Field label="健康检查 URL" hint={type === "tongweb-war" ? "必须由目标应用直接返回 2xx；重定向不算通过" : "返回 2xx/3xx 即通过"}>
                     <input className="input mono" style={{ fontSize: 12.5 }} placeholder="http://127.0.0.1:8080/healthz"
                       value={form.health || ""} onChange={(e) => setForm({ ...form, health: e.target.value })} />
                   </Field>
@@ -280,7 +283,7 @@ function CreateAppDialog({ open, onClose }) {
             </div>
           ) : null}
           {/* 落盘路径预览:所见即所得,杜绝"文件落到没预期的地方"。 */}
-          {isProcessType(type) || type === "static-nginx" ? (
+          {isProcessType(type) || type === "static-nginx" || type === "tongweb-war" ? (
             <div style={{ fontSize: 11.5, color: "var(--muted-fg)", background: "var(--muted)", borderRadius: 8, padding: "8px 12px" }}>
               制品将落盘到 <span className="mono" style={{ color: "var(--fg)" }}>{binPathOf(appId())}</span>
               {(type === "python" || type === "node") ? "(由应用名与入口文件自动生成)" : ""}
@@ -292,6 +295,11 @@ function CreateAppDialog({ open, onClose }) {
               <b style={{ color: "var(--fg)" }}>静态站点部署说明：</b>制品会解包到 <span className="mono" style={{ color: "var(--fg)" }}>&lt;目标目录&gt;-releases/&lt;时间戳&gt;/</span>，再把「目标目录」这条<b>相对软链</b>原子切换到新版本——切换瞬时生效、<b>无需 reload</b>；相对软链在 Docker 容器的路径映射下也能正确解析（宿主机与容器内都透明）。「目标目录」须是 Mooncell 托管的软链或尚不存在的新路径，<b>不能是已存在的真实目录/文件</b>（否则部署会被拒绝，以免覆盖你的数据）。nginx 的 root/alias 指向此路径即可。
             </div>
           ) : null}
+          {type === "tongweb-war" ? (
+            <div style={{ fontSize: 11.5, color: "var(--muted-fg)", background: "var(--muted)", borderRadius: 8, padding: "8px 12px", lineHeight: 1.65 }}>
+              <b style={{ color: "var(--fg)" }}>TongWeb 部署说明：</b>Mooncell 只把 WAR 原子替换到配置的 <span className="mono" style={{ color: "var(--fg)" }}>deployment</span> 路径，<b>不会重启 TongWeb，也不会删除展开目录</b>。TongWeb 自动部署后以 HTTP 健康检查确认结果；失败自动还原旧 WAR。前端与后端请分别创建两个应用，填写不同 WAR 路径和健康地址。
+            </div>
+          ) : null}
           {selectedRunner() === "pm2" ? (
             <Field label="pm2 接管进程名(可选)" hint="填已有 pm2 进程名/ID → 部署自动定位该进程实际运行的制品并替换 + pm2 restart(Java 取启动参数里的 -jar 的 jar,node/python/原生取 pm_exec_path),无需手动对齐路径(上面填的目标路径在接管模式下被忽略);留空 = Mooncell 托管(deploy-<id>,写 ecosystem)">
               <input className="input mono" style={{ fontSize: 12.5 }} placeholder="如 my-app 或 0(留空=托管)"
@@ -299,7 +307,7 @@ function CreateAppDialog({ open, onClose }) {
             </Field>
           ) : null}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <Field label="端口" hint={type === "static-nginx" ? "静态站点填 nginx 对外端口,仅作记录展示,不参与预检与探活" : undefined}>
+            <Field label="端口" hint={type === "static-nginx" ? "静态站点填 nginx 对外端口,仅作记录展示,不参与预检与探活" : type === "tongweb-war" ? "可选，仅作列表记录；部署判定以完整健康检查 URL 为准" : undefined}>
               <input className="input mono" placeholder="8080" value={form.port || ""} onChange={(e) => setForm({ ...form, port: e.target.value })} />
             </Field>
             <Field label="备份保留份数" hint="固定滚动保留 10 份">
@@ -359,7 +367,7 @@ function AppsPage() {
     (stageF === "all" || stageOf(a) === stageF) &&
     (!q.trim() || a.name.includes(q) || a.id.includes(q.toLowerCase()))
   );
-  // 批量启停仅对进程类应用(systemd/pm2/nohup 有真机 lifecycle);static/tomcat 不可批量启停。
+  // 批量启停仅对进程类应用(systemd/pm2/nohup 有真机 lifecycle);static/tomcat/tongweb 不可批量启停。
   const selectable = list.filter((a) => isProcessType(a.type));
   const selApps = apps.filter((a) => sel.has(a.id));
   const allSelected = selectable.length > 0 && selectable.every((a) => sel.has(a.id));
@@ -373,9 +381,12 @@ function AppsPage() {
   const clearSel = () => setSel(new Set());
 
   const onDelete = async (a) => {
+    const containerManaged = a.type === "tomcat-war" || a.type === "tongweb-war";
     const ok = await confirmDialog({
       title: "删除应用",
-      message: `确认删除应用「${a.name}」?\n\n这会停止并移除目标机上的服务(Runner: ${a.runner}),并删除该应用记录。\n此操作不可恢复。`,
+      message: containerManaged
+        ? `确认删除应用「${a.name}」?\n\n这只会删除 Mooncell 中的应用记录；共享容器和目标 WAR 会保留，不会停止或下线业务。\n应用记录删除后不可恢复。`
+        : `确认删除应用「${a.name}」?\n\n这会停止并移除目标机上的服务(Runner: ${a.runner}),并删除该应用记录。\n此操作不可恢复。`,
       confirmText: "删除", tone: "danger",
     });
     if (!ok) return;

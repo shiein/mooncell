@@ -125,6 +125,29 @@ test('tomcat-war 的 tomcat Runner 置灰(caps 缺 tomcat key → fail-closed)',
   await expect(page.locator('option[value="tomcat"]')).toBeDisabled();
 });
 
+test('TongWeb WAR 使用独立目标路径和强制 HTTP 健康检查', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: '应用', exact: true }).click();
+  await page.getByRole('button', { name: /新建应用/ }).click();
+  await page.getByRole('button', { name: /TongWeb WAR/ }).click();
+  await page.getByRole('button', { name: '下一步', exact: true }).click();
+
+  await expect(page.locator('option[value="tongweb"]')).toBeEnabled();
+  await expect(page.locator('select').filter({ has: page.locator('option[value="HTTP 200"]') })).toHaveValue('HTTP 200');
+  await page.getByPlaceholder(/数据查询平台后端/).fill('e2e-tongweb-frontend');
+  await page.getByPlaceholder('/opt/TongWeb/deployment/frontend.war').fill('/opt/TongWeb/deployment/frontend.war');
+  await page.getByPlaceholder('http://127.0.0.1:8080/healthz').fill('http://127.0.0.1:8080/frontend/health');
+
+  const reqPromise = page.waitForRequest((r) => r.url().includes('/api/agent/precheck'));
+  await page.getByRole('button', { name: '执行预检' }).click();
+  const req = await reqPromise;
+  const u = new URL(req.url());
+  expect(u.searchParams.get('type')).toBe('tongweb-war');
+  expect(u.searchParams.get('runner')).toBe('tongweb');
+  expect(u.searchParams.get('binPath')).toBe('/opt/TongWeb/deployment/frontend.war');
+  expect(u.searchParams.get('port')).toBe('');
+});
+
 test('切换类型后陈旧 Runner 自动纠正(systemd → 软链)', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: '应用', exact: true }).click();

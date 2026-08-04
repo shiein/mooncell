@@ -6,7 +6,7 @@ Mooncell 用两个**零依赖的 Go 单二进制**(Console 控制台 + Agent 部
 
 ## ✨ 特性
 
-- **多种部署类型**:原生二进制(Go / Rust / C++ / Zig 等为目标机编译的可执行文件)/ java-jar / python / node(systemd / pm2 托管)+ static-nginx(软链原子切换)+ tomcat-war(容器换 WAR)。
+- **多种部署类型**:原生二进制(Go / Rust / C++ / Zig 等为目标机编译的可执行文件)/ java-jar / python / node(systemd / pm2 托管)+ static-nginx(软链原子切换)+ tomcat-war / tongweb-war(容器换 WAR)。
 - **上传即部署**:浏览器上传制品 → 自动流水线(备份 → 停 → 替换 → 启动 → 健康检查),**失败自动回滚**。
 - **一键还原**:列历史备份,用任意历史制品重跑部署流水线;还原前自动备份当前版本。
 - **实时日志**:journald / pm2 logs / 声明文件 `tail -F` 经 SSE 推到前端,支持暂停、高亮、gzip 下载。
@@ -131,6 +131,16 @@ Agent 按**文件魔数**自动判断单文件 / 压缩包;压缩包智能解包
 | node | `.js` 或 压缩包 | pm2 / systemd |
 | static-nginx | 压缩包(`.tar.gz` / `.zip`) | 解包到带时间戳 release + 原子软链切换 |
 | tomcat-war | 单个 `.war` | 原子替换 webapps 下 WAR,容器自动展开 |
+| tongweb-war | 单个 `.war` | 原子替换 TongWeb `deployment` 下指定 WAR；不重启共享容器，等待自动部署并强制 HTTP 探活 |
+
+### TongWeb 部署
+
+前端、后端 WAR 按两个独立应用管理，分别填写各自完整目标路径（例如
+`/opt/TongWeb/deployment/frontend.war`、`/opt/TongWeb/deployment/backend.war`）和 HTTP 健康检查 URL。
+Agent 的 `deploy_roots` 必须包含实际 `deployment` 目录，运行用户必须能在该目录创建临时文件、原子
+`rename`，并在覆盖旧 WAR 时保留其 owner/group。流水线为：校验 WAR 结构与 CRC → 备份当前 WAR →
+保留权限原子替换 → 等待 TongWeb 自动部署 → HTTP 2xx 探活（重定向不算通过）；失败时自动还原旧 WAR。删除 Mooncell 应用
+只注销管理记录，保留共享 TongWeb 容器和在役 WAR。
 
 ## 📄 License
 

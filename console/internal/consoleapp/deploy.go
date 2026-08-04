@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -29,6 +30,7 @@ var appTypeRunners = map[string][]string{
 	"node":          {"pm2", "systemd", "nohup"},
 	"static-nginx":  {"软链", "无进程"},
 	"tomcat-war":    {"tomcat"},
+	"tongweb-war":   {"tongweb"},
 }
 
 func strInSlice(s string, ss []string) bool {
@@ -59,6 +61,18 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 	}
 	if appBinPath(app) == "" {
 		return "制品/目标路径不能为空", false
+	}
+	if app.Type == "tongweb-war" {
+		warPath := appBinPath(app)
+		if !filepath.IsAbs(warPath) {
+			return "TongWeb WAR 目标路径必须是绝对路径", false
+		}
+		if !strings.EqualFold(filepath.Ext(warPath), ".war") {
+			return "TongWeb WAR 目标路径必须包含 .war 文件名", false
+		}
+		if app.Reload {
+			return "TongWeb 自动部署不允许配置 reload/restart", false
+		}
 	}
 	if app.Port < 0 || app.Port > 65535 {
 		return "端口越界(0–65535)", false
@@ -101,12 +115,19 @@ func (a *api) validateAppConfig(raw json.RawMessage) (string, bool) {
 	}
 	// 健康检查方式 fail-closed:显式选了方式就必须给出可用目标,杜绝"选了 HTTP/端口却因空值/0
 	// 被 healthSpec 静默降级为仅进程存活"——那样部署只看进程 active 即判成功,与用户预期不符。
+	if app.Type == "tongweb-war" && app.HealthType != "HTTP 200" {
+		return "TongWeb WAR 必须配置 HTTP 200 健康检查", false
+	}
 	switch app.HealthType {
 	case "", "进程存活", "无": // 空(历史数据回退旧推断)或显式不探活:无需目标
 	case "HTTP 200":
 		h := strings.TrimSpace(app.Health)
-		if !strings.HasPrefix(h, "http://") && !strings.HasPrefix(h, "https://") {
-			return "健康检查方式为 HTTP 200 时,目标须为 http(s):// URL", false
+		u, err := url.ParseRequestURI(h)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return "健康检查方式为 HTTP 200 时,目标须为有效的 http(s):// URL", false
+		}
+		if u.User != nil {
+			return "健康检查 URL 不允许包含用户名或密码", false
 		}
 	case "端口探活":
 		if app.Type == "static-nginx" || app.Port <= 0 {
@@ -132,9 +153,12 @@ func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
 		return
 	}
-	m["id"] = id                // 实体 id 以路径为准,防 body 改 id
+	m["id"] = id                      // 实体 id 以路径为准,防 body 改 id
 	m["backupKeep"] = backupKeepFixed // 滚动保留固定 10 份,忽略客户端传入
-	stripEnvHasValue(m)         // hasValue 是读投影加的标记,不落库
+	stripEnvHasValue(m)               // hasValue 是读投影加的标记,不落库
+	// 目标路径唯一性检查依赖“扫描全部应用 → 落库”的原子性；否则两个并发创建可同时看不到对方。
+	a.appConfigMu.Lock()
+	defer a.appConfigMu.Unlock()
 	// 与部署/启停/巡检写回同锁。对已存在应用:①保留 secret 原值——读路径已抹掉 secret 明文,
 	// 前端保存带回空值,空值语义为"保留原值"(要改则填新值);②保留服务端权威运行态字段——
 	// 前端改配置会把整份 app(含 hydrate 来的 status/pid/version 等旧运行态)发来,整段覆盖会
@@ -151,6 +175,13 @@ func (a *api) putAppConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg, ok := a.validateAppConfig(raw); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "配置校验未通过:" + msg})
+		return
+	}
+	if msg, err := a.validateTongWebTargetUnique(id, raw); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "检查部署目标冲突失败"})
+		return
+	} else if msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
 	if hasOld {
@@ -194,6 +225,7 @@ func mergePreserveRuntime(old json.RawMessage, m map[string]any) (json.RawMessag
 
 // appConfig 是应用实体里部署相关的字段(前端 addApp 落库的形态)。
 type appConfig struct {
+	ID             string            `json:"id"`
 	Name           string            `json:"name"`
 	Type           string            `json:"type"`
 	Runner         string            `json:"runner"`
@@ -207,13 +239,61 @@ type appConfig struct {
 	User           string            `json:"user"`
 	AgentID        string            `json:"agentId"`
 	BackupKeep     float64           `json:"backupKeep"`
-	Reload         bool              `json:"reload"`         // static/tomcat:部署后是否触发 reload 钩子
+	Reload         bool              `json:"reload"`         // static/tomcat:部署后是否触发 reload 钩子;TongWeb 不重启容器
 	NginxContainer string            `json:"nginxContainer"` // static-nginx:nginx 为 Docker 部署时的容器名(空=宿主机 nginx,走 nginx -s reload)
 	Pm2Name        string            `json:"pm2Name"`        // pm2 接管模式:填已有 pm2 进程名/ID 则部署只 pm2 restart 它、不写 ecosystem;空=Mooncell 托管
 	LogPaths       []string          `json:"logPaths"`       // 该应用声明的日志文件路径(文件 tail 授权白名单)
 	Env            map[string]string `json:"env"`            // 旧形态:平铺 env(历史数据兼容,下发 Agent 用)
 	EnvVars        []EnvVar          `json:"envVars"`        // 新形态:带 secret 标记的结构化 env;下发时拍平到 Env,secret 值在前端掩码、不进审计明文
-	Stage          string            `json:"stage"` // 环境分组:dev/test/prod(空=prod);仅用于分组/筛选,不影响部署行为
+	Stage          string            `json:"stage"`          // 环境分组:dev/test/prod(空=prod);仅用于分组/筛选,不影响部署行为
+}
+
+// agentConfigKey 把空 agentId 与 default 归一，并优先按 Agent 地址识别同一节点，避免同一 Agent
+// 被注册成两个别名后绕过目标冲突检查。
+func (a *api) agentConfigKey(agentID string) string {
+	id := strings.TrimSpace(agentID)
+	if id == "" {
+		id = "default"
+	}
+	if cl := a.resolveAgentByID(id); cl != nil && strings.TrimSpace(cl.base) != "" {
+		return "addr:" + strings.TrimRight(cl.base, "/")
+	}
+	return "id:" + id
+}
+
+// validateTongWebTargetUnique 防止两个逻辑应用管理同一 Agent 上的同一 WAR。否则各自的备份、
+// 版本和回滚链会互相覆盖。前后端应分别使用不同完整 WAR 路径。
+func (a *api) validateTongWebTargetUnique(id string, raw json.RawMessage) (string, error) {
+	var candidate appConfig
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		return "", err
+	}
+	raws, err := a.store.appsRaw()
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Clean(appBinPath(candidate))
+	agentKey := a.agentConfigKey(candidate.AgentID)
+	for _, existingRaw := range raws {
+		var existing appConfig
+		if err := json.Unmarshal(existingRaw, &existing); err != nil {
+			return "", err
+		}
+		if existing.ID == id || a.agentConfigKey(existing.AgentID) != agentKey {
+			continue
+		}
+		if candidate.Type != "tongweb-war" && existing.Type != "tongweb-war" {
+			continue
+		}
+		if filepath.Clean(appBinPath(existing)) == target {
+			name := existing.Name
+			if name == "" {
+				name = existing.ID
+			}
+			return "TongWeb WAR 目标路径已由应用 " + name + " 管理，请为前后端配置不同 WAR 文件路径", nil
+		}
+	}
+	return "", nil
 }
 
 // EnvVar 是单条环境变量:name 唯一,value 为明文(内网落盘可接受),secret=true 时前端掩码回显、
@@ -421,6 +501,7 @@ func buildAgentDeployConfig(app appConfig, version, expectedSha256, releaseID st
 		ExpectedSha256: expectedSha256, BackupKeep: backupKeepFixed,
 	}
 	// static/tomcat 的部署后 reload 钩子:服务端按类型映射白名单动作名(+ 可选容器名,空则不下发)。
+	// TongWeb 依赖 deployment 目录自动部署,不下发容器重启动作。
 	if rc, ra := reloadActionFor(app); rc != "" {
 		cfg.ReloadCmd = rc
 		cfg.ReloadArg = ra
@@ -557,9 +638,12 @@ func sha256Reader(r io.Reader) string {
 //   - 配了 http(s) URL → HTTP 探活(Agent 端 2xx/3xx 通过);
 //   - 否则进程类有端口 → tcp://127.0.0.1:<port> 端口探活(UI 的"端口探活"由此真正落地);
 //   - static-nginx 不做 TCP(无监听端口,由 reload + HTTP 判定),其它情况留空(退化为进程存活)。
+//
 // healthSpec 据 healthType 生成 Agent 健康检查规格(healthType 为权威):
-//   HTTP 200 → health 的 http(s) URL;端口探活 → tcp://127.0.0.1:<port>;
-//   进程存活 / 无 → 空 → Agent 跳过 HTTP/TCP 探活,仅判进程托管态(active/online)= 跳过健康检查。
+//
+//	HTTP 200 → health 的 http(s) URL;端口探活 → tcp://127.0.0.1:<port>;
+//	进程存活 / 无 → 空 → Agent 跳过 HTTP/TCP 探活,仅判进程托管态(active/online)= 跳过健康检查。
+//
 // 历史数据无 healthType 时回退旧推断(health 含 http 前缀→HTTP,否则有端口→TCP),保持兼容。
 func healthSpec(app appConfig) string {
 	switch app.HealthType {

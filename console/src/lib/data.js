@@ -16,6 +16,7 @@ const ago = (ms) => NOW - ms;
 const DEPLOY_TYPES = {
   "java-jar":     { label: "Java JAR",     tone: "warn",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".jar", accepts: [".jar"] },
   "tomcat-war":   { label: "Tomcat WAR",   tone: "error",   runners: ["tomcat"], artifactExt: ".war", accepts: [".war"] },
+  "tongweb-war":  { label: "TongWeb WAR",  tone: "info",    runners: ["tongweb"], artifactExt: ".war", accepts: [".war"] },
   "native-binary":    { label: "原生二进制",    tone: "cyan",    runners: ["systemd", "pm2", "nohup"], artifactExt: "", accepts: [] },
   "python":       { label: "Python",       tone: "info",    runners: ["systemd", "pm2", "nohup"], artifactExt: ".py / .tar.gz", accepts: [".py", ".tar.gz", ".tgz", ".zip", ".tar"] },
   "node":         { label: "Node.js",      tone: "success", runners: ["pm2", "systemd", "nohup"], artifactExt: ".js / .tar.gz", accepts: [".js", ".mjs", ".cjs", ".tar.gz", ".tgz", ".zip", ".tar"] },
@@ -32,13 +33,13 @@ const artifactNameOK = (type, name) => {
 };
 
 // 进程类应用:走 systemd / pm2 进程流水线(备份→替换→起停→健康→回滚),支持 Agent 真机部署/还原/日志。
-// static-nginx 走软链切换、tomcat-war 走容器,不在内。
+// static-nginx 走软链切换、tomcat-war/tongweb-war 走容器,不在内。
 const PROCESS_TYPES = ["native-binary", "java-jar", "python", "node"];
 const isProcessType = (t) => PROCESS_TYPES.includes(t);
 
-// 所有有真机 Deployer 的类型:进程类 + static-nginx(软链)+ tomcat-war(容器)。
+// 所有有真机 Deployer 的类型:进程类 + static-nginx(软链)+ tomcat-war/tongweb-war(容器)。
 // 决定真机部署/还原/备份是否走 Agent(日志另判,见 isProcessType)。
-const REAL_TYPES = [...PROCESS_TYPES, "static-nginx", "tomcat-war"];
+const REAL_TYPES = [...PROCESS_TYPES, "static-nginx", "tomcat-war", "tongweb-war"];
 const isRealType = (t) => REAL_TYPES.includes(t);
 
 // fmtBytes 把字节数格式化为人类可读;非数字原样返回(兼容旧的字符串 size)。

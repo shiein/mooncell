@@ -419,7 +419,7 @@ func (a *agent) runDeployNohup(cfg DeployConfig, artifact string, emit func(Step
 	var hlog []string
 	if processHealthy(cfg.Health, nohupAlive(cfg), &hlog) {
 		add("健康检查", true, hlog...)
-		os.WriteFile(verSidecar(cfg.BinPath), []byte(cfg.Version), 0644)
+		_ = writeVersion(cfg.BinPath, cfg.Version)
 		res.Result = "success"
 		return res
 	}

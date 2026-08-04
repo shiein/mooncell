@@ -24,6 +24,10 @@ type agentClient struct {
 	stream *http.Client // 无超时:应用日志等长连接流,靠请求 context 取消而非超时
 }
 
+// TongWeb 单次失败部署最坏包含新版本探活 180s + 旧版本回滚探活 180s，另需预留
+// 上传、WAR 校验和备份时间。Console 必须晚于 Agent 完整事务超时，不能中途断开后留下未知状态。
+const agentDeployTimeout = 10 * time.Minute
+
 // agentBase 据 addr 构造 Agent 基址:addr 已含 http(s):// 前缀则原样(支持 TLS 终端 Agent),
 // 否则默认 http://(向后兼容既有 host:port 配置)。
 func agentBase(addr string) string {
@@ -55,9 +59,7 @@ func newAgentClient(cfg AgentConfig) *agentClient {
 		base:   agentBase(cfg.Addr),
 		token:  cfg.Token,
 		http:   &http.Client{Timeout: 5 * time.Second},
-		// 部署/下线含 Agent 端健康检查宽限(retries×interval≈30s,探活超时最坏更久)+ 失败回滚再探测,
-		// 余量需覆盖最坏约 2×探活;给到 300s 防 Console 侧先于 Agent 超时(Agent 仍在跑造成状态不一致)。
-		deploy: &http.Client{Timeout: 300 * time.Second},
+		deploy: &http.Client{Timeout: agentDeployTimeout},
 		stream: &http.Client{Timeout: 0},
 	}
 }
@@ -204,6 +206,7 @@ func (a *api) unknownAgent(w http.ResponseWriter, cl *agentClient) bool {
 //  1. 浏览器中途断开时,继续读尽 Agent 流(只停止向浏览器写),确保仍能拿到权威 done;
 //  2. 即便 Console↔Agent 也断流没拿到 done,再向 Agent 查询权威幂等记录对账——
 //     Agent 真机已完成的部署绝不会被误记为失败,也不会漏记幂等导致重试时重复部署。
+//
 // streamAndAudit 透传 Agent 的部署/还原 SSE 给浏览器,并据权威 done 结果落审计/发布/幂等记录。
 // 返回最终 (result, version) 供调用方在成功后做旁路动作(如部署成功自动归档制品);早返回回空串。
 func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentClient, resp *http.Response, err error, action, appID, releaseID, fingerprint string) (string, string) {
@@ -673,7 +676,8 @@ func (a *api) applyLifecycleState(appID string, body []byte) {
 }
 
 // addRunnerQuery 据服务端派生的 runner 往 query 注入定位参数:pm2→runner+pm2Name、nohup→runner+binPath、
-// 软链(static-nginx)→binPath。集中一处,避免某条链路(此前的下线)漏传 pm2Name/binPath 导致残留。
+// 软链(static-nginx)→binPath、容器托管(tomcat/tongweb)→container 标记。集中一处,避免某条链路
+// 漏传定位信息；容器托管删除只注销 Mooncell 记录,不停止共享容器、不删除在役 WAR。
 func (a *api) addRunnerQuery(q url.Values, id, runner string) {
 	switch runner {
 	case "pm2":
@@ -686,6 +690,8 @@ func (a *api) addRunnerQuery(q url.Values, id, runner string) {
 		q.Set("binPath", a.appBinPathOf(id))
 	case "软链":
 		q.Set("binPath", a.appBinPathOf(id)) // Agent 据此删除对外软链下线 web root
+	case "tomcat", "tongweb":
+		q.Set("runner", "container")
 	}
 }
 

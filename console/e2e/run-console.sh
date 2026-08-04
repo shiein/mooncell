@@ -9,6 +9,7 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 DIR="$(mktemp -d)"
-printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n' "$PORT" "$DIR" > "$DIR/config.toml"
+FAKE_AGENT_PORT="${FAKE_AGENT_PORT:-9111}"
+printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n[agent]\naddr="127.0.0.1:%s"\ntoken="tok"\n' "$PORT" "$DIR" "$FAKE_AGENT_PORT" > "$DIR/config.toml"
 cd "$DIR"
 exec "$BIN"

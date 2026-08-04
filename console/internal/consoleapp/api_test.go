@@ -100,6 +100,10 @@ func TestPutAppConfigValidation(t *testing.T) {
 	if c := put(goodStage); c != http.StatusOK {
 		t.Fatalf("合法 stage 应 200,得 %d", c)
 	}
+	goodTongWeb := `{"name":"frontend","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/frontend.war","healthType":"HTTP 200","health":"http://127.0.0.1:8080/frontend/health","agentId":"default","backupKeep":10}`
+	if c := put(goodTongWeb); c != http.StatusOK {
+		t.Fatalf("合法 TongWeb WAR 配置应 200,得 %d", c)
+	}
 	for _, tc := range []struct {
 		name, body string
 	}{
@@ -114,10 +118,48 @@ func TestPutAppConfigValidation(t *testing.T) {
 		{"pm2 进程名用在非 pm2 runner", `{"name":"a","type":"node","runner":"systemd","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"my-proc"}`},
 		{"pm2 进程名含注入字符", `{"name":"a","type":"node","runner":"pm2","path":"/srv/apps/a/s.js","agentId":"default","backupKeep":5,"pm2Name":"p;rm -rf /"}`},
 		{"未知环境分组", `{"name":"a","type":"native-binary","runner":"systemd","path":"/x","agentId":"default","backupKeep":5,"stage":"staging"}`},
+		{"TongWeb 缺少 HTTP 健康检查", `{"name":"a","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/a.war","healthType":"无","agentId":"default"}`},
+		{"TongWeb 路径非绝对路径", `{"name":"a","type":"tongweb-war","runner":"tongweb","path":"deployment/a.war","healthType":"HTTP 200","health":"http://127.0.0.1/a","agentId":"default"}`},
+		{"TongWeb 路径缺少 war 文件名", `{"name":"a","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/a.jar","healthType":"HTTP 200","health":"http://127.0.0.1/a","agentId":"default"}`},
+		{"TongWeb 禁止 reload", `{"name":"a","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/a.war","healthType":"HTTP 200","health":"http://127.0.0.1/a","reload":true,"agentId":"default"}`},
+		{"TongWeb 健康 URL 缺少主机", `{"name":"a","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/a.war","healthType":"HTTP 200","health":"http:///health","agentId":"default"}`},
+		{"TongWeb 健康 URL 含凭据", `{"name":"a","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/a.war","healthType":"HTTP 200","health":"http://user:pass@127.0.0.1/a","agentId":"default"}`},
 	} {
 		if c := put(tc.body); c != http.StatusBadRequest {
 			t.Errorf("%s 应 400,得 %d", tc.name, c)
 		}
+	}
+}
+
+func TestPutAppConfigRejectsDuplicateTongWebTarget(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+	a := &api{store: s, agent: &agentClient{base: "http://127.0.0.1:9876"}, clients: map[string]*agentClient{}}
+	put := func(id, body string) int {
+		req := httptest.NewRequest("PUT", "/api/apps/"+id+"/config", strings.NewReader(body))
+		req.SetPathValue("id", id)
+		w := httptest.NewRecorder()
+		a.putAppConfig(w, req)
+		return w.Code
+	}
+	first := `{"name":"frontend","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/app.war","healthType":"HTTP 200","health":"http://127.0.0.1/frontend","agentId":"default"}`
+	if code := put("frontend", first); code != http.StatusOK {
+		t.Fatalf("首个 TongWeb 配置应成功,got %d", code)
+	}
+	duplicate := `{"name":"backend","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/../deployment/app.war","healthType":"HTTP 200","health":"http://127.0.0.1/backend","agentId":"default"}`
+	if code := put("backend", duplicate); code != http.StatusBadRequest {
+		t.Fatalf("同 Agent 的规范化重复 WAR 路径应拒绝,got %d", code)
+	}
+	distinct := `{"name":"backend","type":"tongweb-war","runner":"tongweb","path":"/opt/TongWeb/deployment/backend.war","healthType":"HTTP 200","health":"http://127.0.0.1/backend","agentId":"default"}`
+	if code := put("backend", distinct); code != http.StatusOK {
+		t.Fatalf("前后端使用不同 WAR 路径应允许,got %d", code)
+	}
+}
+
+func TestAgentDeployTimeoutCoversTongWebRollbackWindow(t *testing.T) {
+	cl := newAgentClient(AgentConfig{})
+	if cl.deploy.Timeout != agentDeployTimeout || cl.deploy.Timeout < 6*time.Minute {
+		t.Fatalf("部署超时必须覆盖两次 180s 探活及制品处理,got %s", cl.deploy.Timeout)
 	}
 }
 
@@ -431,6 +473,13 @@ func TestBuildAgentConfigMapsReloadFlag(t *testing.T) {
 	if tomcat.ReloadCmd != "tomcat-restart" {
 		t.Fatalf("tomcat reload=true 应映射 tomcat-restart,got %q", tomcat.ReloadCmd)
 	}
+	tongweb := buildAgentDeployConfig(appConfig{Type: "tongweb-war", Runner: "tongweb", Path: "/opt/TongWeb/deployment/a.war", Reload: true, HealthType: "HTTP 200", Health: "http://127.0.0.1/a"}, "v1", "", "r1")
+	if tongweb.ReloadCmd != "" || tongweb.ReloadArg != "" {
+		t.Fatalf("TongWeb 自动部署不应下发 reload/restart,got %q/%q", tongweb.ReloadCmd, tongweb.ReloadArg)
+	}
+	if tongweb.Health != "http://127.0.0.1/a" {
+		t.Fatalf("TongWeb 应下发强制 HTTP 健康检查,got %q", tongweb.Health)
+	}
 
 	disabled := buildAgentDeployConfig(appConfig{Type: "static-nginx", Path: "/data/web/site", Reload: false}, "v1", "", "r1")
 	if disabled.ReloadCmd != "" {
@@ -450,6 +499,16 @@ func TestBuildAgentConfigMapsReloadFlag(t *testing.T) {
 	}
 	if sys := buildAgentDeployConfig(appConfig{Type: "node", Runner: "systemd", Path: "/srv/apps/x/server.js", Pm2Name: "my-proc"}, "v1", "", "r1"); sys.Pm2Name != "" {
 		t.Fatalf("非 pm2 runner 不应下发 pm2Name,got %q", sys.Pm2Name)
+	}
+}
+
+func TestContainerManagedUndeployPath(t *testing.T) {
+	a := &api{}
+	for _, runner := range []string{"tomcat", "tongweb"} {
+		got := a.undeployPath("app1", runner)
+		if got != "/api/apps/app1?runner=container" {
+			t.Fatalf("runner=%s 的删除应只注销容器托管关系,got %q", runner, got)
+		}
 	}
 }
 

@@ -17,28 +17,29 @@ const sessionCookie = "mc_sid"
 
 // api 持有依赖,挂载各 HTTP handler。
 type api struct {
-	store           *Store
-	agent           *agentClient            // 配置内的默认 Agent(id="default"/空)
-	clients         map[string]*agentClient // 注册的远端 Agent 客户端缓存(按 id)
-	clientsMu       sync.Mutex
-	cabinetDir      string
-	anonUpload      bool
-	cabinetMaxBytes int64  // 文件柜单文件上限(字节),来自 cabinet.max_upload_mb(默认 300MB)
-	agentBinDir     string // Agent 升级包(按架构)的存储目录
-	demoSeed        bool
-	maxUpload       int64                     // 部署制品上传硬上限(字节);超出在传输层截断回 413
-	uploads         map[string]*uploadSession // 分块上传会话(按 uploadId)
-	uploadsMu       sync.Mutex
-	busy            map[string]int // 在飞操作的应用(部署/还原/启停/下线)引用计数:健康巡检跳过,避免误判掉线。进程内状态 → Console 须单实例运行(见 README 约束)
-	busyMu          sync.Mutex
-	appMu           map[string]*sync.Mutex // 按 app id 的实体写锁:串行化"读实体—改字段—写回",防部署/启停/巡检/配置四链路并发丢更新
-	appMuMu         sync.Mutex
-	appEpoch        map[string]uint64 // 按 app id 的操作代际:每次启停/部署/还原/下线自增(markBusy 内);巡检据此丢弃陈旧回写。busyMu 保护
-	draining        bool              // 自更新 draining:置位后 tryBeginOp 拒绝新操作,等在飞清零再 self-exec 重启。busyMu 保护
-	requireTLSAgents bool             // 开启后拒绝注册非 loopback 明文 Agent(security.require_tls_agents)
-	selfUpdateMu sync.Mutex              // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
-	dataResSvc   *dataresource.Service   // 数据资源模块服务（工作台事务回滚等）
-	serverOps    *serverops.Service      // 服务器运维（SSH/SFTP）；nil 表示未启用
+	store            *Store
+	agent            *agentClient            // 配置内的默认 Agent(id="default"/空)
+	clients          map[string]*agentClient // 注册的远端 Agent 客户端缓存(按 id)
+	clientsMu        sync.Mutex
+	cabinetDir       string
+	anonUpload       bool
+	cabinetMaxBytes  int64  // 文件柜单文件上限(字节),来自 cabinet.max_upload_mb(默认 300MB)
+	agentBinDir      string // Agent 升级包(按架构)的存储目录
+	demoSeed         bool
+	maxUpload        int64                     // 部署制品上传硬上限(字节);超出在传输层截断回 413
+	uploads          map[string]*uploadSession // 分块上传会话(按 uploadId)
+	uploadsMu        sync.Mutex
+	busy             map[string]int // 在飞操作的应用(部署/还原/启停/下线)引用计数:健康巡检跳过,避免误判掉线。进程内状态 → Console 须单实例运行(见 README 约束)
+	busyMu           sync.Mutex
+	appMu            map[string]*sync.Mutex // 按 app id 的实体写锁:串行化"读实体—改字段—写回",防部署/启停/巡检/配置四链路并发丢更新
+	appMuMu          sync.Mutex
+	appConfigMu      sync.Mutex            // 全局串行应用配置写入:重复部署目标检查与落库必须是一个临界区
+	appEpoch         map[string]uint64     // 按 app id 的操作代际:每次启停/部署/还原/下线自增(markBusy 内);巡检据此丢弃陈旧回写。busyMu 保护
+	draining         bool                  // 自更新 draining:置位后 tryBeginOp 拒绝新操作,等在飞清零再 self-exec 重启。busyMu 保护
+	requireTLSAgents bool                  // 开启后拒绝注册非 loopback 明文 Agent(security.require_tls_agents)
+	selfUpdateMu     sync.Mutex            // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
+	dataResSvc       *dataresource.Service // 数据资源模块服务（工作台事务回滚等）
+	serverOps        *serverops.Service    // 服务器运维（SSH/SFTP）；nil 表示未启用
 }
 
 func randomToken() string {
