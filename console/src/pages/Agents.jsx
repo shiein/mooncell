@@ -14,6 +14,10 @@ const archOf = (os) => {
   return m ? m[1] : "";
 };
 
+const pingInfoOf = (res) => res && res.ok
+  ? { ok: true, version: res.version, os: res.os }
+  : { ok: false, code: res && res.code, error: (res && res.error) || "Agent 不可达" };
+
 function AgentsPage() {
   const store = useMC();
   const [agents, setAgents] = React.useState(null);
@@ -36,7 +40,7 @@ function AgentsPage() {
       const arr = list;
       setAgents(arr);
       arr.forEach((a) => pingAgentNode(a.id).then((res) => {
-        setInfo((m) => ({ ...m, [a.id]: res && res.ok ? { ok: true, version: res.version, os: res.os } : { ok: false } }));
+        setInfo((m) => ({ ...m, [a.id]: pingInfoOf(res) }));
       }));
     });
   }, []);
@@ -83,7 +87,7 @@ function AgentsPage() {
       const r = await updateAgentNode(a.id);
       toast(`${a.name} 已更新 → ${r.version || target.version}(重启中)`);
       setTimeout(() => pingAgentNode(a.id).then((res) => {
-        setInfo((m) => ({ ...m, [a.id]: res && res.ok ? { ok: true, version: res.version, os: res.os } : { ok: false } }));
+        setInfo((m) => ({ ...m, [a.id]: pingInfoOf(res) }));
       }), 2500);
     } catch (e) {
       toast(e.message || "更新失败", { tone: "error" });
@@ -115,7 +119,8 @@ function AgentsPage() {
                   <td>
                     {!inf ? <Spinner size={12} /> :
                       inf.ok ? <Badge tone="success" dot>在线{inf.os ? " · " + inf.os : ""}</Badge> :
-                        <Badge tone="error" dot>不可达</Badge>}
+                        inf.code === "AGENT_AUTH_FAILED" ? <Badge tone="error" dot>共享 token 错误</Badge> :
+                          <Badge tone="error" dot>不可达</Badge>}
                   </td>
                   <td>
                     <span className="mono" style={{ fontSize: 12 }}>{inf && inf.ok ? inf.version : "—"}</span>
@@ -125,9 +130,9 @@ function AgentsPage() {
                   <td>
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                       <Btn size="sm" variant="ghost" icon="zap" title="连通性测试"
-                        onClick={() => { setInfo((m) => ({ ...m, [a.id]: undefined })); pingAgentNode(a.id).then((res) => setInfo((m) => ({ ...m, [a.id]: res && res.ok ? { ok: true, version: res.version, os: res.os } : { ok: false } }))); }}></Btn>
+                        onClick={() => { setInfo((m) => ({ ...m, [a.id]: undefined })); pingAgentNode(a.id).then((res) => setInfo((m) => ({ ...m, [a.id]: pingInfoOf(res) }))); }}></Btn>
                       <Btn size="sm" variant={isLatest ? "ghost" : "primary"} icon="rotate" disabled={!canUpdate || updating[a.id]}
-                        title={!inf || !inf.ok ? "Agent 不可达" : !target ? `未上传 linux/${arch || "?"} 升级包` : isLatest ? `已是最新 ${target.version} · 点击可强制重新推送(忘改版本号时用)` : `更新到 ${target.version}`}
+                        title={!inf || !inf.ok ? (inf && inf.error) || "Agent 不可达" : !target ? `未上传 linux/${arch || "?"} 升级包` : isLatest ? `已是最新 ${target.version} · 点击可强制重新推送(忘改版本号时用)` : `更新到 ${target.version}`}
                         onClick={() => doUpdate(a)}>{updating[a.id] ? <Spinner size={12} /> : "更新"}</Btn>
                       {a.id === "default" ? null : <Btn size="sm" variant="ghost" icon="trash" title="移除" onClick={() => onDelete(a)}></Btn>}
                     </div>

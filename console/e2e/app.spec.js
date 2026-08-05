@@ -49,6 +49,30 @@ test('登录态在刷新后保持(httpOnly 会话)', async ({ page }) => {
   await expect(page.getByRole('button', { name: '总览', exact: true })).toBeVisible();
 });
 
+test('Agent token 错误不会被误判为 Console 会话过期', async ({ page }) => {
+  await login(page);
+  const created = await page.request.post('/api/agents', {
+    data: { name: 'E2E 错误 token Agent', addr: '127.0.0.1:9111', token: 'wrong-token' },
+  });
+  expect(created.ok()).toBeTruthy();
+  const { id } = await created.json();
+
+  try {
+    const pingResponse = page.waitForResponse((r) => r.url().endsWith(`/api/agents/${id}/ping`));
+    await page.getByRole('button', { name: 'Agent 管理', exact: true }).click();
+    const ping = await pingResponse;
+    expect(ping.status()).toBe(502);
+    expect(await ping.json()).toMatchObject({ code: 'AGENT_AUTH_FAILED', online: false });
+
+    const row = page.locator('tr').filter({ hasText: 'E2E 错误 token Agent' });
+    await expect(row.getByText('共享 token 错误', { exact: true })).toBeVisible();
+    await expect(usernameInput(page)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '总览', exact: true })).toBeVisible();
+  } finally {
+    await page.request.delete(`/api/agents/${id}`);
+  }
+});
+
 test('登出回到登录页', async ({ page }) => {
   await login(page);
   await page.getByTitle('退出登录').click();

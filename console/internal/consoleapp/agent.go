@@ -144,7 +144,7 @@ func (a *api) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// agentProxy 把已登录用户的请求转发到 Agent 对应路径,原样回传状态码与 JSON。
+// agentProxy 把已登录用户的请求转发到 Agent 对应路径,回传状态码与 JSON。
 // Agent 不可达时返回 502 + online:false,前端据此把 Agent 状态显示为离线。
 func (a *api) agentProxy(agentPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -158,12 +158,32 @@ func (a *api) agentProxy(agentPath string) http.HandlerFunc {
 	}
 }
 
-// relayAgent 统一回传 Agent 响应;不可达时 502 + online:false。
+const agentAuthFailedCode = "AGENT_AUTH_FAILED"
+
+// rejectAgentUnauthorized 隔离 Console 登录鉴权与下游 Agent 共享 token 鉴权。
+// 浏览器把 Console 返回的 401 统一视为 mc_sid 过期,因此不能把 Agent 401 原样透传,
+// 否则一台 token 错误的 Agent 会让前端误退出、且每次进入 Agent 管理页都重复触发。
+func rejectAgentUnauthorized(w http.ResponseWriter, status int) bool {
+	if status != http.StatusUnauthorized {
+		return false
+	}
+	writeJSON(w, http.StatusBadGateway, map[string]any{
+		"code":   agentAuthFailedCode,
+		"error":  "Agent 鉴权失败,请检查共享 token",
+		"online": false,
+	})
+	return true
+}
+
+// relayAgent 统一回传 Agent 响应;不可达或下游鉴权失败时转换为 502。
 func relayAgent(w http.ResponseWriter, status int, body []byte, err error) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error": "Agent 不可达", "detail": err.Error(), "online": false,
 		})
+		return
+	}
+	if rejectAgentUnauthorized(w, status) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -213,6 +233,10 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 		return "", ""
 	}
 	defer resp.Body.Close()
+	if rejectAgentUnauthorized(w, resp.StatusCode) {
+		a.store.appendAudit(user, action, appID, "失败·Agent鉴权")
+		return "", ""
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -401,6 +425,9 @@ func (a *api) streamAgentResp(w http.ResponseWriter, resp *http.Response, err er
 		return
 	}
 	defer resp.Body.Close()
+	if rejectAgentUnauthorized(w, resp.StatusCode) {
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -510,6 +537,9 @@ func (a *api) agentLogDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	if rejectAgentUnauthorized(w, resp.StatusCode) {
+		return
+	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}

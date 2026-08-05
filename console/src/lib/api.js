@@ -139,8 +139,9 @@ async function removeAgentNode(id) {
 async function pingAgentNode(id) {
   try {
     const r = await fetch(`/api/agents/${encodeURIComponent(id)}/ping`, { credentials: 'same-origin' });
-    return r.ok ? await r.json() : null;
-  } catch (e) { return null; }
+    const d = await r.json().catch(() => ({}));
+    return r.ok ? d : { ...d, ok: false, error: d.error || 'Agent 不可达' };
+  } catch (e) { return { ok: false, error: 'Agent 不可达' }; }
 }
 
 // ---------- Agent 自更新(按架构上传升级包 → 推送匹配的包到各 Agent)----------

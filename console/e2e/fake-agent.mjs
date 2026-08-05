@@ -1,5 +1,5 @@
 // 极简假 Agent:供 E2E 让 Console 有「真实」能力清单与可控错误态。
-// 不验 token(E2E 内网);只覆盖 ping/capabilities/system/backups/deploy 几个端点。
+// 校验与 E2E Console 配置一致的 token,覆盖 ping/capabilities/system/backups/deploy 几个端点。
 import http from 'node:http';
 
 const PORT = Number(process.env.FAKE_AGENT_PORT || 9111);
@@ -13,6 +13,7 @@ const backupsOf = (id) => Array.from({ length: backupCounts.get(id) || 0 }, (_, 
 
 const srv = http.createServer((req, res) => {
   const p = new URL(req.url, 'http://x').pathname;
+  if (req.headers.authorization !== 'Bearer tok') return json(res, 401, { error: 'token 校验失败' });
   if (p === '/api/ping') return json(res, 200, { ok: true });
   if (p === '/api/capabilities') return json(res, 200, {
     capabilities: [
