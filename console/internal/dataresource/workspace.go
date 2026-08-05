@@ -35,13 +35,14 @@ const (
 
 // Workspace 是一个工作台的内存状态。
 type Workspace struct {
-	ID         string
-	ResourceID string
-	Username   string
-	AutoCommit bool
-	ReadOnly   bool // 用户对该资源为 read 授权时为 true；手工事务必须以只读事务创建
-	TxState    TxState
-	Tx         Transaction // 活动事务（nil 表示无）
+	ID             string
+	ResourceID     string
+	Username       string
+	LoginSessionID string
+	AutoCommit     bool
+	ReadOnly       bool // 用户对该资源为 read 授权时为 true；手工事务必须以只读事务创建
+	TxState        TxState
+	Tx             Transaction // 活动事务（nil 表示无）
 	// txCtx/txCancel：手工事务生命周期与单次 HTTP 请求解耦。
 	// database/sql 的 BeginTx(ctx) 在 ctx 取消时会主动 rollback；若用请求 ctx 开启事务，
 	// 请求结束后 defer cancel 会静默毁掉 ws.Tx，导致「执行成功但提交已回滚」。
@@ -170,15 +171,20 @@ func NewWorkspaceManager(pool *PoolManager) *WorkspaceManager {
 // CreateWorkspace 创建新工作台。readOnly 表示用户对该资源仅有 read 授权，
 // 关闭自动提交后整段手工事务必须以数据库只读事务创建（设计第二层安全边界）。
 func (wm *WorkspaceManager) CreateWorkspace(resourceID, username string, adapter DataSourceAdapter, readOnly bool) *Workspace {
+	return wm.CreateWorkspaceForSession(resourceID, username, "test:"+username, adapter, readOnly)
+}
+
+func (wm *WorkspaceManager) CreateWorkspaceForSession(resourceID, username, loginSessionID string, adapter DataSourceAdapter, readOnly bool) *Workspace {
 	ws := &Workspace{
-		ID:           newID(),
-		ResourceID:   resourceID,
-		Username:     username,
-		AutoCommit:   true,
-		ReadOnly:     readOnly,
-		TxState:      TxNone,
-		Adapter:      adapter,
-		LastActivity: time.Now(),
+		ID:             newID(),
+		ResourceID:     resourceID,
+		Username:       username,
+		LoginSessionID: loginSessionID,
+		AutoCommit:     true,
+		ReadOnly:       readOnly,
+		TxState:        TxNone,
+		Adapter:        adapter,
+		LastActivity:   time.Now(),
 	}
 	wm.mu.Lock()
 	wm.workspaces[ws.ID] = ws
@@ -209,11 +215,11 @@ func (wm *WorkspaceManager) DeleteWorkspace(id string) {
 	wm.mu.Unlock()
 
 	ws.cancelRunningStmt()
-	wm.finishInvalidation(ws)
+	wm.finishInvalidation(ws, false)
 }
 
 // finishInvalidation 等待在途请求退出并回滚手工事务。
-func (wm *WorkspaceManager) finishInvalidation(ws *Workspace) {
+func (wm *WorkspaceManager) finishInvalidation(ws *Workspace, closePool bool) {
 	ws.mu.Lock()
 	if ws.Tx != nil {
 		_ = ws.Tx.Rollback()
@@ -222,12 +228,14 @@ func (wm *WorkspaceManager) finishInvalidation(ws *Workspace) {
 		ws.clearTxLocked(false, nil)
 	}
 	ws.mu.Unlock()
-	wm.pool.CloseUserDB(ws.ResourceID, ws.Username)
+	if closePool {
+		wm.pool.CloseSessionDB(ws.ResourceID, ws.LoginSessionID)
+	}
 }
 
 // invalidateMatching 在 manager 锁内一次性标记并移除匹配工作台，
 // 避免逐个 DeleteWorkspace 留下尚未 closed 的可执行窗口。
-func (wm *WorkspaceManager) invalidateMatching(match func(*Workspace) bool) {
+func (wm *WorkspaceManager) invalidateMatching(match func(*Workspace) bool, closePool bool) {
 	wm.mu.Lock()
 	var list []*Workspace
 	for id, ws := range wm.workspaces {
@@ -242,7 +250,7 @@ func (wm *WorkspaceManager) invalidateMatching(match func(*Workspace) bool) {
 		ws.cancelRunningStmt()
 	}
 	for _, ws := range list {
-		wm.finishInvalidation(ws)
+		wm.finishInvalidation(ws, closePool)
 	}
 }
 
@@ -271,7 +279,7 @@ func (wm *WorkspaceManager) RollbackUserTx(username, resourceID string) {
 func (wm *WorkspaceManager) InvalidateUserResource(username, resourceID string) {
 	wm.invalidateMatching(func(ws *Workspace) bool {
 		return ws.Username == username && ws.ResourceID == resourceID
-	})
+	}, true)
 }
 
 // InvalidateAllForUser 回滚并删除某用户的全部工作台（退出登录/删用户/会话失效时调用）。
@@ -279,14 +287,26 @@ func (wm *WorkspaceManager) InvalidateUserResource(username, resourceID string) 
 func (wm *WorkspaceManager) InvalidateAllForUser(username string) {
 	wm.invalidateMatching(func(ws *Workspace) bool {
 		return ws.Username == username
-	})
+	}, true)
+}
+
+func (wm *WorkspaceManager) InvalidateLoginSession(loginSessionID string) {
+	wm.invalidateMatching(func(ws *Workspace) bool {
+		return ws.LoginSessionID == loginSessionID
+	}, true)
+}
+
+func (wm *WorkspaceManager) InvalidateLoginSessionResource(loginSessionID, resourceID string) {
+	wm.invalidateMatching(func(ws *Workspace) bool {
+		return ws.LoginSessionID == loginSessionID && ws.ResourceID == resourceID
+	}, true)
 }
 
 // InvalidateResource 回滚并删除某资源上的全部工作台（资源更新/删除时调用）。
 func (wm *WorkspaceManager) InvalidateResource(resourceID string) {
 	wm.invalidateMatching(func(ws *Workspace) bool {
 		return ws.ResourceID == resourceID
-	})
+	}, true)
 }
 
 // CleanupIdle 回滚超时手工事务，并删除长期无活动的空工作台。由后台定期调用。
@@ -339,7 +359,6 @@ func (wm *WorkspaceManager) deleteWorkspaceIfIdle(ws *Workspace, now time.Time) 
 	delete(wm.workspaces, ws.ID)
 	ws.closed.Store(true)
 	ws.clearTxLocked(false, nil)
-	wm.pool.CloseUserDB(ws.ResourceID, ws.Username)
 	return true
 }
 
@@ -357,7 +376,7 @@ func (wm *WorkspaceManager) CloseAll() {
 		ws.cancelRunningStmt()
 	}
 	for _, ws := range list {
-		wm.finishInvalidation(ws)
+		wm.finishInvalidation(ws, true)
 	}
 }
 

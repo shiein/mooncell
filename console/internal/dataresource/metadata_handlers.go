@@ -56,10 +56,15 @@ func (s *Service) getAdapterForRequest(w http.ResponseWriter, r *http.Request) (
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
 		return nil, "", false
 	}
-	// 仅使用当前用户本次输入密码建立的内存连接；不存在时要求重新连接。
-	db, err := s.pools.GetUserDB(res.ID, user)
+	loginSessionID, ok := loginSessionFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "登录会话无效")
+		return nil, "", false
+	}
+	// 仅使用当前 Mooncell 登录会话持有的内存连接租约。
+	db, err := s.pools.GetSessionDB(res.ID, loginSessionID)
 	if err != nil {
-		writeErr(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "请先输入密码连接数据库")
+		writeErr(w, http.StatusPreconditionRequired, "PASSWORD_REQUIRED", "请先输入密码连接数据库")
 		return nil, "", false
 	}
 	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))

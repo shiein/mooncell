@@ -1,7 +1,9 @@
 package consoleapp
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"log"
 	"strings"
 	"time"
@@ -54,6 +56,7 @@ func openDB(cfg *Config) *Store {
 		);
 		CREATE TABLE IF NOT EXISTS sessions (
 			token      TEXT    PRIMARY KEY,
+			lease_id   TEXT    NOT NULL DEFAULT '',
 			username   TEXT    NOT NULL,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL
@@ -97,6 +100,9 @@ func openDB(cfg *Config) *Store {
 		);
 	`); err != nil {
 		log.Fatalf("[db] 建表失败: %v", err)
+	}
+	if err := migrateSessionLeaseIDs(db); err != nil {
+		log.Fatalf("[db] 迁移会话租约标识失败: %v", err)
 	}
 
 	store := &Store{db: db, ttl: time.Duration(cfg.Session.TTLHours) * time.Hour}
@@ -570,11 +576,12 @@ func (s *Store) verifyUser(username, password string) bool {
 
 func (s *Store) createSession(username string) (string, time.Time, error) {
 	token := randomToken()
+	leaseID := sessionLeaseID(token)
 	now := time.Now()
 	exp := now.Add(s.ttl)
 	if _, err := s.db.Exec(
-		"INSERT INTO sessions (token, username, created_at, expires_at) VALUES (?, ?, ?, ?)",
-		token, username, now.UnixMilli(), exp.UnixMilli(),
+		"INSERT INTO sessions (token, lease_id, username, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+		token, leaseID, username, now.UnixMilli(), exp.UnixMilli(),
 	); err != nil {
 		log.Printf("[db] 写入会话失败: %v", err)
 		return "", time.Time{}, err
@@ -583,60 +590,163 @@ func (s *Store) createSession(username string) (string, time.Time, error) {
 }
 
 // sessionAbsoluteMax 是会话绝对最长生命周期:即便持续有动作滑动续期,从登录起超过即失效、需重新登录(纵深防御)。
-const sessionAbsoluteMax = 12 * time.Hour
+const sessionAbsoluteMax = 3 * time.Hour
+
+// sessionLeaseID 是登录 token 的单向标识，只用于进程内凭据租约和精确失效。
+// 下游模块永远拿不到可作为 Bearer 凭据使用的原始 mc_sid。
+func sessionLeaseID(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+type loginSession struct {
+	Username string
+	LeaseID  string
+}
+
+// sessionByToken 只校验会话，不续期。过期时仍返回身份，供调用方精确清理该登录会话的内存租约。
+func (s *Store) sessionByToken(token string) (loginSession, bool) {
+	var sess loginSession
+	var created, exp int64
+	if err := s.db.QueryRow(
+		"SELECT username, lease_id, created_at, expires_at FROM sessions WHERE token = ?", token,
+	).Scan(&sess.Username, &sess.LeaseID, &created, &exp); err != nil {
+		return loginSession{}, false
+	}
+	if sess.LeaseID == "" {
+		sess.LeaseID = sessionLeaseID(token)
+	}
+	now := time.Now().UnixMilli()
+	if exp <= now || now-created >= sessionAbsoluteMax.Milliseconds() {
+		_, _ = s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
+		return sess, false
+	}
+	return sess, true
+}
 
 // userByToken 仅校验会话有效性(闲置过期 / 超绝对寿命即清理并失败),不做续期。
 // 续期由 touchSession 单独负责,且只在"用户动作"请求上调用——避免后台轮询把闲置会话续命。
 // 过期时仍返回 username 且 ok=false，便于调用方回滚该用户数据资源工作台事务。
 func (s *Store) userByToken(token string) (string, bool) {
-	var username string
-	var created, exp int64
-	if err := s.db.QueryRow("SELECT username, created_at, expires_at FROM sessions WHERE token = ?", token).Scan(&username, &created, &exp); err != nil {
-		return "", false
-	}
-	now := time.Now().UnixMilli()
-	if exp < now || now-created > sessionAbsoluteMax.Milliseconds() {
-		s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
-		return username, false
-	}
-	return username, true
+	sess, ok := s.sessionByToken(token)
+	return sess.Username, ok
 }
 
 // touchSession 滑动续期(idle timeout):把过期推到 now+ttl。仅供"用户动作"请求调用。
 // 节流写在 SQL 里(距上次续期满 1 分钟才更新),避免高频请求写放大。
 func (s *Store) touchSession(token string) {
+	s.touchLeaseSession(sessionLeaseID(token))
+}
+
+// touchLeaseSession 仅续期指定登录会话，不能让同一用户的其它浏览器会话被一并续期。
+func (s *Store) touchLeaseSession(leaseID string) {
 	if s.ttl <= time.Minute {
 		return
 	}
 	now := time.Now()
-	s.db.Exec("UPDATE sessions SET expires_at = ? WHERE token = ? AND expires_at <= ?",
-		now.Add(s.ttl).UnixMilli(), token, now.Add(s.ttl-time.Minute).UnixMilli())
+	_, _ = s.db.Exec(
+		`UPDATE sessions SET expires_at = ?
+		 WHERE lease_id = ? AND expires_at > ? AND (? - created_at) < ? AND expires_at <= ?`,
+		now.Add(s.ttl).UnixMilli(), leaseID, now.UnixMilli(), now.UnixMilli(),
+		sessionAbsoluteMax.Milliseconds(), now.Add(s.ttl-time.Minute).UnixMilli(),
+	)
 }
 
 func (s *Store) deleteSession(token string) {
 	s.db.Exec("DELETE FROM sessions WHERE token = ?", token)
 }
 
-// userHasActiveSession 判断用户是否仍有未过期的 Mooncell 登录会话。
-// 供 serverops WebSocket 周期校验注入。
-func (s *Store) userHasActiveSession(username string) bool {
+func (s *Store) deleteUserSessions(username string) {
+	_, _ = s.db.Exec("DELETE FROM sessions WHERE username = ?", username)
+}
+
+// loginSessionActive 判断精确登录会话是否有效，供 SSH WebSocket 周期校验。
+func (s *Store) loginSessionActive(leaseID string) bool {
 	var n int
 	now := time.Now().UnixMilli()
 	_ = s.db.QueryRow(
-		`SELECT COUNT(*) FROM sessions WHERE username = ? AND expires_at > ? AND (? - created_at) <= ?`,
-		username, now, now, sessionAbsoluteMax.Milliseconds(),
+		`SELECT COUNT(*) FROM sessions WHERE lease_id = ? AND expires_at > ? AND (? - created_at) < ?`,
+		leaseID, now, now, sessionAbsoluteMax.Milliseconds(),
 	).Scan(&n)
 	return n > 0
 }
 
-// touchUserSessions 对该用户全部有效会话做节流滑动续期（主动文件/终端操作时）。
-func (s *Store) touchUserSessions(username string) {
-	if s.ttl <= time.Minute {
-		return
-	}
-	now := time.Now()
-	_, _ = s.db.Exec(
-		`UPDATE sessions SET expires_at = ? WHERE username = ? AND expires_at > ? AND expires_at <= ?`,
-		now.Add(s.ttl).UnixMilli(), username, now.UnixMilli(), now.Add(s.ttl-time.Minute).UnixMilli(),
+// reapExpiredSessions 删除已闲置或达到绝对寿命的登录会话，并返回需清理的内存租约。
+func (s *Store) reapExpiredSessions(now time.Time) []loginSession {
+	nowMS := now.UnixMilli()
+	rows, err := s.db.Query(
+		`SELECT username, lease_id FROM sessions
+		 WHERE expires_at <= ? OR (? - created_at) >= ?`,
+		nowMS, nowMS, sessionAbsoluteMax.Milliseconds(),
 	)
+	if err != nil {
+		return nil
+	}
+	var expired []loginSession
+	for rows.Next() {
+		var sess loginSession
+		if err := rows.Scan(&sess.Username, &sess.LeaseID); err == nil && sess.LeaseID != "" {
+			expired = append(expired, sess)
+		}
+	}
+	_ = rows.Close()
+	if len(expired) > 0 {
+		_, _ = s.db.Exec(
+			`DELETE FROM sessions WHERE expires_at <= ? OR (? - created_at) >= ?`,
+			nowMS, nowMS, sessionAbsoluteMax.Milliseconds(),
+		)
+	}
+	return expired
+}
+
+func migrateSessionLeaseIDs(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(sessions)`)
+	if err != nil {
+		return err
+	}
+	hasLeaseID := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "lease_id" {
+			hasLeaseID = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasLeaseID {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN lease_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	tokenRows, err := db.Query(`SELECT token FROM sessions WHERE lease_id = ''`)
+	if err != nil {
+		return err
+	}
+	var tokens []string
+	for tokenRows.Next() {
+		var token string
+		if err := tokenRows.Scan(&token); err != nil {
+			tokenRows.Close()
+			return err
+		}
+		tokens = append(tokens, token)
+	}
+	if err := tokenRows.Close(); err != nil {
+		return err
+	}
+	for _, token := range tokens {
+		if _, err := db.Exec(`UPDATE sessions SET lease_id = ? WHERE token = ?`, sessionLeaseID(token), token); err != nil {
+			return err
+		}
+	}
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_lease_id ON sessions(lease_id)`)
+	return err
 }

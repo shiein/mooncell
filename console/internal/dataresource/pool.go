@@ -1,4 +1,4 @@
-// 连接池管理器：每个用户对每个数据资源维护一次内存连接。
+// 连接池管理器：每个 Mooncell 登录会话对每个数据资源维护一次内存连接。
 //
 // 设计文档第三节：
 //   - 默认 MaxOpenConns=5、MaxIdleConns=2、连接最大生命周期 30 分钟。
@@ -19,16 +19,19 @@ package dataresource
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
 
+var ErrConnectionLeaseStale = errors.New("登录会话或凭据租约已变更")
+
 // PoolManager 管理各数据资源的 *sql.DB 连接池。
 type PoolManager struct {
 	mu    sync.Mutex
-	pools map[string]*sql.DB // resourceID + username → *sql.DB；密码不落盘
+	pools map[string]poolEntry // resourceID + loginSessionID → 内存连接；密码不落盘
 	// activeTx 记录每个资源是否有活动手工事务（ref count）。
 	activeTx map[string]int
 	// activeOps 记录资源上正在执行的普通操作（自动 SQL、工作台创建等）。
@@ -39,10 +42,17 @@ type PoolManager struct {
 	exclusive map[string]int
 }
 
+type poolEntry struct {
+	db             *sql.DB
+	resourceID     string
+	username       string
+	loginSessionID string
+}
+
 // NewPoolManager 创建连接池管理器。
 func NewPoolManager() *PoolManager {
 	return &PoolManager{
-		pools:     map[string]*sql.DB{},
+		pools:     map[string]poolEntry{},
 		activeTx:  map[string]int{},
 		activeOps: map[string]int{},
 		importing: map[string]int{},
@@ -56,13 +66,30 @@ const (
 	defaultConnMaxLifetime = 30 * time.Minute
 )
 
-func userPoolKey(resourceID, username string) string { return resourceID + "\x00" + username }
+func sessionPoolKey(resourceID, loginSessionID string) string {
+	return resourceID + "\x00" + loginSessionID
+}
 
 // ConnectUserDB 使用本次输入的密码建立并验证连接，再放入仅内存的用户连接池。
 // 调用方须先使该用户在资源上的旧工作台失效，避免替换连接时影响在途操作。
 func (pm *PoolManager) ConnectUserDB(ctx context.Context, r DataResource, username, password string) (*sql.DB, error) {
+	return pm.ConnectSessionDB(ctx, r, username, "test:"+username, password)
+}
+
+// ConnectSessionDB 使用本次输入密码建立连接，并绑定到精确 Mooncell 登录会话。
+func (pm *PoolManager) ConnectSessionDB(ctx context.Context, r DataResource, username, loginSessionID, password string) (*sql.DB, error) {
+	return pm.ConnectSessionDBIf(ctx, r, username, loginSessionID, password, nil)
+}
+
+// ConnectSessionDBIf 仅在 accept 仍为 true 时发布已验证连接，阻止并发 logout/重连发布陈旧租约。
+func (pm *PoolManager) ConnectSessionDBIf(
+	ctx context.Context, r DataResource, username, loginSessionID, password string, accept func() bool,
+) (*sql.DB, error) {
 	if password == "" {
 		return nil, fmt.Errorf("密码不能为空")
+	}
+	if loginSessionID == "" {
+		return nil, fmt.Errorf("登录会话无效")
 	}
 	dsn := BuildDSN(r, password)
 	if dsn == "" {
@@ -80,33 +107,47 @@ func (pm *PoolManager) ConnectUserDB(ctx context.Context, r DataResource, userna
 		return nil, err
 	}
 
-	key := userPoolKey(r.ID, username)
+	key := sessionPoolKey(r.ID, loginSessionID)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	if old := pm.pools[key]; old != nil {
-		old.Close()
+	if accept != nil && !accept() {
+		db.Close()
+		return nil, ErrConnectionLeaseStale
 	}
-	pm.pools[key] = db
+	if old, ok := pm.pools[key]; ok && old.db != nil {
+		old.db.Close()
+	}
+	pm.pools[key] = poolEntry{db: db, resourceID: r.ID, username: username, loginSessionID: loginSessionID}
 	return db, nil
 }
 
 // GetUserDB 获取用户已通过密码建立的当前连接。
 func (pm *PoolManager) GetUserDB(resourceID, username string) (*sql.DB, error) {
+	return pm.GetSessionDB(resourceID, "test:"+username)
+}
+
+func (pm *PoolManager) GetSessionDB(resourceID, loginSessionID string) (*sql.DB, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	db := pm.pools[userPoolKey(resourceID, username)]
-	if db == nil {
+	entry, ok := pm.pools[sessionPoolKey(resourceID, loginSessionID)]
+	if !ok || entry.db == nil {
 		return nil, fmt.Errorf("请先输入密码连接数据库")
 	}
-	return db, nil
+	return entry.db, nil
 }
 
 func (pm *PoolManager) CloseUserDB(resourceID, username string) {
+	pm.CloseSessionDB(resourceID, "test:"+username)
+}
+
+func (pm *PoolManager) CloseSessionDB(resourceID, loginSessionID string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	key := userPoolKey(resourceID, username)
-	if db := pm.pools[key]; db != nil {
-		db.Close()
+	key := sessionPoolKey(resourceID, loginSessionID)
+	if entry, ok := pm.pools[key]; ok {
+		if entry.db != nil {
+			entry.db.Close()
+		}
 		delete(pm.pools, key)
 	}
 }
@@ -116,9 +157,9 @@ func (pm *PoolManager) CloseDB(resourceID string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	prefix := resourceID + "\x00"
-	for key, db := range pm.pools {
+	for key, entry := range pm.pools {
 		if strings.HasPrefix(key, prefix) {
-			db.Close()
+			entry.db.Close()
 			delete(pm.pools, key)
 		}
 	}
@@ -127,10 +168,31 @@ func (pm *PoolManager) CloseDB(resourceID string) {
 func (pm *PoolManager) CloseUserDBs(username string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	suffix := "\x00" + username
-	for key, db := range pm.pools {
-		if strings.HasSuffix(key, suffix) {
-			db.Close()
+	for key, entry := range pm.pools {
+		if entry.username == username {
+			entry.db.Close()
+			delete(pm.pools, key)
+		}
+	}
+}
+
+func (pm *PoolManager) CloseLoginSessionDBs(loginSessionID string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	for key, entry := range pm.pools {
+		if entry.loginSessionID == loginSessionID {
+			entry.db.Close()
+			delete(pm.pools, key)
+		}
+	}
+}
+
+func (pm *PoolManager) CloseUserResourceDBs(username, resourceID string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	for key, entry := range pm.pools {
+		if entry.username == username && entry.resourceID == resourceID {
+			entry.db.Close()
 			delete(pm.pools, key)
 		}
 	}
@@ -247,8 +309,8 @@ func (pm *PoolManager) EndExclusive(resourceID string) {
 func (pm *PoolManager) CloseAll() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	for _, db := range pm.pools {
-		db.Close()
+	for _, entry := range pm.pools {
+		entry.db.Close()
 	}
-	pm.pools = map[string]*sql.DB{}
+	pm.pools = map[string]poolEntry{}
 }

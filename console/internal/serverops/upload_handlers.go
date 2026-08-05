@@ -27,7 +27,7 @@ func (s *Service) InitUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	resourceID := r.PathValue("id")
 	sessionID := r.PathValue("sid")
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sessionFromRequest(r, sessionID, user, resourceID)
 	if sess == nil {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
@@ -127,9 +127,7 @@ func (s *Service) InitUpload(w http.ResponseWriter, r *http.Request) {
 		resName = res.Name
 	}
 	s.auditLog(user, "SFTP 上传开始", auditFileTarget(resName, "upload", remotePath, body.Size), "开始")
-	if s.touch != nil {
-		s.touch(user)
-	}
+	s.touchLoginSessionFromRequest(r)
 
 	writeOK(w, UploadInitResponse{
 		TransferID: tid,
@@ -150,7 +148,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("sid")
 	tid := r.PathValue("tid")
 
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sessionFromRequest(r, sessionID, user, resourceID)
 	if sess == nil {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
@@ -258,9 +256,7 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	s.touchTransferSlot(tid)
 
-	if s.touch != nil {
-		s.touch(user)
-	}
+	s.touchLoginSessionFromRequest(r)
 	writeOK(w, map[string]any{
 		"nextOffset":      newSize,
 		"transferredSize": newSize,
@@ -351,7 +347,7 @@ func (s *Service) ResumeUpload(w http.ResponseWriter, r *http.Request) {
 	resourceID := r.PathValue("id")
 	sessionID := r.PathValue("sid")
 	tid := r.PathValue("tid")
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sessionFromRequest(r, sessionID, user, resourceID)
 	if sess == nil {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
@@ -465,7 +461,7 @@ func (s *Service) CompleteUpload(w http.ResponseWriter, r *http.Request) {
 	resourceID := r.PathValue("id")
 	sessionID := r.PathValue("sid")
 	tid := r.PathValue("tid")
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sessionFromRequest(r, sessionID, user, resourceID)
 	if sess == nil {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
@@ -589,7 +585,7 @@ func (s *Service) CancelUpload(w http.ResponseWriter, r *http.Request) {
 	resourceID := r.PathValue("id")
 	sessionID := r.PathValue("sid")
 	tid := r.PathValue("tid")
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sessionFromRequest(r, sessionID, user, resourceID)
 	if sess != nil {
 		sess.Touch()
 	}

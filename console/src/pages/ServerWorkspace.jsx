@@ -19,6 +19,8 @@ function friendlyServerOpsError(e) {
       return '主机指纹尚未确认，请管理员先探测并确认后再连接。';
     case 'SSH_AUTH_FAILED':
       return 'SSH 用户名或密码错误，请重试（不会退出 Mooncell 登录）。';
+    case 'PASSWORD_REQUIRED':
+      return e.message || '请输入 SSH 密码。';
     case 'SSH_AUTH_RATE_LIMITED':
       return '密码尝试过于频繁，请稍后再试。';
     case 'SESSION_LIMIT_REACHED':
@@ -52,6 +54,7 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
   const [fileWidth, setFileWidth] = React.useState(300);
   const [mobileTab, setMobileTab] = React.useState('terminal'); // terminal | files
   const dragRef = React.useRef(null);
+  const autoConnectRef = React.useRef(null);
 
   React.useEffect(() => {
     let alive = true;
@@ -63,8 +66,6 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
         setLoadErr(null);
         if (r.hostKeyStatus !== 'trusted') {
           setLoadErr('主机指纹未确认，请管理员先探测并确认后再连接');
-        } else {
-          setShowPw(true);
         }
       })
       .catch((e) => {
@@ -75,15 +76,6 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [resourceId]);
-
-  // 卸载时断开会话
-  React.useEffect(() => {
-    return () => {
-      if (sessionId && resourceId) {
-        deleteServerSession(resourceId, sessionId).catch(() => {});
-      }
-    };
-  }, [sessionId, resourceId]);
 
   const connect = async (password) => {
     setConnecting(true);
@@ -113,12 +105,19 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
     }
   };
 
+  // 首次进入优先复用活动 SSH 会话或当前 Mooncell 登录会话的内存凭据租约。
+  React.useEffect(() => {
+    if (!resource || resource.hostKeyStatus !== 'trusted' || sessionId || autoConnectRef.current === resourceId) return;
+    autoConnectRef.current = resourceId;
+    connect('');
+  }, [resource, resourceId, sessionId]);
+
   const disconnect = async () => {
     if (sessionId) {
       try { await deleteServerSession(resourceId, sessionId); } catch (_) {}
     }
     setSessionId(null);
-    setShowPw(true);
+    setShowPw(false);
     setConnErr(null);
     setHostKeyBlock(null);
   };
@@ -136,6 +135,7 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
   // 稳定回调：避免 TerminalPane 因父组件重渲染而重建 WebSocket/Shell
   const onTerminalDisconnected = React.useCallback(() => {
     setSessionId(null);
+    setShowPw(false);
     toast('会话已结束', { tone: 'warn' });
   }, []);
 
@@ -199,8 +199,8 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
           <Btn size="sm" variant="outline" onClick={disconnect}>断开</Btn>
         ) : (
           <Btn size="sm" variant="primary" icon="terminal"
-            onClick={() => { setConnErr(null); setShowPw(true); }}
-            disabled={!!hostKeyBlock || (!!loadErr && resource?.hostKeyStatus !== 'trusted')}>连接</Btn>
+            onClick={() => { setConnErr(null); connect(''); }}
+            disabled={connecting || !!hostKeyBlock || (!!loadErr && resource?.hostKeyStatus !== 'trusted')}>连接</Btn>
         )}
         <Btn size="sm" variant="ghost" icon={theme === 'dark' ? 'sun' : 'moon'} onClick={onTheme} />
         <Btn size="sm" variant="ghost" icon="logout" onClick={onLogout} title="退出登录" />
@@ -251,9 +251,9 @@ function ServerWorkspacePage({ resourceId, user, onLogout, theme, onTheme, zmode
             <EmptyState icon="shield" title="主机指纹异常" desc={hostKeyBlock}
               action={null} />
           ) : (
-            <EmptyState icon="terminal" title="输入 SSH 密码以连接"
-              desc="密码不会保存，仅用于本次会话"
-              action={<Btn variant="primary" onClick={() => setShowPw(true)} disabled={!!loadErr}>连接</Btn>} />
+            <EmptyState icon="terminal" title="连接服务器"
+              desc="优先使用当前 Mooncell 登录会话的内存凭据；凭据失效时再提示输入"
+              action={<Btn variant="primary" onClick={() => connect('')} disabled={connecting || !!loadErr}>连接</Btn>} />
           )}
         </div>
       </div>

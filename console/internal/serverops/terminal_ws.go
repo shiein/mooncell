@@ -23,6 +23,11 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, CodeUnauthorized, "未登录", false)
 		return
 	}
+	loginSessionID, ok := loginSessionFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, CodeUnauthorized, "登录会话无效", false)
+		return
+	}
 	resourceID := r.PathValue("id")
 	sessionID := r.PathValue("sid")
 
@@ -31,7 +36,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sess.GetForLogin(sessionID, user, resourceID, loginSessionID)
 	if sess == nil {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
@@ -214,7 +219,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 			case <-ptyDone:
 				return
 			case <-t.C:
-				if s.valid != nil && !s.valid(user) {
+				if s.valid != nil && !s.valid(loginSessionID) {
 					_ = writeWSJSON(ctx, conn, map[string]any{"type": "error", "code": CodeMooncellSessionExp, "message": "登录已过期"})
 					finish(true)
 					return
@@ -259,7 +264,7 @@ func (s *Service) TerminalWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		lastMCTouch.Store(now)
-		s.touch(user)
+		s.touch(loginSessionID)
 	}
 
 	writeDone := make(chan struct{})

@@ -64,6 +64,7 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 // 不可改角色。admin 账号的 appIds 写入无意义但允许(前端通常不展示)。
 func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 	target := strings.TrimSpace(r.PathValue("username"))
+	actor := a.sessionUser(r)
 	if target == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少用户名"})
 		return
@@ -131,11 +132,21 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, serverGrants, a.sessionUser(r), beforeCommit); err != nil {
+	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, serverGrants, actor, beforeCommit); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新用户失败: " + err.Error()})
 		return
 	}
-	a.store.appendAudit(a.sessionUser(r), "更新用户", target, "成功")
+	if strings.TrimSpace(body.Password) != "" {
+		// 改密后撤销该账号全部登录，并清除所有会话绑定的内存凭据。
+		if a.dataResSvc != nil {
+			a.dataResSvc.InvalidateAllForUser(target)
+		}
+		if a.serverOps != nil {
+			a.serverOps.InvalidateUser(target)
+		}
+		a.store.deleteUserSessions(target)
+	}
+	a.store.appendAudit(actor, "更新用户", target, "成功")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

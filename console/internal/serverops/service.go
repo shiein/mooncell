@@ -14,11 +14,11 @@ import (
 )
 
 // SessionValidator 校验 Mooncell 登录会话是否仍有效（由 consoleapp 注入）。
-// username 非空且 valid=true 表示 mc_sid 仍绑定该用户。
-type SessionValidator func(username string) bool
+// loginSessionID 非空且 valid=true 表示精确 mc_sid 会话仍有效。
+type SessionValidator func(loginSessionID string) bool
 
 // TouchSession 标记用户有主动活动（可节流后滑动续期）。
-type TouchSession func(username string)
+type TouchSession func(loginSessionID string)
 
 // Service 持有服务器运维模块的运行时依赖。
 type Service struct {
@@ -28,6 +28,7 @@ type Service struct {
 	valid SessionValidator
 	touch TouchSession
 	sess  *SessionManager
+	creds *credentialLeaseManager
 
 	// 密码失败限速：(user+"\x00"+resource+"\x00"+ip) → 时间戳列表。
 	authFailMu sync.Mutex
@@ -54,6 +55,7 @@ func NewService(db *sql.DB, cfg Config) *Service {
 		db:              db,
 		cfg:             cfg,
 		sess:            newSessionManager(),
+		creds:           newCredentialLeaseManager(),
 		authFails:       map[string][]time.Time{},
 		activeTransfers: map[string]string{},
 		transferLastAct: map[string]time.Time{},
@@ -119,6 +121,7 @@ func (s *Service) Close() {
 	}
 	close(s.stopCh)
 	s.sess.CloseAll()
+	s.creds.Close()
 	s.wg.Wait()
 }
 
@@ -128,16 +131,28 @@ func (s *Service) InvalidateUser(username string) {
 		return
 	}
 	s.sess.BumpUser(username)
+	s.creds.DeleteUser(username)
+}
+
+// InvalidateLoginSession 只终止指定 Mooncell 登录会话的 SSH/SFTP 与内存凭据租约。
+func (s *Service) InvalidateLoginSession(loginSessionID string) {
+	if loginSessionID == "" {
+		return
+	}
+	s.sess.BumpLoginSession(loginSessionID)
+	s.creds.DeleteLoginSession(loginSessionID)
 }
 
 // InvalidateUserResource 撤权后终止该用户在该资源上的会话。
 func (s *Service) InvalidateUserResource(username, resourceID string) {
 	s.sess.BumpGrant(username, resourceID)
+	s.creds.DeleteUserResource(username, resourceID)
 }
 
 // InvalidateResource 资源删除或连接参数变更后终止全部旧会话。
 func (s *Service) InvalidateResource(resourceID string) {
 	s.sess.BumpResource(resourceID)
+	s.creds.DeleteResource(resourceID)
 }
 
 func (s *Service) expireStaleTransfers() {

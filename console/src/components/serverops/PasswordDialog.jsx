@@ -1,4 +1,4 @@
-// SSH 密码对话框：密码只保存在本组件 state，连接结束立即清空。
+// SSH 密码对话框：浏览器侧只保存在本组件 state，提交后立即清空。
 // 禁止写入 URL、localStorage 或审计。
 import React from 'react';
 import { Btn, Field, Spinner, Dialog } from '../primitives.jsx';
@@ -35,7 +35,7 @@ export function PasswordDialog({ open, resource, busy, error, onConnect, onClose
         </Btn>
       </React.Fragment>}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <Field label="SSH 密码" hint="仅用于本次会话，不会保存">
+        <Field label="SSH 密码" hint="仅保存在当前 Mooncell 登录会话的 Console 内存中；退出或过期即清除">
           <input ref={inputRef} className="input" type="password" autoComplete="off"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

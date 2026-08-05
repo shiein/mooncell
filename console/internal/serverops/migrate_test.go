@@ -169,6 +169,25 @@ func TestSessionManagerGeneration(t *testing.T) {
 	}
 }
 
+func TestSessionManagerLoginSessionIsolation(t *testing.T) {
+	m := newSessionManager()
+	s := &Session{
+		ID: "ssh_login_a", ResourceID: "srv_a", Username: "alice", LoginSessionID: "login-a",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	m.Register(s)
+	if got := m.GetForLogin(s.ID, "alice", "srv_a", "login-a"); got != s {
+		t.Fatal("所属登录会话应能访问 SSH session")
+	}
+	if got := m.GetForLogin(s.ID, "alice", "srv_a", "login-b"); got != nil {
+		t.Fatal("同账号的另一个登录会话不得复用 SSH session")
+	}
+	m.BumpLoginSession("login-a")
+	if m.Count() != 0 {
+		t.Fatal("登录会话失效后应关闭其 SSH session")
+	}
+}
+
 func TestOverwriteColumnAndTransferInsert(t *testing.T) {
 	db := openTestDB(t)
 	tr := FileTransfer{

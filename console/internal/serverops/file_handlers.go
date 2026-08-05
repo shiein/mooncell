@@ -22,7 +22,7 @@ func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	resourceID := r.PathValue("id")
 	sessionID := r.PathValue("sid")
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sessionFromRequest(r, sessionID, user, resourceID)
 	if sess == nil {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
@@ -101,9 +101,7 @@ func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
 	})
 
 	sess.Touch()
-	if s.touch != nil {
-		s.touch(user)
-	}
+	s.touchLoginSessionFromRequest(r)
 	writeOK(w, FileListResponse{Path: absPath, Entries: out})
 }
 
@@ -117,7 +115,7 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	resourceID := r.PathValue("id")
 	sessionID := r.PathValue("sid")
-	sess := s.sess.Get(sessionID, user, resourceID)
+	sess := s.sessionFromRequest(r, sessionID, user, resourceID)
 	if sess == nil {
 		writeErr(w, http.StatusNotFound, CodeSessionClosed, "会话不存在或已结束", false)
 		return
@@ -221,9 +219,7 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 			if time.Since(lastTouch) >= 10*time.Second {
 				sess.Touch()
 				s.touchTransferSlot(dlID)
-				if s.touch != nil {
-					s.touch(user)
-				}
+				s.touchLoginSessionFromRequest(r)
 				lastTouch = time.Now()
 			}
 		}
@@ -248,9 +244,7 @@ func (s *Service) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		s.auditLog(user, "SFTP 下载", auditFileTarget(resName, "download", cleaned, size), "成功")
 	}
 	sess.Touch()
-	if s.touch != nil {
-		s.touch(user)
-	}
+	s.touchLoginSessionFromRequest(r)
 }
 
 // parseSingleRange 解析单区间 Range。返回 ok=false 表示应 416。

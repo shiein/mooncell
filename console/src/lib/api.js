@@ -60,6 +60,13 @@ async function getSession() {
   }
 }
 
+// 仅由真实用户交互调用；后台轮询不得续期登录会话。
+async function touchSession() {
+  try {
+    await fetch('/api/session/touch', { method: 'POST', credentials: 'same-origin' });
+  } catch (e) { /* 网络恢复后由下一次真实交互重试 */ }
+}
+
 // ---------- 用户管理(仅 admin)----------
 async function listUsers() {
   try {
@@ -521,7 +528,7 @@ async function consoleSelfUpdate(file, version, sha256) {
 }
 
 export {
-  login, logout, getSession,
+  login, logout, getSession, touchSession,
   listUsers, createUser, updateUser, deleteUser,
   listAgentNodes, addAgentNode, removeAgentNode, pingAgentNode,
   listAgentBinaries, uploadAgentBinary, updateAgentNode,

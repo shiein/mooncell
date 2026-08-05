@@ -69,17 +69,18 @@ func importDir() (string, error) {
 
 // ImportSession 是一个导入会话的内存状态。
 type ImportSession struct {
-	ID         string
-	ResourceID string
-	Username   string
-	FilePath   string     // 临时文件路径
-	FileName   string     // 原始文件名
-	Format     string     // csv 或 xlsx
-	Sheet      string     // XLSX 工作表名
-	HeaderRow  int        // 表头行号（0-based）
-	Preview    [][]string // 预览数据（含表头）
-	Columns    []string   // 文件列名（来自表头）
-	CreatedAt  time.Time
+	ID             string
+	ResourceID     string
+	Username       string
+	LoginSessionID string
+	FilePath       string     // 临时文件路径
+	FileName       string     // 原始文件名
+	Format         string     // csv 或 xlsx
+	Sheet          string     // XLSX 工作表名
+	HeaderRow      int        // 表头行号（0-based）
+	Preview        [][]string // 预览数据（含表头）
+	Columns        []string   // 文件列名（来自表头）
+	CreatedAt      time.Time
 	// inUse 为 true 时表示正在 execute，禁止并发二次执行（由 importMu 保护）。
 	inUse  bool
 	cancel context.CancelFunc // execute 的取消函数（由 importMu 保护）
@@ -132,6 +133,11 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
+	loginSessionID, ok := loginSessionFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "登录会话无效")
+		return
+	}
 	id := r.PathValue("id")
 	mode, err := UserAccessMode(s.db, user, role, id)
 	if err != nil {
@@ -174,7 +180,7 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.importSessions[sessionID] = &ImportSession{
-		ID: sessionID, ResourceID: id, Username: user, CreatedAt: time.Now(),
+		ID: sessionID, ResourceID: id, Username: user, LoginSessionID: loginSessionID, CreatedAt: time.Now(),
 	}
 	s.importMu.Unlock()
 
@@ -263,7 +269,7 @@ func (s *Service) ImportPreviewHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 解析预览
 	session := &ImportSession{
-		ID: sessionID, ResourceID: id, Username: user,
+		ID: sessionID, ResourceID: id, Username: user, LoginSessionID: loginSessionID,
 		FilePath: tmpPath, FileName: header.Filename,
 		Format: format, CreatedAt: time.Now(),
 	}
@@ -440,6 +446,11 @@ func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
+	loginSessionID, ok := loginSessionFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "登录会话无效")
+		return
+	}
 	id := r.PathValue("id")
 	mode, err := UserAccessMode(s.db, user, role, id)
 	if err != nil {
@@ -465,7 +476,7 @@ func (s *Service) ImportSelectSheetHandler(w http.ResponseWriter, r *http.Reques
 
 	s.importMu.Lock()
 	session, exists := s.importSessions[importID]
-	if !exists || session.ResourceID != id || session.Username != user {
+	if !exists || session.ResourceID != id || session.Username != user || session.LoginSessionID != loginSessionID {
 		s.importMu.Unlock()
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "导入会话不存在")
 		return
@@ -522,6 +533,11 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
+	loginSessionID, ok := loginSessionFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "登录会话无效")
+		return
+	}
 	id := r.PathValue("id")
 	importID := r.PathValue("importId")
 
@@ -542,7 +558,7 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	// 原子占用会话，防止同一 importId 并发 execute 双插
 	s.importMu.Lock()
 	session, exists := s.importSessions[importID]
-	if !exists || session.ResourceID != id || session.Username != user {
+	if !exists || session.ResourceID != id || session.Username != user || session.LoginSessionID != loginSessionID {
 		s.importMu.Unlock()
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "导入会话不存在")
 		return
@@ -611,9 +627,9 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "资源不存在")
 		return
 	}
-	db, err := s.pools.GetUserDB(res.ID, user)
+	db, err := s.pools.GetSessionDB(res.ID, loginSessionID)
 	if err != nil {
-		writeErr(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "当前数据库连接已关闭，请重新进入工作台")
+		writeErr(w, http.StatusPreconditionRequired, "PASSWORD_REQUIRED", "当前数据库连接已关闭，请重新进入工作台")
 		return
 	}
 	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))
@@ -938,12 +954,17 @@ func (s *Service) ImportDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
+	loginSessionID, ok := loginSessionFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "登录会话无效")
+		return
+	}
 	id := r.PathValue("id")
 	importID := r.PathValue("importId")
 
 	s.importMu.Lock()
 	session, exists := s.importSessions[importID]
-	if !exists || session.ResourceID != id || session.Username != user {
+	if !exists || session.ResourceID != id || session.Username != user || session.LoginSessionID != loginSessionID {
 		s.importMu.Unlock()
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "导入会话不存在")
 		return

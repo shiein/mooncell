@@ -20,32 +20,33 @@ func (e *APIError) Error() string { return e.Message }
 
 // 稳定错误码（设计文档 §17）。
 const (
-	CodeUnauthorized         = "UNAUTHORIZED"
-	CodeForbidden            = "FORBIDDEN"
-	CodeBadRequest           = "BAD_REQUEST"
-	CodeValidation           = "VALIDATION_ERROR"
-	CodeNotFound             = "SERVER_RESOURCE_NOT_FOUND"
-	CodeNameDuplicate        = "NAME_DUPLICATE"
-	CodeResourceChanged      = "RESOURCE_CHANGED"
-	CodeChunkOffsetMismatch  = "CHUNK_OFFSET_MISMATCH"
-	CodeRemoteTargetExists   = "REMOTE_TARGET_EXISTS"
-	CodeHostKeyMismatch      = "HOST_KEY_MISMATCH"
-	CodeHostKeyUnconfirmed   = "HOST_KEY_UNCONFIRMED"
-	CodeTransferTooLarge     = "TRANSFER_TOO_LARGE"
-	CodeSSHAuthFailed        = "SSH_AUTH_FAILED"
-	CodeRemotePartChanged    = "REMOTE_PART_CHANGED"
-	CodeAtomicReplaceUnsupp  = "ATOMIC_REPLACE_UNSUPPORTED"
-	CodeSessionLimit         = "SESSION_LIMIT_REACHED"
-	CodeTransferLimit        = "TRANSFER_LIMIT_REACHED"
-	CodeSSHAuthRateLimited   = "SSH_AUTH_RATE_LIMITED"
-	CodeSSHConnectionFailed  = "SSH_CONNECTION_FAILED"
-	CodeSSHConnectTimeout    = "SSH_CONNECT_TIMEOUT"
-	CodeSessionClosed        = "SESSION_CLOSED"
-	CodeClientTooSlow        = "CLIENT_TOO_SLOW"
-	CodeDBError              = "DB_ERROR"
-	CodeInternal             = "INTERNAL_ERROR"
-	CodeFeatureDisabled      = "FEATURE_DISABLED"
-	CodeMooncellSessionExp   = "MOONCELL_SESSION_EXPIRED"
+	CodeUnauthorized        = "UNAUTHORIZED"
+	CodeForbidden           = "FORBIDDEN"
+	CodeBadRequest          = "BAD_REQUEST"
+	CodeValidation          = "VALIDATION_ERROR"
+	CodeNotFound            = "SERVER_RESOURCE_NOT_FOUND"
+	CodeNameDuplicate       = "NAME_DUPLICATE"
+	CodeResourceChanged     = "RESOURCE_CHANGED"
+	CodeChunkOffsetMismatch = "CHUNK_OFFSET_MISMATCH"
+	CodeRemoteTargetExists  = "REMOTE_TARGET_EXISTS"
+	CodeHostKeyMismatch     = "HOST_KEY_MISMATCH"
+	CodeHostKeyUnconfirmed  = "HOST_KEY_UNCONFIRMED"
+	CodeTransferTooLarge    = "TRANSFER_TOO_LARGE"
+	CodeSSHAuthFailed       = "SSH_AUTH_FAILED"
+	CodePasswordRequired    = "PASSWORD_REQUIRED"
+	CodeRemotePartChanged   = "REMOTE_PART_CHANGED"
+	CodeAtomicReplaceUnsupp = "ATOMIC_REPLACE_UNSUPPORTED"
+	CodeSessionLimit        = "SESSION_LIMIT_REACHED"
+	CodeTransferLimit       = "TRANSFER_LIMIT_REACHED"
+	CodeSSHAuthRateLimited  = "SSH_AUTH_RATE_LIMITED"
+	CodeSSHConnectionFailed = "SSH_CONNECTION_FAILED"
+	CodeSSHConnectTimeout   = "SSH_CONNECT_TIMEOUT"
+	CodeSessionClosed       = "SESSION_CLOSED"
+	CodeClientTooSlow       = "CLIENT_TOO_SLOW"
+	CodeDBError             = "DB_ERROR"
+	CodeInternal            = "INTERNAL_ERROR"
+	CodeFeatureDisabled     = "FEATURE_DISABLED"
+	CodeMooncellSessionExp  = "MOONCELL_SESSION_EXPIRED"
 )
 
 func writeErr(w http.ResponseWriter, status int, code, msg string, retryable bool) {
@@ -103,6 +104,8 @@ func httpStatusForCode(code string) int {
 		return http.StatusNotFound
 	case CodeNameDuplicate, CodeResourceChanged, CodeChunkOffsetMismatch, CodeRemoteTargetExists:
 		return http.StatusConflict
+	case CodePasswordRequired:
+		return http.StatusPreconditionRequired
 	case CodeHostKeyMismatch:
 		return http.StatusPreconditionFailed
 	case CodeTransferTooLarge:

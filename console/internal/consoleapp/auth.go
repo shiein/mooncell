@@ -98,14 +98,9 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) logout(w http.ResponseWriter, r *http.Request) {
-	// 先解析用户，回滚其工作台事务并终止 SSH 会话后再删会话
-	if username, _, ok := a.currentUser(r); ok {
-		if a.dataResSvc != nil {
-			a.dataResSvc.InvalidateAllForUser(username)
-		}
-		if a.serverOps != nil {
-			a.serverOps.InvalidateUser(username)
-		}
+	// 只清理当前浏览器登录会话的工作台、连接池、SSH 会话与凭据租约。
+	if sess, _, ok := a.currentSession(r); ok {
+		a.invalidateLoginSession(sess.LeaseID)
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		a.store.deleteSession(c.Value)
@@ -122,31 +117,28 @@ func (a *api) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) session(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie(sessionCookie)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
-		return
-	}
-	username, ok := a.store.userByToken(c.Value)
+	sess, role, ok := a.currentSession(r)
 	if !ok {
-		// 会话过期：回滚该用户未完成的数据资源事务并终止 SSH
-		if username != "" {
-			if a.dataResSvc != nil {
-				a.dataResSvc.InvalidateAllForUser(username)
-			}
-			if a.serverOps != nil {
-				a.serverOps.InvalidateUser(username)
-			}
-		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 		return
 	}
 	// features.serverOperations 供前端 fail-closed 隐藏菜单
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user":     username,
-		"role":     a.store.userRole(username),
+		"user":     sess.Username,
+		"role":     role,
 		"features": a.featureFlags(),
 	})
+}
+
+// touchLoginSession 仅由前端真实用户交互触发。后台轮询只校验登录态，不再续期。
+func (a *api) touchLoginSession(w http.ResponseWriter, r *http.Request) {
+	sess, _, ok := a.currentSession(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
+		return
+	}
+	a.store.touchLeaseSession(sess.LeaseID)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // featureFlags 返回前端能力开关与相关客户端软限制。
@@ -165,36 +157,35 @@ func (a *api) featureFlags() map[string]any {
 // isAdmin 判定管理员。历史 operator/viewer 均视为普通用户(按 user_apps 授权)。
 func isAdmin(role string) bool { return role == "admin" }
 
-// isPassiveRequest 判断是否为后台轮询类请求(系统指标 2.5s / 应用状态 10s)。
-// 这类不是"用户动作",不触发会话滑动续期——否则开着页面挂机也永不闲置超时,违背"闲置 1h 退出"。
-func isPassiveRequest(r *http.Request) bool {
-	p := r.URL.Path
-	return p == "/api/agent/system" || strings.HasSuffix(p, "/status")
+func (a *api) invalidateLoginSession(leaseID string) {
+	if leaseID == "" {
+		return
+	}
+	if a.dataResSvc != nil {
+		a.dataResSvc.InvalidateLoginSession(leaseID)
+	}
+	if a.serverOps != nil {
+		a.serverOps.InvalidateLoginSession(leaseID)
+	}
 }
 
-// currentUser 从会话 cookie 取用户名与角色;非轮询请求(=用户动作)顺带滑动续期。
-func (a *api) currentUser(r *http.Request) (string, string, bool) {
+// currentSession 校验 mc_sid 并返回精确登录会话；普通 API 请求不会自动续期。
+func (a *api) currentSession(r *http.Request) (loginSession, string, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return "", "", false
+		return loginSession{}, "", false
 	}
-	u, ok := a.store.userByToken(c.Value)
+	sess, ok := a.store.sessionByToken(c.Value)
 	if !ok {
-		// 闲置/绝对过期：不得留下未完成的工作台事务或 SSH 会话
-		if u != "" {
-			if a.dataResSvc != nil {
-				a.dataResSvc.InvalidateAllForUser(u)
-			}
-			if a.serverOps != nil {
-				a.serverOps.InvalidateUser(u)
-			}
-		}
-		return "", "", false
+		a.invalidateLoginSession(sess.LeaseID)
+		return loginSession{}, "", false
 	}
-	if !isPassiveRequest(r) {
-		a.store.touchSession(c.Value)
-	}
-	return u, a.store.userRole(u), true
+	return sess, a.store.userRole(sess.Username), true
+}
+
+func (a *api) currentUser(r *http.Request) (string, string, bool) {
+	sess, role, ok := a.currentSession(r)
+	return sess.Username, role, ok
 }
 
 // requireRole 包裹需要特定角色的接口:未登录 401,角色不符 403。
@@ -260,23 +251,23 @@ func (a *api) canAccessApp(user, role, appID string) bool {
 // 交由 dataresource handler 做细粒度权限校验（admin 管理资源、普通用户按授权访问）。
 func (a *api) requireAuthDR(next func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, role, ok := a.currentUser(r)
+		sess, role, ok := a.currentSession(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 			return
 		}
-		next(w, dataresource.WithUser(r, user, role))
+		next(w, dataresource.WithSession(r, sess.Username, role, sess.LeaseID))
 	}
 }
 
 // requireAuthSO 是服务器运维模块的认证 wrapper：注入 serverops Principal。
 func (a *api) requireAuthSO(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, role, ok := a.currentUser(r)
+		sess, role, ok := a.currentSession(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 			return
 		}
-		next(w, serverops.WithUser(r, user, role))
+		next(w, serverops.WithSession(r, sess.Username, role, sess.LeaseID))
 	}
 }

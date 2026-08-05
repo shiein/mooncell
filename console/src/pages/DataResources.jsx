@@ -130,6 +130,23 @@ function DataResourcesPage({ onOpenWorkspace }) {
   const [edit, setEdit] = React.useState(null); // null | {} create | resource edit
   const [delRes, setDelRes] = React.useState(null);
   const [passwordAction, setPasswordAction] = React.useState(null); // {resource, mode: connect|test}
+  const [connectingResourceId, setConnectingResourceId] = React.useState(null);
+
+  const openResource = async (resource) => {
+    setConnectingResourceId(resource.id);
+    try {
+      const workspace = await createWorkspace(resource.id, '');
+      onOpenWorkspace(resource, workspace);
+    } catch (e) {
+      if (e && e.code === 'PASSWORD_REQUIRED') {
+        setPasswordAction({ resource, mode: 'connect' });
+      } else {
+        toast(e.message || '连接失败', { tone: 'error' });
+      }
+    } finally {
+      setConnectingResourceId(null);
+    }
+  };
 
   React.useEffect(() => {
     listDrivers().then(setDrivers).catch(() => setDrivers([]));
@@ -174,7 +191,8 @@ function DataResourcesPage({ onOpenWorkspace }) {
                 <td style={{ fontSize: 12.5, color: 'var(--muted-fg)' }}>{r.lastTestInfo || '未测试'}</td>
                 <td>
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                    <Btn size="sm" variant="primary" onClick={() => setPasswordAction({ resource: r, mode: 'connect' })}>进入</Btn>
+                    <Btn size="sm" variant="primary" disabled={connectingResourceId === r.id}
+                      onClick={() => openResource(r)}>{connectingResourceId === r.id ? <Spinner size={12} /> : '进入'}</Btn>
                     {isAdmin ? (
                       <React.Fragment>
                         <Btn size="sm" variant="ghost" icon="activity" title="测试连接" onClick={() => setPasswordAction({ resource: r, mode: 'test' })} />
@@ -516,7 +534,7 @@ function ConnectionPasswordDialog({ action, open, onClose, onConnected, onTested
   return (
     <Dialog open={open} onClose={onClose} width={420}
       title={`${isTest ? '测试连接' : '连接数据库'} · ${action.resource.name}`}
-      desc="密码只用于本次连接，服务端不写入数据库；离开工作台后即关闭连接"
+      desc="密码仅保存在当前 Mooncell 登录会话的 Console 内存中；退出、过期或服务重启即清除"
       foot={<React.Fragment>
         <Btn variant="ghost" onClick={onClose} disabled={busy}>取消</Btn>
         <Btn variant="primary" icon={isTest ? 'activity' : 'check'} onClick={submit} disabled={busy}>

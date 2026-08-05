@@ -48,7 +48,7 @@ port = 8787
 path = "mooncell.db"    # sqlite 文件路径,首次运行自动创建
 
 [session]
-ttl_hours = 168         # 会话有效期(小时),168 = 7 天
+ttl_hours = 1           # 闲置超时(小时);真实交互滑动续期,绝对生命周期固定 3 小时;浏览器关闭后 Session Cookie 清除
 
 [admin]
 username = "admin"
@@ -71,3 +71,5 @@ max_upload_mb = 1024    # 部署制品上传传输层硬上限(MB),超限 413
 ```
 
 配置文件缺失或字段缺省时使用内置默认值(同上),可只覆盖部分字段。多 Agent 在运行时由「Agent 管理」页注册(存 SQLite),应用按 `agentId` 路由。
+
+登录会话使用无 `Expires/MaxAge` 的 HttpOnly Session Cookie；普通关闭浏览器后重新打开需要重新登录。数据库与 SSH 密码首次连接时输入，只绑定当前 Mooncell 登录会话并保存在 Console 进程内存中；离开工作台可免密重连，退出、过期、改密、撤权、资源变更或 Console 重启会立即清除对应租约。

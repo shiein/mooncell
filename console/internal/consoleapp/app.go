@@ -74,11 +74,14 @@ func Run(distFS fs.FS, version string, args []string) {
 	}
 	a := &api{store: store, agent: newAgentClient(cfg.Agent), clients: map[string]*agentClient{}, cabinetDir: cfg.Cabinet.Dir, anonUpload: cfg.Cabinet.AnonUpload, cabinetMaxBytes: cabinetMaxBytes, agentBinDir: agentBinDir, demoSeed: cfg.Demo.Seed, maxUpload: maxUpload, uploads: map[string]*uploadSession{}, busy: map[string]int{}, appMu: map[string]*sync.Mutex{}, appEpoch: map[string]uint64{}, requireTLSAgents: cfg.Security.RequireTLSAgents}
 
-	// 数据资源模块服务：密码由用户每次连接输入，仅保存在当前内存连接中。
+	// 数据资源模块服务：密码首次连接输入，仅保存在当前 Mooncell 登录会话的内存连接中。
 	dataResSvc := dataresource.NewService(store.db)
 	defer dataResSvc.Close()
 	a.dataResSvc = dataResSvc
 	dataResSvc.SetImportMaxMB(cfg.DataResource.ImportMaxMB)
+	dataResSvc.SetSessionValidator(func(loginSessionID string) bool {
+		return store.loginSessionActive(loginSessionID)
+	})
 	dataResSvc.CleanupOrphanImportsOnStart()
 	// 注入审计回调：复用现有审计系统，数据资源操作也写入审计日志。
 	dataResSvc.SetAuditFunc(func(user, action, target, result string) {
@@ -146,22 +149,34 @@ func Run(distFS fs.FS, version string, args []string) {
 	serverOpsSvc.SetAuditFunc(func(user, action, target, result string) {
 		a.store.appendAudit(user, action, target, result)
 	})
-	serverOpsSvc.SetSessionValidator(func(username string) bool {
-		// 检查该用户是否仍有未过期会话（任意 token 即可证明登录有效）。
-		return a.store.userHasActiveSession(username)
+	serverOpsSvc.SetSessionValidator(func(loginSessionID string) bool {
+		return a.store.loginSessionActive(loginSessionID)
 	})
-	serverOpsSvc.SetTouchSession(func(username string) {
-		a.store.touchUserSessions(username)
+	serverOpsSvc.SetTouchSession(func(loginSessionID string) {
+		a.store.touchLeaseSession(loginSessionID)
 	})
 	if soCfg.Enabled {
 		serverOpsSvc.Start()
 		log.Printf("[serverops] 服务器运维功能已启用")
 	}
 
+	// 登录会话到期时主动清理与其绑定的数据库/SSH 内存凭据租约；不依赖下一次请求触发。
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			for _, sess := range store.reapExpiredSessions(time.Now()) {
+				dataResSvc.InvalidateLoginSession(sess.LeaseID)
+				serverOpsSvc.InvalidateLoginSession(sess.LeaseID)
+			}
+		}
+	}()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.login)
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("GET /api/session", a.session)
+	mux.HandleFunc("POST /api/session/touch", a.touchLoginSession)
 
 	// RBAC:
 	// - admin:全量

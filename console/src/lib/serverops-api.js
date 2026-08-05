@@ -1,5 +1,5 @@
 // 服务器运维 API 客户端。
-// 密码仅在 createSession 调用时经内存传递，不得写入 URL / localStorage。
+// 密码只经 createSession 传给 Console 的会话内存租约，不得写入 URL / localStorage。
 
 async function jsonFetch(url, opts = {}) {
   const r = await fetch(url, { credentials: 'same-origin', ...opts });
@@ -64,8 +64,8 @@ export async function confirmHostKey(id, { algorithm, sha256, updatedAt }) {
 }
 
 /**
- * 创建 SSH 会话。password 只在本函数栈内使用，调用方须在结束后清空 state。
- * SSH 认证失败返回 422，不会触发全局 401 退出。
+ * 创建或复用 SSH 会话。password 为空时由服务端尝试当前登录会话的内存凭据租约。
+ * PASSWORD_REQUIRED 返回 428，不会触发全局 401 退出。
  */
 export async function createServerSession(resourceId, { password, cols, rows }) {
   return jsonFetch(`/api/server-resources/${encodeURIComponent(resourceId)}/sessions`, {

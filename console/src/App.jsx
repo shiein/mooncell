@@ -18,7 +18,7 @@ import { DataResourcesPage } from './pages/DataResources.jsx';
 import { DataWorkspacePage } from './pages/DataWorkspace.jsx';
 import { ServerResourcesPage } from './pages/ServerResources.jsx';
 import { ServerWorkspacePage } from './pages/ServerWorkspace.jsx';
-import { logout as apiLogout, getSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setCabinetFilePublic, setAppLifecycle } from './lib/api.js';
+import { logout as apiLogout, getSession, touchSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setCabinetFilePublic, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -135,6 +135,23 @@ function App() {
       });
     });
   }, [resetSessionRoute]);
+
+  // 只让真实交互滑动续期；5 秒数据轮询、状态查询和其它后台请求只校验会话。
+  React.useEffect(() => {
+    if (!session) return;
+    let lastTouch = 0;
+    const onActivity = () => {
+      const now = Date.now();
+      if (now - lastTouch < 60_000) return;
+      lastTouch = now;
+      touchSession();
+    };
+    const events = ['pointerdown', 'keydown', 'wheel', 'touchstart'];
+    for (const event of events) window.addEventListener(event, onActivity, { capture: true, passive: true });
+    return () => {
+      for (const event of events) window.removeEventListener(event, onActivity, { capture: true });
+    };
+  }, [session]);
 
   // 会话/角色就绪后同步钳制(含 localStorage 里的 admin-only 旧路由)。
   React.useEffect(() => {

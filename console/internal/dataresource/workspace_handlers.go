@@ -13,6 +13,7 @@ package dataresource
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -40,7 +41,8 @@ func (s *Service) resolveWorkspaceAccess(w http.ResponseWriter, r *http.Request,
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return nil, "", false
 	}
-	if ws.Username != user {
+	loginSessionID, hasSession := loginSessionFromCtx(r)
+	if !hasSession || ws.Username != user || ws.LoginSessionID != loginSessionID {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
 		return nil, "", false
 	}
@@ -82,11 +84,16 @@ func (s *Service) CreateWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
+	loginSessionID, ok := loginSessionFromCtx(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "登录会话无效")
+		return
+	}
 	var body struct {
 		Password string `json:"password"`
 	}
-	if err := jsonDecodeBody(w, r, &body); err != nil || body.Password == "" {
-		writeErr(w, http.StatusBadRequest, "PASSWORD_REQUIRED", "请输入数据库密码")
+	if err := jsonDecodeBody(w, r, &body); err != nil {
+		writeJSONBodyError(w, err)
 		return
 	}
 	res, found, err := GetDataResource(s.db, id)
@@ -112,24 +119,69 @@ func (s *Service) CreateWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer s.pools.EndOperation(id)
-	// 同一用户重新连接前先关闭旧工作台和旧内存连接，保证新密码确实生效。
-	s.InvalidateUserResource(user, id)
+	if body.Password != "" {
+		// 显式输入新密码只替换当前登录会话的租约，不影响同账号其它浏览器。
+		s.InvalidateLoginSessionResource(loginSessionID, id)
+	}
+	generation := s.snapshotAccessGeneration(user, loginSessionID, id)
 	ctx, cancel := context.WithTimeout(r.Context(), testTimeout)
 	defer cancel()
-	db, err := s.pools.ConnectUserDB(ctx, res, user, body.Password)
-	if err != nil {
-		code := classifyConnError(err)
-		writeErr(w, http.StatusBadRequest, code, formatConnError(code, err))
-		return
+	var db *sql.DB
+	if body.Password != "" {
+		db, err = s.pools.ConnectSessionDBIf(ctx, res, user, loginSessionID, body.Password, func() bool {
+			return s.accessGenerationCurrent(generation, user, loginSessionID, id)
+		})
+		if err != nil {
+			if errors.Is(err, ErrConnectionLeaseStale) {
+				writeErr(w, http.StatusConflict, "SESSION_STATE_CHANGED", err.Error())
+				return
+			}
+			code := classifyConnError(err)
+			writeErr(w, http.StatusBadRequest, code, formatConnError(code, err))
+			return
+		}
+	} else {
+		db, err = s.pools.GetSessionDB(id, loginSessionID)
+		if err != nil {
+			writeErr(w, http.StatusPreconditionRequired, "PASSWORD_REQUIRED", "请输入数据库密码")
+			return
+		}
+		if err := db.PingContext(ctx); err != nil {
+			s.pools.CloseSessionDB(id, loginSessionID)
+			writeErr(w, http.StatusPreconditionRequired, "PASSWORD_REQUIRED", "数据库连接已失效，请重新输入密码")
+			return
+		}
 	}
 	adapter, err := NewAdapter(db, res.DBType, BoundSchema(res))
 	if err != nil {
-		s.pools.CloseUserDB(id, user)
+		s.pools.CloseSessionDB(id, loginSessionID)
 		writeErr(w, http.StatusInternalServerError, "ADAPTER_ERROR", "创建适配器失败")
 		return
 	}
+	if s.valid != nil && !s.valid(loginSessionID) {
+		s.pools.CloseSessionDB(id, loginSessionID)
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "登录会话已失效")
+		return
+	}
+	// 外部连接可能耗时数秒；发布工作台前重新读取授权并以代际锁封住 logout/撤权竞态。
+	mode, err = UserAccessMode(s.db, user, role, id)
+	if err != nil {
+		s.pools.CloseSessionDB(id, loginSessionID)
+		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "读取资源授权失败")
+		return
+	}
+	if mode == "" {
+		s.pools.CloseSessionDB(id, loginSessionID)
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权访问该资源")
+		return
+	}
 	// 仅 AccessRead 标记为只读工作台；admin/write 可写
-	ws := s.workspaces.CreateWorkspace(id, user, adapter, mode == AccessRead)
+	ws, registered := s.createWorkspaceIfCurrent(generation, id, user, loginSessionID, adapter, mode == AccessRead)
+	if !registered {
+		s.pools.CloseSessionDB(id, loginSessionID)
+		writeErr(w, http.StatusConflict, "SESSION_STATE_CHANGED", "登录会话或授权已变更，请重试")
+		return
+	}
 	writeOK(w, map[string]any{
 		"workspaceId": ws.ID,
 		"autoCommit":  ws.AutoCommit,
@@ -551,7 +603,8 @@ func (s *Service) DeleteWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "未登录")
 		return
 	}
-	if ws.Username != user {
+	loginSessionID, hasSession := loginSessionFromCtx(r)
+	if !hasSession || ws.Username != user || ws.LoginSessionID != loginSessionID {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "无权操作他人工作台")
 		return
 	}

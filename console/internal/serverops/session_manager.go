@@ -13,22 +13,24 @@ import (
 )
 
 // Session 是一次用户到远端的运行时 SSH 连接（含可选 SFTP 子系统）。
-// 密码在握手后不再持有。
+// Session 本身不持有密码；可重连凭据由独立的登录会话内存租约管理。
 type Session struct {
-	ID           string
-	ResourceID   string
-	Username     string // Mooncell 用户
-	SSHUser      string
-	Host         string
-	Port         int
-	CreatedAt    time.Time
-	ExpiresAt    time.Time // 绝对过期（max session hours）
-	IdleTimeout  time.Duration
+	ID             string
+	ResourceID     string
+	Username       string // Mooncell 用户
+	LoginSessionID string // 精确 Mooncell 登录会话的不可逆标识
+	SSHUser        string
+	Host           string
+	Port           int
+	CreatedAt      time.Time
+	ExpiresAt      time.Time // 绝对过期（max session hours）
+	IdleTimeout    time.Duration
 	// 创建会话时客户端声明的 PTY 尺寸，terminal WS 首帧使用。
-	InitialCols int
-	InitialRows int
-	ResourceGen  uint64 // 注册时资源代际
-	UserGrantGen uint64 // 注册时 (user, resource) 授权代际
+	InitialCols     int
+	InitialRows     int
+	ResourceGen     uint64 // 注册时资源代际
+	UserGrantGen    uint64 // 注册时 (user, resource) 授权代际
+	LoginSessionGen uint64 // 注册时 Mooncell 登录会话代际
 
 	// lastActivityUnix 最后主动活动（输入/resize/SFTP/创建）；idle 回收依据。
 	lastActivityUnix atomic.Int64
@@ -70,6 +72,9 @@ type SessionManager struct {
 	// userGen[username]：logout / 删用户时递增，使该用户全部会话失效。
 	userGen map[string]uint64
 
+	// loginSessionGen[loginSessionID]：单个浏览器登录退出/过期时递增。
+	loginSessionGen map[string]uint64
+
 	// 会话创建时快照的用户代际。
 	sessionUserGen map[string]uint64
 
@@ -80,12 +85,13 @@ type SessionManager struct {
 
 func newSessionManager() *SessionManager {
 	return &SessionManager{
-		sessions:       map[string]*Session{},
-		resourceGen:    map[string]uint64{},
-		grantGen:       map[string]uint64{},
-		userGen:        map[string]uint64{},
-		sessionUserGen: map[string]uint64{},
-		pendingByUser:  map[string]int{},
+		sessions:        map[string]*Session{},
+		resourceGen:     map[string]uint64{},
+		grantGen:        map[string]uint64{},
+		userGen:         map[string]uint64{},
+		loginSessionGen: map[string]uint64{},
+		sessionUserGen:  map[string]uint64{},
+		pendingByUser:   map[string]int{},
 	}
 }
 
@@ -112,6 +118,12 @@ func (m *SessionManager) UserGeneration(username string) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.userGen[username]
+}
+
+func (m *SessionManager) LoginSessionGeneration(loginSessionID string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.loginSessionGen[loginSessionID]
 }
 
 // BumpResource 递增资源代际并关闭该资源全部活动会话。
@@ -153,6 +165,22 @@ func (m *SessionManager) BumpUser(username string) {
 	var toClose []*Session
 	for _, s := range m.sessions {
 		if s.Username == username {
+			toClose = append(toClose, s)
+		}
+	}
+	m.mu.Unlock()
+	for _, s := range toClose {
+		s.Close()
+	}
+}
+
+// BumpLoginSession 递增精确登录会话代际并关闭其全部 SSH 会话。
+func (m *SessionManager) BumpLoginSession(loginSessionID string) {
+	m.mu.Lock()
+	m.loginSessionGen[loginSessionID]++
+	var toClose []*Session
+	for _, s := range m.sessions {
+		if s.LoginSessionID == loginSessionID {
 			toClose = append(toClose, s)
 		}
 	}
@@ -221,17 +249,24 @@ func (m *SessionManager) releaseReservationLocked(username string) {
 	m.pendingTotal--
 }
 
-// RegisterReserved 将握手占位原子转换为活动会话。
-func (m *SessionManager) RegisterReserved(s *Session) {
+// RegisterReserved 将握手占位原子转换为活动会话，并在同一锁内复核全部失效代际。
+func (m *SessionManager) RegisterReserved(s *Session, userGen uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.releaseReservationLocked(s.Username)
+	if m.resourceGen[s.ResourceID] != s.ResourceGen ||
+		m.grantGen[grantKey(s.Username, s.ResourceID)] != s.UserGrantGen ||
+		m.userGen[s.Username] != userGen ||
+		m.loginSessionGen[s.LoginSessionID] != s.LoginSessionGen {
+		return false
+	}
 	s.mgr = m
 	if s.lastActivityUnix.Load() == 0 {
 		s.lastActivityUnix.Store(time.Now().Unix())
 	}
 	m.sessions[s.ID] = s
-	m.sessionUserGen[s.ID] = m.userGen[s.Username]
+	m.sessionUserGen[s.ID] = userGen
+	return true
 }
 
 // Register 仅供无需握手占位的内部测试使用。
@@ -256,13 +291,22 @@ func (m *SessionManager) Unregister(id string) {
 
 // Get 按 ID 取会话；校验 owner、代际、绝对过期与 idle；不一致则关闭并返回 nil。
 func (m *SessionManager) Get(sessionID, username, resourceID string) *Session {
+	return m.get(sessionID, username, resourceID, "", false)
+}
+
+// GetForLogin 在 owner/resource 基础上校验精确 Mooncell 登录会话，阻止同账号跨浏览器复用 sid。
+func (m *SessionManager) GetForLogin(sessionID, username, resourceID, loginSessionID string) *Session {
+	return m.get(sessionID, username, resourceID, loginSessionID, true)
+}
+
+func (m *SessionManager) get(sessionID, username, resourceID, loginSessionID string, enforceLogin bool) *Session {
 	m.mu.Lock()
 	s := m.sessions[sessionID]
 	if s == nil {
 		m.mu.Unlock()
 		return nil
 	}
-	if s.Username != username || s.ResourceID != resourceID {
+	if s.Username != username || s.ResourceID != resourceID || (enforceLogin && s.LoginSessionID != loginSessionID) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -270,8 +314,10 @@ func (m *SessionManager) Get(sessionID, username, resourceID string) *Session {
 	rg := m.resourceGen[resourceID]
 	gg := m.grantGen[grantKey(username, resourceID)]
 	ug := m.userGen[username]
+	lg := m.loginSessionGen[s.LoginSessionID]
 	sug := m.sessionUserGen[sessionID]
-	stale := s.ResourceGen != rg || s.UserGrantGen != gg || sug != ug || s.closed.Load()
+	stale := s.ResourceGen != rg || s.UserGrantGen != gg || sug != ug ||
+		s.LoginSessionGen != lg || s.closed.Load()
 	if stale {
 		m.mu.Unlock()
 		s.Close()
@@ -284,6 +330,22 @@ func (m *SessionManager) Get(sessionID, username, resourceID string) *Session {
 	}
 	m.mu.Unlock()
 	return s
+}
+
+func (m *SessionManager) FindReusable(username, resourceID, loginSessionID string) *Session {
+	m.mu.Lock()
+	var found *Session
+	for _, s := range m.sessions {
+		if s.Username == username && s.ResourceID == resourceID && s.LoginSessionID == loginSessionID {
+			found = s
+			break
+		}
+	}
+	m.mu.Unlock()
+	if found == nil {
+		return nil
+	}
+	return m.GetForLogin(found.ID, username, resourceID, loginSessionID)
 }
 
 // ReapTimedOut 关闭所有绝对过期或 idle 超时的会话，返回关闭数量。

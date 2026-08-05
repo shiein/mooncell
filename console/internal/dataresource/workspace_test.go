@@ -275,6 +275,29 @@ func TestCancelWorkspaceHandlerUnblocksExecute(t *testing.T) {
 	}
 }
 
+func TestWorkspaceClosePreservesSessionPoolUntilLoginInvalidation(t *testing.T) {
+	pool := NewPoolManager()
+	db, err := sql.Open("sqlite", "file:workspace-lease?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.pools[sessionPoolKey("res-lease", "login-a")] = poolEntry{
+		db: db, resourceID: "res-lease", username: "alice", loginSessionID: "login-a",
+	}
+	wm := NewWorkspaceManager(pool)
+	ws := wm.CreateWorkspaceForSession("res-lease", "alice", "login-a", &testSQLAdapter{db: db}, false)
+	wm.DeleteWorkspace(ws.ID)
+	if _, err := pool.GetSessionDB("res-lease", "login-a"); err != nil {
+		t.Fatal("离开工作台不应清除当前登录会话的内存连接租约")
+	}
+
+	svc := &Service{pools: pool, workspaces: wm, importSessions: map[string]*ImportSession{}}
+	svc.InvalidateLoginSession("login-a")
+	if _, err := pool.GetSessionDB("res-lease", "login-a"); err == nil {
+		t.Fatal("登录会话失效后必须关闭内存连接租约")
+	}
+}
+
 func TestDeleteWorkspaceIfIdleRechecksCurrentActivity(t *testing.T) {
 	wm := NewWorkspaceManager(NewPoolManager())
 	ws := wm.CreateWorkspace("res-idle", "alice", &blockingAdapter{started: make(chan struct{})}, false)

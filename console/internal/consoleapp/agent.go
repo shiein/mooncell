@@ -136,17 +136,9 @@ func (c *agentClient) del(path string) (int, []byte, error) {
 // requireAuth 包裹需要登录态的接口:校验会话 cookie,未登录返回 401。
 func (a *api) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie(sessionCookie)
-		if err != nil {
+		if _, _, ok := a.currentSession(r); !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 			return
-		}
-		if _, ok := a.store.userByToken(c.Value); !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
-			return
-		}
-		if !isPassiveRequest(r) {
-			a.store.touchSession(c.Value)
 		}
 		next(w, r)
 	}
