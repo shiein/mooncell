@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mooncell/console/internal/dataresource"
+	"mooncell/console/internal/etl"
 	"mooncell/console/internal/serverops"
 )
 
@@ -160,6 +161,25 @@ func Run(distFS fs.FS, version string, args []string) {
 		log.Printf("[serverops] 服务器运维功能已启用")
 	}
 
+	// 数据集成：独立模块（连接、转换、作业、调度），与其它业务无数据耦合。
+	if cfg.ETL.Enabled {
+		etlSvc, err := etl.New(store.db, cfg.Database.Path, etl.Config{
+			Enabled: true, KeyFile: cfg.ETL.KeyFile, MaxConcurrentRuns: cfg.ETL.MaxConcurrentRuns,
+			RunLogLimit: cfg.ETL.RunLogLimit, RetentionDays: cfg.ETL.RetentionDays,
+			KeepPerDefinition: cfg.ETL.KeepPerDefinition, TempDir: cfg.ETL.TempDir,
+		})
+		if err != nil {
+			log.Fatalf("[etl] 初始化失败: %v", err)
+		}
+		defer etlSvc.Close()
+		etlSvc.SetAuditFunc(func(user, action, target, result string) {
+			a.store.appendAudit(user, action, target, result)
+		})
+		etlSvc.Start()
+		a.etl = etlSvc
+		log.Printf("[etl] 数据集成已启用")
+	}
+
 	// 登录会话到期时主动清理与其绑定的数据库/SSH 内存凭据租约；不依赖下一次请求触发。
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -266,6 +286,11 @@ func Run(distFS fs.FS, version string, args []string) {
 	if soCfg.Enabled {
 		soAuth := a.requireAuthSO
 		serverOpsSvc.RegisterRoutes(mux, soAuth)
+	}
+
+	// 数据集成:仅 admin(handler 内无细粒度授权,v1 全量)
+	if a.etl != nil {
+		a.etl.RegisterRoutes(mux, a.requireAdminETL)
 	}
 
 	// 多 Agent 管理:仅 admin

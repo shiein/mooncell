@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mooncell/console/internal/dataresource"
+	"mooncell/console/internal/etl"
 	"mooncell/console/internal/serverops"
 )
 
@@ -40,6 +41,7 @@ type api struct {
 	selfUpdateMu     sync.Mutex            // Console 自更新全局串行:固定临时路径 <exe>.new 不能被并发推送互相踩
 	dataResSvc       *dataresource.Service // 数据资源模块服务（工作台事务回滚等）
 	serverOps        *serverops.Service    // 服务器运维（SSH/SFTP）；nil 表示未启用
+	etl              *etl.Service          // 数据集成；nil 表示未启用
 }
 
 func randomToken() string {
@@ -147,6 +149,7 @@ func (a *api) featureFlags() map[string]any {
 	enabled := a.serverOps != nil && a.serverOps.Enabled()
 	out := map[string]any{
 		"serverOperations": enabled,
+		"etl":              a.etl != nil,
 	}
 	if a.serverOps != nil {
 		out["zmodemMaxTransferMB"] = a.serverOps.Config().ZmodemMaxTransferMB
@@ -257,6 +260,22 @@ func (a *api) requireAuthDR(next func(http.ResponseWriter, *http.Request)) http.
 			return
 		}
 		next(w, dataresource.WithSession(r, sess.Username, role, sess.LeaseID))
+	}
+}
+
+// requireAdminETL 是数据集成模块的认证 wrapper：v1 仅管理员可用，并注入用户名供审计/归属。
+func (a *api) requireAdminETL(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, role, ok := a.currentUser(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
+			return
+		}
+		if !isAdmin(role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "权限不足:数据集成仅管理员可用"})
+			return
+		}
+		next(w, etl.WithUser(r, user))
 	}
 }
 

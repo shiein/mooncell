@@ -12,6 +12,7 @@ import (
 	_ "modernc.org/sqlite" // 纯 Go sqlite 驱动,无 CGO,利于单二进制
 
 	"mooncell/console/internal/dataresource"
+	"mooncell/console/internal/etl"
 	"mooncell/console/internal/serverops"
 )
 
@@ -114,6 +115,10 @@ func openDB(cfg *Config) *Store {
 	// 服务器运维表无条件迁移（feature flag 只控制路由/运行时，不控制 schema）。
 	if err := serverops.Migrate(db); err != nil {
 		log.Fatalf("[db] 服务器运维迁移失败: %v", err)
+	}
+	// 数据集成表无条件迁移（[etl].enabled 只控制服务与路由）。
+	if err := etl.Migrate(db); err != nil {
+		log.Fatalf("[db] 数据集成迁移失败: %v", err)
 	}
 	return store
 }

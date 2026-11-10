@@ -28,6 +28,19 @@ type Config struct {
 	Security         SecurityConfig         `toml:"security"`
 	DataResource     DataResourceConfig     `toml:"data_resource"`
 	ServerOperations ServerOperationsConfig `toml:"server_operations"`
+	ETL              ETLConfig              `toml:"etl"`
+}
+
+// ETLConfig 对应 [etl]：数据集成模块（转换 / 作业 / 调度）。仅管理员可见。
+// 连接密码用独立密钥文件加密落库（默认与数据库同目录 mooncell-etl.key），须与数据库一起备份。
+type ETLConfig struct {
+	Enabled           bool   `toml:"enabled"`
+	KeyFile           string `toml:"key_file"`
+	MaxConcurrentRuns int    `toml:"max_concurrent_runs"`
+	RunLogLimit       int    `toml:"run_log_limit"`
+	RetentionDays     int    `toml:"retention_days"`
+	KeepPerDefinition int    `toml:"keep_per_definition"`
+	TempDir           string `toml:"temp_dir"`
 }
 
 // ServerOperationsConfig 对应 [server_operations]：远程 Linux SSH/SFTP 运维。
@@ -148,6 +161,7 @@ func loadConfig(path string) *Config {
 		Audit:          AuditConfig{Keep: 5000},         // 审计保留最近 5000 条,每小时裁剪
 		Monitor:        MonitorConfig{IntervalSeconds: 30, MetricsKeepHours: 24},
 		DataResource:   DataResourceConfig{ImportMaxMB: 100},
+		ETL:            ETLConfig{Enabled: true, MaxConcurrentRuns: 4, RunLogLimit: 5000, RetentionDays: 30, KeepPerDefinition: 200},
 		// 服务器运维默认关闭；开启后暴露任意远程 shell，须确认 HTTPS 与授权模型。
 		ServerOperations: ServerOperationsConfig{
 			Enabled:                 false,

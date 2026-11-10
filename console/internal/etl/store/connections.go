@@ -68,24 +68,33 @@ func (s *Store) GetConnection(id string) (Connection, error) {
 	return c, err
 }
 
-// SaveConnection 新建或更新（按 ID）。secretCipher 为 nil 表示保持原密码。
-func (s *Store) SaveConnection(c Connection, secretCipher *string, user string) (Connection, error) {
-	opts, _ := json.Marshal(c.Options)
-	ts := now()
+// CreateConnectionWithID 新建连接；c.ID 非空时沿用（密文的 AAD 已绑定该 ID）。
+func (s *Store) CreateConnectionWithID(c Connection, secretCipher *string, user string) (Connection, error) {
 	if c.ID == "" {
 		c.ID = NewID("conn_")
-		cipher := ""
-		if secretCipher != nil {
-			cipher = *secretCipher
-		}
-		_, err := s.db.Exec(`INSERT INTO etl_connections (`+connCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'',0)`,
-			c.ID, c.Name, c.DBType, c.Host, c.Port, c.Database, c.DefaultSchema, c.Username, c.SSLMode, string(opts),
-			cipher, c.Description, user, ts, ts)
-		if err != nil {
-			return c, uniqueErr(err, "连接名称已存在")
-		}
-		return s.GetConnection(c.ID)
 	}
+	opts, _ := json.Marshal(c.Options)
+	ts := now()
+	cipher := ""
+	if secretCipher != nil {
+		cipher = *secretCipher
+	}
+	_, err := s.db.Exec(`INSERT INTO etl_connections (`+connCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'',0)`,
+		c.ID, c.Name, c.DBType, c.Host, c.Port, c.Database, c.DefaultSchema, c.Username, c.SSLMode, string(opts),
+		cipher, c.Description, user, ts, ts)
+	if err != nil {
+		return c, uniqueErr(err, "连接名称已存在")
+	}
+	return s.GetConnection(c.ID)
+}
+
+// SaveConnection 更新已有连接。secretCipher 为 nil 表示保持原密码。
+func (s *Store) SaveConnection(c Connection, secretCipher *string, user string) (Connection, error) {
+	if c.ID == "" {
+		return s.CreateConnectionWithID(c, secretCipher, user)
+	}
+	opts, _ := json.Marshal(c.Options)
+	ts := now()
 	q := `UPDATE etl_connections SET name=?, db_type=?, host=?, port=?, database_name=?, default_schema=?, username=?,
 		ssl_mode=?, options_json=?, description=?, updated_at=?, last_test_ok=0, last_test_msg='', last_test_at=0`
 	args := []any{c.Name, c.DBType, c.Host, c.Port, c.Database, c.DefaultSchema, c.Username, c.SSLMode, string(opts), c.Description, ts}
@@ -123,8 +132,8 @@ func (s *Store) DeleteConnection(id string) error {
 	return nil
 }
 
-// ConnectionUsages 返回引用该连接的定义名（删除前提示）。按 JSON 文本匹配，足够用于提示。
-func (s *Store) ConnectionUsages(id string) ([]string, error) {
+// References 返回文档中引用了该 ID（连接或转换）的定义名，删除前提示用。按 JSON 文本匹配。
+func (s *Store) References(id string) ([]string, error) {
 	rows, err := s.db.Query(`SELECT name FROM etl_definitions WHERE doc_json LIKE ? ORDER BY name`, `%"`+strings.ReplaceAll(id, `%`, ``)+`"%`)
 	if err != nil {
 		return nil, err

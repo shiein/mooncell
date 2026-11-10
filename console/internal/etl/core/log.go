@@ -66,6 +66,7 @@ type LogSink interface {
 type Logger struct {
 	sink   LogSink
 	nodeID string
+	prefix string // 嵌套运行（作业中的转换）时为「作业项 ID/」，使步骤日志可区分归属
 	level  Level
 }
 
@@ -77,7 +78,15 @@ func (l *Logger) For(nodeID string) *Logger {
 	if l == nil {
 		return nil
 	}
-	return &Logger{sink: l.sink, nodeID: nodeID, level: l.level}
+	return &Logger{sink: l.sink, nodeID: l.prefix + nodeID, prefix: l.prefix, level: l.level}
+}
+
+// WithPrefix 返回为后续 For 的节点 ID 加前缀的日志器（自身节点 ID 不变）。
+func (l *Logger) WithPrefix(prefix string) *Logger {
+	if l == nil {
+		return nil
+	}
+	return &Logger{sink: l.sink, nodeID: l.nodeID, prefix: prefix, level: l.level}
 }
 
 // Enabled 报告某级别是否会输出（避免构造昂贵消息）。

@@ -66,6 +66,14 @@ func (a *api) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "有分块上传会话进行中,请稍后再自更新"})
 		return
 	}
+	// 数据集成:暂停调度;有运行中的转换/作业则拒绝(self-exec 会杀掉在途同步,留下半提交数据)。
+	if a.etl != nil {
+		if err := a.etl.BeginDrain(); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		defer a.etl.EndDrain()
+	}
 
 	// 自更新是 Linux 部署特性(nohup 无监管场景):darwin 上跑的 Console(开发机)拒绝任何上传,
 	// 避免把 linux 包错传到 mac 后看似校验通过却无法 self-exec。给清晰错误文案。
