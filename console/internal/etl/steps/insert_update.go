@@ -101,6 +101,11 @@ func init() {
 				if u.cfg.CommitSize <= 0 {
 					u.cfg.CommitSize = 1000
 				}
+				// 关键字段有唯一索引且方言支持原生 upsert 时走快速路径；
+				// 元数据读取失败按无索引处理，语义不受影响。
+				if idx, err := h.Dialect.Indexes(ctx, h.DB, ref); err == nil && upsertSafe(h.Dialect, idx, columnNames(plan.keys)) {
+					_, u.upsert = h.Dialect.UpsertSQL(ref, columnNames(plan.insert), columnNames(plan.keys), columnNames(plan.update), 1, true)
+				}
 				out := rc.Out(core.PortMain)
 				err = rc.In(core.PortMain).Each(ctx, func(b core.Batch) error {
 					for _, r := range b.Rows {
@@ -200,6 +205,7 @@ type upserter struct {
 	table   conn.TableRef
 	cfg     *InsertUpdateConfig
 	plan    *iuPlan
+	upsert  bool // 目标有唯一约束且方言支持原生 upsert
 	pending []iuRow
 }
 
@@ -297,6 +303,22 @@ func (u *upserter) flush(ctx context.Context, out *core.OutPort) error {
 		}
 	}()
 
+	doUpd := !u.cfg.NoUpdate && len(u.plan.update) > 0
+	if u.upsert && !doUpd {
+		// 有唯一约束且只插不更：insert-or-ignore，无需查找，受影响行即实际插入数。
+		affected, err := u.upsertAll(ctx, tx, unique, false)
+		if err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("提交失败：%w", err)
+		}
+		committed = true
+		u.rc.Metrics.Output.Add(affected)
+		u.rc.Log.Debug("提交：upsert 忽略冲突 %d 行，实际插入 %d", len(unique), affected)
+		return out.Send(ctx, core.Batch{Schema: out.Schema, Rows: srcRows(rows)})
+	}
+
 	existing, err := u.lookup(ctx, tx, unique)
 	if err != nil {
 		return err
@@ -315,11 +337,18 @@ func (u *upserter) flush(ctx context.Context, out *core.OutPort) error {
 		}
 	}
 
-	if err := u.insert(ctx, tx, inserts); err != nil {
-		return err
-	}
-	if err := u.updateRows(ctx, tx, updates); err != nil {
-		return err
+	if u.upsert {
+		// 原生 upsert：插入与更新合并为一条/数条语句（含 nullKey 直接插入的行）。
+		if _, err := u.upsertAll(ctx, tx, append(inserts, updates...), true); err != nil {
+			return err
+		}
+	} else {
+		if err := u.insert(ctx, tx, inserts); err != nil {
+			return err
+		}
+		if err := u.updateBatch(ctx, tx, updates); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交失败：%w", err)
@@ -443,35 +472,134 @@ func (u *upserter) insert(ctx context.Context, tx conn.Querier, rows []iuRow) er
 	return nil
 }
 
-// updateRows 逐行执行 UPDATE（同一事务内复用语句文本）。
-// TODO(P1)：目标有唯一约束时改用原生 upsert / MERGE 批量更新；或 CASE WHEN 批量更新以减少往返。
-func (u *upserter) updateRows(ctx context.Context, tx conn.Querier, rows []iuRow) error {
+// upsertAll 用原生 upsert 处理全部行：返回受影响行数（doUpdate=false 时即实际插入数）。
+func (u *upserter) upsertAll(ctx context.Context, tx conn.Querier, rows []iuRow, doUpdate bool) (int64, error) {
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	d := u.h.Dialect
+	names := columnNames(u.plan.insert)
+	per := conn.RowsPerStatement(d, len(names), u.cfg.CommitSize)
+	var affected int64
+	for start := 0; start < len(rows); start += per {
+		end := min(start+per, len(rows))
+		q, ok := d.UpsertSQL(u.table, names, columnNames(u.plan.keys), columnNames(u.plan.update), end-start, doUpdate)
+		if !ok {
+			return 0, fmt.Errorf("方言 %s 不支持 upsert", d.ID())
+		}
+		args := make([]any, 0, (end-start)*len(names))
+		for _, r := range rows[start:end] {
+			for i, v := range r.insVals {
+				b, err := d.Bind(v, u.plan.insert[i].target)
+				if err != nil {
+					return 0, err
+				}
+				args = append(args, b)
+			}
+		}
+		res, err := tx.ExecContext(ctx, q, args...)
+		if err != nil {
+			return 0, fmt.Errorf("upsert %s 失败：%w", u.table, err)
+		}
+		n, _ := res.RowsAffected()
+		affected += n
+	}
+	return affected, nil
+}
+
+// updateBatch 用一条 CASE UPDATE 更新多行（通用路径，不要求唯一约束）。
+// 每行参数 = set 列数×(键数+1) + 键数，按 MaxParams 分块。
+func (u *upserter) updateBatch(ctx context.Context, tx conn.Querier, rows []iuRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	d := u.h.Dialect
-	q := conn.UpdateSQL(d, u.table, columnNames(u.plan.update), columnNames(u.plan.keys))
-	for _, r := range rows {
-		args := make([]any, 0, len(r.updVals)+len(r.keyVals))
-		for i, v := range r.updVals {
-			b, err := d.Bind(v, u.plan.update[i].target)
-			if err != nil {
-				return err
+	set, keys := columnNames(u.plan.update), columnNames(u.plan.keys)
+	casts := make([]string, len(u.plan.update))
+	for i := range casts {
+		casts[i] = d.CaseCast(u.plan.update[i].target)
+	}
+	perRow := len(set)*(len(keys)+1) + len(keys)
+	per := min(u.cfg.CommitSize, max(1, d.MaxParams()/perRow))
+	for start := 0; start < len(rows); start += per {
+		end := min(start+per, len(rows))
+		args := make([]any, 0, (end-start)*perRow)
+		for i := range set {
+			for _, r := range rows[start:end] {
+				for j, v := range r.keyVals {
+					b, err := d.Bind(v, u.plan.keys[j].target)
+					if err != nil {
+						return err
+					}
+					args = append(args, b)
+				}
+				b, err := d.Bind(r.updVals[i], u.plan.update[i].target)
+				if err != nil {
+					return err
+				}
+				args = append(args, b)
 			}
-			args = append(args, b)
 		}
-		for i, v := range r.keyVals {
-			b, err := d.Bind(v, u.plan.keys[i].target)
-			if err != nil {
-				return err
+		for _, r := range rows[start:end] {
+			for i, v := range r.keyVals {
+				b, err := d.Bind(v, u.plan.keys[i].target)
+				if err != nil {
+					return err
+				}
+				args = append(args, b)
 			}
-			args = append(args, b)
 		}
-		if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+		if _, err := tx.ExecContext(ctx, conn.UpdateCaseSQL(d, u.table, set, keys, casts, end-start), args...); err != nil {
 			return fmt.Errorf("更新 %s 失败：%w", u.table, err)
 		}
 	}
 	return nil
+}
+
+// exactUniqueIndex 报告索引是否为「唯一/主键且列集合恰为 keys」。
+func exactUniqueIndex(ix conn.IndexMeta, keys []string) bool {
+	if !ix.Unique && !ix.Primary || len(ix.Columns) != len(keys) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, c := range ix.Columns {
+		seen[strings.ToLower(c)] = true
+	}
+	for _, k := range keys {
+		if !seen[strings.ToLower(k)] {
+			return false
+		}
+	}
+	return true
+}
+
+// uniqueIndexOn 报告关键字段是否被唯一索引/主键精确覆盖（upsert 冲突目标的必要条件）。
+func uniqueIndexOn(idx []conn.IndexMeta, keys []string) bool {
+	for _, ix := range idx {
+		if exactUniqueIndex(ix, keys) {
+			return true
+		}
+	}
+	return false
+}
+
+// upsertSafe 在 uniqueIndexOn 之上按方言语义收紧：
+// MySQL ON DUPLICATE KEY UPDATE 对任意唯一索引冲突都会更新命中行，
+// 表上存在键以外的唯一索引时可能更新到与查询关键字不匹配的行（旧路径会插入报错），
+// 此时保守回退通用 CASE 批量更新；PG 系冲突目标显式指定，无此问题。
+func upsertSafe(d conn.Dialect, idx []conn.IndexMeta, keys []string) bool {
+	if !uniqueIndexOn(idx, keys) {
+		return false
+	}
+	if d.ID() != "mysql" {
+		return true
+	}
+	for _, ix := range idx {
+		if (ix.Unique || ix.Primary) && !exactUniqueIndex(ix, keys) {
+			return false
+		}
+	}
+	return true
 }
 
 // sameValues 比较目标表现值与新值（精确小数按数值、时间按时刻比较）。

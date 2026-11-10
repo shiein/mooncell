@@ -288,7 +288,16 @@ type Dialect interface {
 * **插入/更新（Kettle 语义，不依赖唯一约束）**：每批按查询关键字一次性查出已存在的键
   （单键 `IN (…)`，复合键 `(k1=? AND k2=?) OR …`），批内去重（后者覆盖前者），拆为插入批与更新批；
   可选「不执行更新」；关键字段 NULL 按 `IS NULL` 比较或报错（配置项）；一个键命中多行则全部更新。
-  预检检查关键字段是否有索引（无索引 → warning）。目标有唯一约束时可选原生 upsert 加速（TODO）。
+  预检检查关键字段是否有索引（无索引 → warning）。
+  **写入加速**（两条路径，查找/比较语义不变）：
+  * 关键字段被唯一索引/主键**精确覆盖**（部分索引、表达式索引不参与判定）且方言支持时，
+    用原生 upsert：PG/Kingbase/SQLite `ON CONFLICT … DO UPDATE`、MySQL `ON DUPLICATE KEY UPDATE`
+    （`VALUES(col)` 兼容 5.7/8/MariaDB）；`noUpdate` 时 `DO NOTHING` / `key=key` 空更新。
+    MySQL 额外要求表上不存在键以外的唯一索引——`ON DUPLICATE` 对任意唯一冲突都会更新命中行，
+    可能改到不匹配键的行，此时回退通用路径。达梦无冲突子句 upsert，走通用路径。
+  * 通用路径：一条 `UPDATE … SET c = CASE WHEN k=… THEN ? ELSE c END WHERE (k=…) OR …`，
+    按 `MaxParams` 与 `commitSize` 分块；Kingbase 需对 THEN 参数 `CAST` 到列原生类型
+    （gokb 参数无类型，服务端把 THEN 解析为 TEXT）。
 * 读：`QueryContext` + 流式 `rows.Next()`。
 
 **真机认证结论**（`conn/live_test.go` + `actions/live_test.go`，build tag `etl_live`，
@@ -320,7 +329,7 @@ type Dialect interface {
 | 转换 | `unique_hash` | 唯一行（哈希，内存预算受控） | 已实现 |
 | 流程 | `dummy` | 空操作 | 已实现 |
 | 输出 | `table_output` | 表输出（裁剪表 / 提交记录数 / 批量） | 已实现 |
-| 输出 | `insert_update` | 插入 / 更新 | 已实现（核心路径） |
+| 输出 | `insert_update` | 插入 / 更新（原生 upsert / CASE 批量更新） | 已实现 |
 | 输出 | `update` / `delete` | 更新 / 删除 | TODO |
 | 转换 | `sort_rows` | 排序（外部排序溢写） | TODO |
 | 转换 | `unique_sorted` | 去除重复记录（要求有序） | TODO |

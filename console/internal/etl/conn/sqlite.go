@@ -111,8 +111,10 @@ func (d sqliteDialect) Columns(ctx context.Context, q Querier, t TableRef) ([]Co
 }
 
 func (sqliteDialect) Indexes(ctx context.Context, q Querier, t TableRef) ([]IndexMeta, error) {
+	// partial=0：部分索引不能作 ON CONFLICT 仲裁（表达式索引列名为 NULL，聚合阶段会安全报错）
 	rows, err := q.QueryContext(ctx, `SELECT il.name, il."unique", il.origin = 'pk', ii.name
-		FROM pragma_index_list(?) il JOIN pragma_index_info(il.name) ii ORDER BY il.name, ii.seqno`, t.Name)
+		FROM pragma_index_list(?) il JOIN pragma_index_info(il.name) ii
+		WHERE il.partial = 0 ORDER BY il.name, ii.seqno`, t.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -124,3 +126,11 @@ func (d sqliteDialect) TruncateSQL(t TableRef) string { return "DELETE FROM " + 
 func (sqliteDialect) ProbeSQL(query string) string {
 	return "SELECT * FROM (" + strings.TrimRight(strings.TrimSpace(query), ";") + ") mc_probe LIMIT 0"
 }
+
+// UpsertSQL 生成 ON CONFLICT upsert（SQLite ≥3.24 支持）。
+func (d sqliteDialect) UpsertSQL(t TableRef, cols, keys, set []string, nrows int, doUpdate bool) (string, bool) {
+	return UpsertOnConflict(d, t, cols, keys, set, nrows, doUpdate), true
+}
+
+// CaseCast：SQLite 动态亲和类型，CASE THEN 参数无需 CAST。
+func (sqliteDialect) CaseCast(core.Field) string { return "" }

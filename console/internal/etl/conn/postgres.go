@@ -165,6 +165,7 @@ func (d *postgres) Indexes(ctx context.Context, q Querier, t TableRef) ([]IndexM
 		JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
 		JOIN %[1]s_attribute a ON a.attrelid = tbl.oid AND a.attnum = k.attnum
 		WHERE UPPER(ns.nspname) = UPPER($1) AND UPPER(tbl.relname) = UPPER($2)
+		  AND ix.indpred IS NULL AND ix.indexprs IS NULL -- 部分/表达式索引不能作 ON CONFLICT 仲裁
 		ORDER BY i.relname, k.ord`, cat), t.Schema, t.Name)
 	if err != nil {
 		return nil, err
@@ -176,6 +177,21 @@ func (d *postgres) TruncateSQL(t TableRef) string { return "TRUNCATE TABLE " + d
 
 func (d *postgres) ProbeSQL(query string) string {
 	return "SELECT * FROM (" + strings.TrimRight(strings.TrimSpace(query), ";") + ") mc_probe WHERE 1=0"
+}
+
+// UpsertSQL 生成 ON CONFLICT upsert（KingbaseES 同一语法，V008R003 真机验证）。
+func (d *postgres) UpsertSQL(t TableRef, cols, keys, set []string, nrows int, doUpdate bool) (string, bool) {
+	return UpsertOnConflict(d, t, cols, keys, set, nrows, doUpdate), true
+}
+
+// CaseCast：gokb 以未知类型发送参数，Kingbase 把 CASE THEN 分支解析为 TEXT，
+// 与 INTEGER 等非文本列的 ELSE 分支冲突；CAST 到列原生类型（服务器元数据给出）消除歧义。
+// pgx 为参数声明了确切 oid，postgres 无需 CAST。
+func (d *postgres) CaseCast(f core.Field) string {
+	if d.id != "kingbase" || f.NativeType == "" {
+		return ""
+	}
+	return f.NativeType
 }
 
 // collectIndexes 把 (索引名, unique, primary, 列) 行聚合为 IndexMeta。

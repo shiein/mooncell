@@ -136,6 +136,16 @@ type Dialect interface {
 	TruncateSQL(t TableRef) string
 	// ProbeSQL 把任意查询包装为「只取列元数据、不返回行」的 SQL（设计期推导表输入字段）。
 	ProbeSQL(query string) string
+
+	// UpsertSQL 生成原生 upsert：插入 cols，命中 keys 唯一约束时更新 set
+	//（doUpdate=false 时忽略冲突行）。keys 必须在目标上有唯一索引/主键。
+	// ok=false 表示方言不支持原生 upsert，调用方走通用 CASE 批量更新。
+	UpsertSQL(t TableRef, cols, keys, set []string, nrows int, doUpdate bool) (string, bool)
+
+	// CaseCast 返回 CASE 批量 UPDATE 中 THEN 参数应 CAST 到的 SQL 类型；
+	// 空串表示方言/驱动能按上下文推断参数类型，无需显式 CAST。
+	// gokb 以未知类型发送参数，Kingbase 把 THEN 分支解析为 TEXT，与非文本列冲突。
+	CaseCast(f core.Field) string
 }
 
 // DialectMeta 是下发前端的方言目录项。

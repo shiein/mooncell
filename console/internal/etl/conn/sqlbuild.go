@@ -210,3 +210,99 @@ func UpdateSQL(d Dialect, t TableRef, set, keys []string) string {
 	}
 	return b.String()
 }
+
+// keyCond 生成「keys = 连续 n 个占位符」的合取条件，占位符从 p 开始，返回下一个序号。
+func keyCond(d Dialect, b *strings.Builder, keys []string, p int) int {
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteString(" AND ")
+		}
+		b.WriteString(d.Quote(k))
+		b.WriteString(" = ")
+		b.WriteString(d.Placeholder(p))
+		p++
+	}
+	return p
+}
+
+// UpdateCaseSQL 生成 CASE 批量 UPDATE：一条语句更新 nrows 行，
+// 参数顺序为（每 set 列 × 每行：key 参数 + 值）+（每行 key 参数）。
+// 键列不可能是 NULL（上游已过滤），等值匹配安全。
+// casts 与 set 一一对应：非空时 THEN 参数显式 CAST，消除不能推断参数类型的方言歧义。
+func UpdateCaseSQL(d Dialect, t TableRef, set, keys, casts []string, nrows int) string {
+	var b strings.Builder
+	b.WriteString("UPDATE ")
+	b.WriteString(d.Qualified(t))
+	b.WriteString(" SET ")
+	p := 1
+	for i, c := range set {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(d.Quote(c))
+		b.WriteString(" = CASE")
+		for r := 0; r < nrows; r++ {
+			b.WriteString(" WHEN ")
+			p = keyCond(d, &b, keys, p)
+			b.WriteString(" THEN ")
+			if casts[i] != "" {
+				b.WriteString("CAST(")
+				b.WriteString(d.Placeholder(p))
+				b.WriteString(" AS ")
+				b.WriteString(casts[i]) // 服务器元数据给出的类型名，非用户输入
+				b.WriteString(")")
+			} else {
+				b.WriteString(d.Placeholder(p))
+			}
+			p++
+		}
+		b.WriteString(" ELSE ")
+		b.WriteString(d.Quote(c))
+		b.WriteString(" END")
+	}
+	b.WriteString(" WHERE ")
+	for r := 0; r < nrows; r++ {
+		if r > 0 {
+			b.WriteString(" OR ")
+		}
+		b.WriteByte('(')
+		p = keyCond(d, &b, keys, p)
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
+// UpsertOnConflict 生成 PG 系（postgres/kingbase/sqlite）的 ON CONFLICT upsert。
+func UpsertOnConflict(d Dialect, t TableRef, cols, keys, set []string, nrows int, doUpdate bool) string {
+	var b strings.Builder
+	b.WriteString("INSERT INTO ")
+	b.WriteString(d.Qualified(t))
+	b.WriteString(" (")
+	b.WriteString(quoteAll(d, cols))
+	b.WriteString(") VALUES ")
+	for r := 0; r < nrows; r++ {
+		if r > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteByte('(')
+		b.WriteString(placeholders(d, r*len(cols)+1, len(cols)))
+		b.WriteByte(')')
+	}
+	b.WriteString(" ON CONFLICT (")
+	b.WriteString(quoteAll(d, keys))
+	b.WriteString(") DO ")
+	if !doUpdate || len(set) == 0 {
+		b.WriteString("NOTHING")
+		return b.String()
+	}
+	b.WriteString("UPDATE SET ")
+	for i, c := range set {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(d.Quote(c))
+		b.WriteString(" = EXCLUDED.")
+		b.WriteString(d.Quote(c))
+	}
+	return b.String()
+}

@@ -188,3 +188,44 @@ func (d mysqlDialect) TruncateSQL(t TableRef) string { return "TRUNCATE TABLE " 
 func (mysqlDialect) ProbeSQL(query string) string {
 	return "SELECT * FROM (" + strings.TrimRight(strings.TrimSpace(query), ";") + ") mc_probe WHERE 1=0"
 }
+
+// UpsertSQL 生成 ON DUPLICATE KEY UPDATE upsert。
+// 用 VALUES(col) 引用待插值（8.0.20+ 标记 deprecated 但仍是全版本通用写法，
+// 含 5.7 与 MariaDB；别名形式 AS new 仅 ≥8.0.19 且 MariaDB 不支持）。
+// doUpdate=false 时以 key=key 的空更新换取「存在即跳过」，避免 INSERT IGNORE 吞掉其他约束错误。
+func (d mysqlDialect) UpsertSQL(t TableRef, cols, keys, set []string, nrows int, doUpdate bool) (string, bool) {
+	var b strings.Builder
+	b.WriteString("INSERT INTO ")
+	b.WriteString(d.Qualified(t))
+	b.WriteString(" (")
+	b.WriteString(quoteAll(d, cols))
+	b.WriteString(") VALUES ")
+	for r := 0; r < nrows; r++ {
+		if r > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteByte('(')
+		b.WriteString(placeholders(d, 1, len(cols))) // MySQL 占位符都是 ?
+		b.WriteByte(')')
+	}
+	b.WriteString(" ON DUPLICATE KEY UPDATE ")
+	if !doUpdate || len(set) == 0 {
+		b.WriteString(d.Quote(keys[0]))
+		b.WriteString(" = ")
+		b.WriteString(d.Quote(keys[0]))
+		return b.String(), true
+	}
+	for i, c := range set {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(d.Quote(c))
+		b.WriteString(" = VALUES(")
+		b.WriteString(d.Quote(c))
+		b.WriteString(")")
+	}
+	return b.String(), true
+}
+
+// CaseCast：go-sql-driver 按 Go 类型声明参数，MySQL 服务端按列类型推断，无需 CAST。
+func (mysqlDialect) CaseCast(core.Field) string { return "" }

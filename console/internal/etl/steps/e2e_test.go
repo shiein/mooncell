@@ -294,3 +294,83 @@ func TestCompileProblems(t *testing.T) {
 		}
 	}
 }
+
+// 无唯一约束的目标：通用路径（CASE 批量 UPDATE）更新已存在行、插入新行。
+func TestInsertUpdateCaseFallback(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE t2 (k TEXT, v INTEGER, w TEXT)`)
+	mustExec(t, db, `INSERT INTO t2 VALUES ('a', 1, 'x'), ('b', 2, 'y')`)
+
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("gen", "generate_rows", map[string]any{"limit": 3, "sequenceField": "seq"}),
+			node("calc", "calculator", map[string]any{"fields": []map[string]any{
+				{"name": "k", "kind": "string", "expr": `decode(seq, 1, "a", 2, "c", 3, "d", "?")`},
+				{"name": "v", "kind": "integer", "expr": "seq * 10"},
+				{"name": "w", "kind": "string", "expr": `"w-" + toString(seq)`},
+			}}),
+			node("iu", "insert_update", map[string]any{
+				"connection": "db", "table": "t2", "commitSize": 50,
+				"keys":   []map[string]any{{"stream": "k", "column": "k"}},
+				"fields": []map[string]any{{"stream": "v", "column": "v", "update": true}, {"stream": "w", "column": "w", "update": true}},
+			}),
+		},
+		Hops: []pipeline.Hop{hop("gen", "main", "calc"), hop("calc", "main", "iu")},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM t2`); n != int64(4) {
+		t.Fatalf("应有 4 行：%d", n)
+	}
+	var v int
+	var w string
+	if err := db.QueryRow(`SELECT v, w FROM t2 WHERE k='a'`).Scan(&v, &w); err != nil || v != 10 || w != "w-1" {
+		t.Fatalf("'a' 应被 CASE UPDATE 改为 10/w-1：%v %d %s", err, v, w)
+	}
+	if err := db.QueryRow(`SELECT v FROM t2 WHERE k='b'`).Scan(&v); err != nil || v != 2 {
+		t.Fatalf("'b' 不应被触碰：%v %d", err, v)
+	}
+	m := res.Metrics["iu"]
+	if m.Output != 2 || m.Updated != 1 {
+		t.Fatalf("度量应为 插2/更1：%+v", m)
+	}
+}
+
+// 有唯一约束 + noUpdate：upsert 忽略冲突，无需查找，受影响行即实际插入数。
+func TestInsertUpdateNoUpdateUpsert(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE t3 (k INTEGER PRIMARY KEY, v INTEGER)`)
+	mustExec(t, db, `INSERT INTO t3 VALUES (1, 100)`)
+
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("gen", "generate_rows", map[string]any{"limit": 3, "sequenceField": "seq"}),
+			node("calc", "calculator", map[string]any{"fields": []map[string]any{
+				{"name": "k", "kind": "integer", "expr": "seq"},
+				{"name": "v", "kind": "integer", "expr": "seq * 10"},
+			}}),
+			node("iu", "insert_update", map[string]any{
+				"connection": "db", "table": "t3", "noUpdate": true,
+				"keys":   []map[string]any{{"stream": "k", "column": "k"}},
+				"fields": []map[string]any{{"stream": "v", "column": "v", "update": true}},
+			}),
+		},
+		Hops: []pipeline.Hop{hop("gen", "main", "calc"), hop("calc", "main", "iu")},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM t3`); n != int64(3) {
+		t.Fatalf("应有 3 行：%d", n)
+	}
+	var v int
+	if err := db.QueryRow(`SELECT v FROM t3 WHERE k=1`).Scan(&v); err != nil || v != 100 {
+		t.Fatalf("已存在行不应被更新：%v %d", err, v)
+	}
+	if m := res.Metrics["iu"]; m.Output != 2 || m.Updated != 0 {
+		t.Fatalf("实际插入应为 2（冲突忽略 1）：%+v", m)
+	}
+}

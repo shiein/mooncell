@@ -204,6 +204,15 @@ func (dm) ProbeSQL(query string) string {
 	return "SELECT * FROM (" + strings.TrimRight(strings.TrimSpace(query), ";") + ") mc_probe WHERE 1=0"
 }
 
+// UpsertSQL 不支持：达梦没有冲突子句 upsert（MERGE 需要源查询形态复杂且
+// 无法一条语句携带多行参数化值），调用方走 CASE 批量更新。
+func (dm) UpsertSQL(TableRef, []string, []string, []string, int, bool) (string, bool) {
+	return "", false
+}
+
+// CaseCast：达梦驱动按 Go 类型声明参数（DM8 真机验证 CASE THEN 无需 CAST）。
+func (dm) CaseCast(core.Field) string { return "" }
+
 func firstNonEmpty(ss ...string) string {
 	for _, s := range ss {
 		if strings.TrimSpace(s) != "" {

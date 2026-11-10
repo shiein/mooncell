@@ -316,6 +316,52 @@ func liveDialect(t *testing.T, id string) {
 	if dc.extra != nil {
 		dc.extra(t, h, cfg, pw)
 	}
+	liveCaseUpdate(t, h)
+}
+
+// CASE 批量 UPDATE（insert_update 通用路径）：2 行一批更新、未命中行不变。
+func liveCaseUpdate(t *testing.T, h *conn.Handle) {
+	ctx := context.Background()
+	d := h.Dialect
+	ref := conn.TableRef{Schema: d.FoldIdent(conn.EffectiveSchema(h.Config, "")), Name: d.FoldIdent("etl_case")}
+	dropTable(t, h, "etl_case")
+	if _, err := h.DB.ExecContext(ctx, fmt.Sprintf("CREATE TABLE %s (id INT, v VARCHAR(32), n INT)", d.Qualified(ref))); err != nil {
+		t.Fatalf("建 etl_case 失败：%v", err)
+	}
+	t.Cleanup(func() { dropTable(t, h, "etl_case") })
+	if _, err := h.DB.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1,'a',1),(2,'b',2),(3,'c',3)", d.Qualified(ref))); err != nil {
+		t.Fatalf("写 etl_case 失败：%v", err)
+	}
+	k, v, n := d.FoldIdent("id"), d.FoldIdent("v"), d.FoldIdent("n")
+	cols, err := d.Columns(ctx, h.DB, ref)
+	if err != nil {
+		t.Fatalf("Columns 失败：%v", err)
+	}
+	castOf := func(name string) string {
+		for _, c := range cols {
+			if strings.EqualFold(c.Name, name) {
+				return d.CaseCast(d.FieldFor(c))
+			}
+		}
+		return ""
+	}
+	q := conn.UpdateCaseSQL(d, ref, []string{v, n}, []string{k}, []string{castOf(v), castOf(n)}, 2)
+	// 参数顺序：set v（每行 key+val）→ set n（每行 key+val）→ WHERE（每行 key）
+	res, err := h.DB.ExecContext(ctx, q, int64(1), "x", int64(2), "y", int64(1), int64(10), int64(2), int64(20), int64(1), int64(2))
+	if err != nil {
+		t.Fatalf("CASE 批量 UPDATE 失败：%v", err)
+	}
+	if aff, _ := res.RowsAffected(); aff != 2 {
+		t.Errorf("CASE UPDATE 应影响 2 行，实际 %d", aff)
+	}
+	var sv string
+	var sn int
+	if err := h.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT %s, %s FROM %s WHERE %s = 1", v, n, d.Qualified(ref), k)).Scan(&sv, &sn); err != nil || sv != "x" || sn != 10 {
+		t.Errorf("id=1 应为 x/10：%v %s %d", err, sv, sn)
+	}
+	if err := h.DB.QueryRowContext(ctx, fmt.Sprintf("SELECT %s, %s FROM %s WHERE %s = 3", v, n, d.Qualified(ref), k)).Scan(&sv, &sn); err != nil || sv != "c" || sn != 3 {
+		t.Errorf("id=3 不应被更新：%v %s %d", err, sv, sn)
+	}
 }
 
 func (c colCase) ddlName() string {
