@@ -190,6 +190,62 @@ func TestTableInputVarsAndErrorPort(t *testing.T) {
 	}
 }
 
+// 表输出连接错误端口：批次内混入唯一约束冲突行 → 批量失败后退化逐行写入，
+// 坏行进错误输出、好行照常提交、步骤成功；未连接错误端口则整步失败。
+func TestTableOutputErrorRowDegrade(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (id INTEGER, qty INTEGER)`)
+	mustExec(t, db, `CREATE TABLE dst (id INTEGER PRIMARY KEY, qty INTEGER)`)
+	mustExec(t, db, `CREATE TABLE bad (id INTEGER, qty INTEGER, _error_code TEXT, _error_message TEXT, _error_field TEXT, _error_step TEXT)`)
+	for i := 1; i <= 10; i++ {
+		mustExec(t, db, fmt.Sprintf(`INSERT INTO src VALUES (%d, %d)`, i, i*10))
+	}
+	mustExec(t, db, `INSERT INTO dst VALUES (5, 555)`) // 与源 id=5 冲突 → 批量 INSERT 必败
+	nodes := func() []pipeline.Node {
+		return []pipeline.Node{
+			node("in", "table_input", map[string]any{"connection": "db", "sql": "select id, qty from src order by id"}),
+			node("out", "table_output", map[string]any{"connection": "db", "table": "dst", "commitSize": 20}),
+			node("err", "table_output", map[string]any{"connection": "db", "table": "bad", "commitSize": 100}),
+		}
+	}
+	def := &pipeline.Definition{
+		Nodes: nodes(),
+		Hops: []pipeline.Hop{
+			hop("in", "main", "out"),
+			{ID: "e", From: "out", FromPort: "error", To: "err", ToPort: "main"},
+		},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 10 { // 原有 id=5 + 新写入 9 行
+		t.Fatalf("dst 应有 10 行（1 冲突 + 9 新），实际 %d", n)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst WHERE qty = 555`); n != 1 {
+		t.Fatalf("原有 id=5 行不应被覆盖，实际 %d", n)
+	}
+	if n := count(t, db, `SELECT count(*) FROM bad WHERE id = 5 AND _error_step = 'out'`); n != 1 {
+		t.Fatalf("错误输出应有 1 行（id=5），实际 %d", n)
+	}
+	m := res.Metrics["out"]
+	if m.Rejected != 1 || m.Output != 9 {
+		t.Fatalf("度量应为 Output=9/Rejected=1：%+v", m)
+	}
+
+	// 未连接错误端口：同样的冲突应使整步失败
+	mustExec(t, db, `DELETE FROM dst`)
+	mustExec(t, db, `INSERT INTO dst VALUES (5, 555)`)
+	def2 := &pipeline.Definition{Nodes: nodes()[:2], Hops: []pipeline.Hop{hop("in", "main", "out")}}
+	res2 := run(t, e, def2, nil)
+	if res2.Err == nil {
+		t.Fatal("未连接错误端口时冲突批应使步骤失败")
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 1 {
+		t.Fatalf("失败批应整体回滚只剩原有 1 行，实际 %d", n)
+	}
+}
+
 // 未连接错误输出时，坏行使转换失败，且失败能让上游及时停下（不死锁）。
 func TestFailureCancelsUpstream(t *testing.T) {
 	e, _ := env(t)

@@ -332,8 +332,8 @@ type Dialect interface {
 | 流程 | `filter_rows` | 过滤记录（true / false 两路输出） | 已实现 |
 | 转换 | `unique_hash` | 唯一行（哈希，内存预算受控） | 已实现 |
 | 流程 | `dummy` | 空操作 | 已实现 |
-| 输出 | `table_output` | 表输出（裁剪表 / 提交记录数 / 批量） | 已实现 |
-| 输出 | `insert_update` | 插入 / 更新（原生 upsert / CASE 批量更新） | 已实现 |
+| 输出 | `table_output` | 表输出（裁剪表 / 提交记录数 / 批量；连 error 端口时批失败退化逐行定位坏行） | 已实现 |
+| 输出 | `insert_update` | 插入 / 更新（原生 upsert / 派生行集连接更新） | 已实现 |
 | 输出 | `update` / `delete` | 更新 / 删除 | TODO |
 | 转换 | `sort_rows` | 排序（外部排序溢写） | TODO |
 | 转换 | `unique_sorted` | 去除重复记录（要求有序） | TODO |
@@ -505,7 +505,7 @@ src/etl/
 
 ## 18. 性能目标与验证
 
-* 千万行 PG → MySQL 表输出、插入/更新各一组压测，记录吞吐、峰值 RSS、提交间隔影响（TODO：`etl/bench`）。
+* 千万行 PG → MySQL 表输出、插入/更新各一组压测，记录吞吐、峰值 RSS、提交间隔影响（已实现：`etl/bench`，`etl_live && etl_bench` 双标签，BENCH_ROWS/BENCH_COMMITS 控规模）。
 * 内存上界 ≈ `连线数 × channelBatches × batchSize × 平均行宽` + 有状态步骤预算；编译期打印估算值。
 
 ## 19. 测试策略

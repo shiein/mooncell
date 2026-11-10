@@ -144,8 +144,8 @@ func (w *tableWriter) add(ctx context.Context, rows []core.Row) ([]core.Row, err
 }
 
 // flush 在一个事务内写入全部待提交行。预览模式只计数不写库。
-//
-// TODO(P1)：连接 error 端口时，批次失败后退化为逐行写入以定位坏行并 Reject，而非整步失败。
+// 连接 error 端口时批次失败退化为逐行写入：坏行 Reject，其余行照常提交；
+// 未连接时维持整步失败的原语义。
 func (w *tableWriter) flush(ctx context.Context) ([]core.Row, error) {
 	if len(w.pending) == 0 {
 		return nil, nil
@@ -155,9 +155,23 @@ func (w *tableWriter) flush(ctx context.Context) ([]core.Row, error) {
 	if w.rc.Preview {
 		return rows, nil
 	}
+	if err := w.flushBatch(ctx, rows, args); err != nil {
+		if !w.rc.HasOutput(core.PortError) {
+			return nil, err
+		}
+		w.rc.Log.Warn("%s：批量写入失败（%v），退化逐行写入定位坏行", w.table, err)
+		return w.flushRows(ctx, rows, args)
+	}
+	w.rc.Metrics.Output.Add(int64(len(rows)))
+	w.rc.Log.Debug("已提交 %d 行到 %s", len(rows), w.table)
+	return rows, nil
+}
+
+// flushBatch 单事务多值 INSERT。
+func (w *tableWriter) flushBatch(ctx context.Context, rows []core.Row, args []any) error {
 	tx, err := w.h.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	ncol := len(w.cols)
 	for start := 0; start < len(rows); start += w.perStmt {
@@ -165,15 +179,43 @@ func (w *tableWriter) flush(ctx context.Context) ([]core.Row, error) {
 		q := conn.InsertSQL(w.h.Dialect, w.table, w.names, end-start)
 		if _, err := tx.ExecContext(ctx, q, args[start*ncol:end*ncol]...); err != nil {
 			tx.Rollback()
-			return nil, fmt.Errorf("写入 %s 失败（第 %d–%d 行所在批次已回滚）：%w", w.table, start+1, end, err)
+			return fmt.Errorf("写入 %s 失败（第 %d–%d 行所在批次已回滚）：%w", w.table, start+1, end, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("提交失败：%w", err)
+		return fmt.Errorf("提交失败：%w", err)
 	}
-	w.rc.Metrics.Output.Add(int64(len(rows)))
-	w.rc.Log.Debug("已提交 %d 行到 %s", len(rows), w.table)
-	return rows, nil
+	return nil
+}
+
+// flushRows 每行单独事务写入（PG 中失败语句会使整个事务失效，不能复用同一事务）。
+// 失败的行 Reject 到 error 端口；返回成功写入的行。
+func (w *tableWriter) flushRows(ctx context.Context, rows []core.Row, args []any) ([]core.Row, error) {
+	ncol := len(w.cols)
+	q := conn.InsertSQL(w.h.Dialect, w.table, w.names, 1)
+	written := make([]core.Row, 0, len(rows))
+	for i, r := range rows {
+		tx, err := w.h.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return written, err
+		}
+		_, err = tx.ExecContext(ctx, q, args[i*ncol:(i+1)*ncol]...)
+		if err == nil {
+			err = tx.Commit()
+		} else {
+			tx.Rollback()
+		}
+		if err != nil {
+			if rerr := w.rc.Reject(ctx, r, fmt.Errorf("写入 %s 失败：%w", w.table, err), ""); rerr != nil {
+				return written, rerr
+			}
+			continue
+		}
+		written = append(written, r)
+	}
+	w.rc.Metrics.Output.Add(int64(len(written)))
+	w.rc.Log.Info("已提交 %d 行到 %s（%d 行被拒转错误输出）", len(written), w.table, len(rows)-len(written))
+	return written, nil
 }
 
 func (w *tableWriter) abort() { w.pending, w.args = nil, nil }
