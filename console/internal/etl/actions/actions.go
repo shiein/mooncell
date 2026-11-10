@@ -165,6 +165,7 @@ func init() {
 		Meta: core.Meta{ID: "pipeline", Order: 30, Label: "运行转换", Icon: "pipeline", Description: "运行一个转换，可把作业变量映射为转换参数（表达式）。转换的步骤度量与日志汇入本次作业运行。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Outputs: successPort, Keywords: []string{"Transformation", "转换"}},
 		Defaults: func() PipelineConfig { return PipelineConfig{Params: map[string]string{}} },
+		Refs:     func(c *PipelineConfig) []workflow.DefRef { return []workflow.DefRef{{ID: c.Pipeline, Kind: "pipeline"}} },
 		Validate: func(vc *workflow.ValidateContext, c *PipelineConfig) error {
 			if c.Pipeline == "" {
 				vc.Errorf("pipeline", "pipeline_required", "请选择要运行的转换")

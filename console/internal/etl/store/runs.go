@@ -32,6 +32,8 @@ type Run struct {
 	Status         string          `json:"status"`
 	Params         json.RawMessage `json:"params"`
 	Snapshot       json.RawMessage `json:"snapshot,omitempty"`
+	// Refs 是快照引用的定义文档（{id: {kind,name,revision,doc}}）；不进 API 响应。
+	Refs json.RawMessage `json:"-"`
 	Error          string          `json:"error,omitempty"`
 	TriggeredBy    string          `json:"triggeredBy"`
 	RowsRead       int64           `json:"rowsRead"`
@@ -82,10 +84,13 @@ func (s *Store) CreateRun(r Run) (Run, error) {
 	if len(r.Params) == 0 {
 		r.Params = json.RawMessage("{}")
 	}
+	if len(r.Refs) == 0 {
+		r.Refs = json.RawMessage("{}")
+	}
 	_, err := s.db.Exec(`INSERT INTO etl_runs (id, kind, definition_id, definition_name, revision, trigger, schedule_id, resume_of, status,
-		params_json, snapshot_json, triggered_by, queued_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		params_json, snapshot_json, refs_json, triggered_by, queued_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.Kind, r.DefinitionID, r.DefinitionName, r.Revision, r.Trigger, r.ScheduleID, r.ResumeOf, r.Status,
-		string(r.Params), string(r.Snapshot), r.TriggeredBy, r.QueuedAt)
+		string(r.Params), string(r.Snapshot), string(r.Refs), r.TriggeredBy, r.QueuedAt)
 	return r, err
 }
 
@@ -114,16 +119,16 @@ func (s *Store) MarkInterrupted() (int64, error) {
 
 // GetRun 取运行（含定义快照）。
 func (s *Store) GetRun(id string) (Run, error) {
-	var snap string
-	row := s.db.QueryRow(`SELECT `+runCols+`, snapshot_json FROM etl_runs WHERE id=?`, id)
+	var snap, refs string
+	row := s.db.QueryRow(`SELECT `+runCols+`, snapshot_json, refs_json FROM etl_runs WHERE id=?`, id)
 	var r Run
 	var params string
 	err := row.Scan(&r.ID, &r.Kind, &r.DefinitionID, &r.DefinitionName, &r.Revision, &r.Trigger, &r.ScheduleID, &r.ResumeOf, &r.Status, &params,
-		&r.Error, &r.TriggeredBy, &r.RowsRead, &r.RowsWritten, &r.LogCount, &r.LogDropped, &r.QueuedAt, &r.StartedAt, &r.FinishedAt, &snap)
+		&r.Error, &r.TriggeredBy, &r.RowsRead, &r.RowsWritten, &r.LogCount, &r.LogDropped, &r.QueuedAt, &r.StartedAt, &r.FinishedAt, &snap, &refs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}
-	r.Params, r.Snapshot = json.RawMessage(params), json.RawMessage(snap)
+	r.Params, r.Snapshot, r.Refs = json.RawMessage(params), json.RawMessage(snap), json.RawMessage(refs)
 	return r, err
 }
 

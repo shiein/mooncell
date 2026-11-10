@@ -99,6 +99,7 @@ func (s *Service) Trigger(defID string, opts TriggerOptions) (store.Run, error) 
 	var (
 		def      store.Definition
 		snapshot json.RawMessage
+		refs     json.RawMessage
 		revision int
 		err      error
 	)
@@ -114,7 +115,7 @@ func (s *Service) Trigger(defID string, opts TriggerOptions) (store.Run, error) 
 			return store.Run{}, errors.New("只有失败、中断或取消的运行可以继续")
 		}
 		def = store.Definition{ID: prev.DefinitionID, Kind: prev.Kind, Name: prev.DefinitionName}
-		snapshot, revision = prev.Snapshot, prev.Revision
+		snapshot, revision, refs = prev.Snapshot, prev.Revision, prev.Refs
 		if opts.Params == nil {
 			_ = json.Unmarshal(prev.Params, &opts.Params)
 		}
@@ -123,11 +124,19 @@ func (s *Service) Trigger(defID string, opts TriggerOptions) (store.Run, error) 
 			return store.Run{}, err
 		}
 		snapshot, revision = def.Doc, def.Revision
+		// 作业引用的转换定义随快照固定：执行与续跑都不再读后续修改。
+		if def.Kind == "workflow" {
+			collected, err := s.collectRefs(def.Doc)
+			if err != nil {
+				return store.Run{}, err
+			}
+			refs, _ = json.Marshal(collected)
+		}
 	}
 	params, _ := json.Marshal(orEmpty(opts.Params))
 	run, err := s.st.CreateRun(store.Run{
 		Kind: def.Kind, DefinitionID: def.ID, DefinitionName: def.Name, Revision: revision, Trigger: opts.Trigger,
-		ScheduleID: opts.ScheduleID, ResumeOf: opts.ResumeOf, Params: params, Snapshot: snapshot, TriggeredBy: opts.User,
+		ScheduleID: opts.ScheduleID, ResumeOf: opts.ResumeOf, Params: params, Snapshot: snapshot, Refs: refs, TriggeredBy: opts.User,
 	})
 	if err != nil {
 		return run, err
@@ -318,6 +327,44 @@ func kindsOf(vars *core.Vars) map[string]core.Kind {
 	return m
 }
 
+// runRef 是随运行快照保存的被引定义。
+type runRef struct {
+	Kind     string          `json:"kind"`
+	Name     string          `json:"name"`
+	Revision int             `json:"revision"`
+	Doc      json.RawMessage `json:"doc"`
+}
+
+// collectRefs 收集作业定义引用的全部定义文档（含被引作业的传递引用）。
+func (s *Service) collectRefs(doc json.RawMessage) (map[string]runRef, error) {
+	out := map[string]runRef{}
+	wf, err := workflow.Decode(doc)
+	if err != nil {
+		return nil, err // 与执行时同样的解码失败，尽早暴露
+	}
+	queue := workflow.CollectRefs(wf)
+	for len(queue) > 0 {
+		r := queue[0]
+		queue = queue[1:]
+		if _, ok := out[r.ID]; ok {
+			continue
+		}
+		d, err := s.st.GetDefinition(r.ID)
+		if err != nil {
+			return nil, fmt.Errorf("读取作业引用的定义失败（%s）：%w", r.ID, err)
+		}
+		out[r.ID] = runRef{Kind: d.Kind, Name: d.Name, Revision: d.Revision, Doc: d.Doc}
+		if d.Kind == "workflow" { // 传递引用（嵌套作业项声明 Refs 时生效）
+			sub, err := workflow.Decode(d.Doc)
+			if err != nil {
+				return nil, fmt.Errorf("解析作业引用的定义失败（%s）：%w", d.Name, err)
+			}
+			queue = append(queue, workflow.CollectRefs(sub)...)
+		}
+	}
+	return out, nil
+}
+
 // executeWorkflow 运行作业；续跑时复用上次成功节点。
 func (s *Service) executeWorkflow(ctx context.Context, a *activeRun, vars *core.Vars, opts TriggerOptions, logger *core.Logger) error {
 	def, err := workflow.Decode(a.run.Snapshot)
@@ -327,7 +374,8 @@ func (s *Service) executeWorkflow(ctx context.Context, a *activeRun, vars *core.
 	if err := applyParams(vars, def.Params, opts.Params); err != nil {
 		return err
 	}
-	host := &pipelineHost{s: s, a: a}
+	host := &pipelineHost{s: s, a: a, defs: map[string]runRef{}}
+	_ = json.Unmarshal(a.run.Refs, &host.defs)
 	e := s.env(host)
 	plan := workflow.Compile(ctx, def, workflow.CompileOptions{Env: e})
 	if plan.Problems.HasErrors() {
@@ -366,13 +414,27 @@ func (s *Service) executeWorkflow(ctx context.Context, a *activeRun, vars *core.
 }
 
 // pipelineHost 实现 actions.PipelineRunner：作业中运行转换，结果归入同一运行。
+// 被引定义优先取运行快照（defs）；快照没有（旧运行）时回落当前定义。
 type pipelineHost struct {
-	s *Service
-	a *activeRun
+	s    *Service
+	a    *activeRun
+	defs map[string]runRef
+}
+
+// refDoc 取引用定义：快照优先，回落当前库（旧运行没有 refs）。
+func (h *pipelineHost) refDoc(id string) (runRef, error) {
+	if r, ok := h.defs[id]; ok {
+		return r, nil
+	}
+	d, err := h.s.st.GetDefinition(id)
+	if err != nil {
+		return runRef{}, err
+	}
+	return runRef{Kind: d.Kind, Name: d.Name, Revision: d.Revision, Doc: d.Doc}, nil
 }
 
 func (h *pipelineHost) PipelineParams(ctx context.Context, id string) (string, []core.ParamDecl, error) {
-	d, err := h.s.st.GetDefinition(id)
+	d, err := h.refDoc(id)
 	if err != nil {
 		return "", nil, err
 	}
@@ -387,7 +449,7 @@ func (h *pipelineHost) PipelineParams(ctx context.Context, id string) (string, [
 }
 
 func (h *pipelineHost) RunPipeline(ctx context.Context, ec *workflow.ExecContext, id string, params map[string]core.Value) (actions.PipelineSummary, error) {
-	d, err := h.s.st.GetDefinition(id)
+	d, err := h.refDoc(id)
 	if err != nil {
 		return actions.PipelineSummary{}, fmt.Errorf("读取转换失败：%w", err)
 	}

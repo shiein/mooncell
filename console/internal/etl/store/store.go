@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -123,7 +124,8 @@ func Migrate(db *sql.DB) error {
 			log_dropped         INTEGER NOT NULL DEFAULT 0,
 			queued_at           INTEGER NOT NULL,
 			started_at          INTEGER NOT NULL DEFAULT 0,
-			finished_at         INTEGER NOT NULL DEFAULT 0
+			finished_at         INTEGER NOT NULL DEFAULT 0,
+			refs_json           TEXT NOT NULL DEFAULT '{}'  -- 运行快照引用的定义文档（作业→转换）
 		);
 		CREATE INDEX IF NOT EXISTS idx_etl_runs_def ON etl_runs(definition_id, queued_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_etl_runs_status ON etl_runs(status);
@@ -164,6 +166,37 @@ func Migrate(db *sql.DB) error {
 			PRIMARY KEY (scope, key)
 		);
 	`)
+	if err != nil {
+		return err
+	}
+	// 旧库可能缺少 refs_json 列：幂等补齐。
+	return ensureColumn(db, "etl_runs", "refs_json",
+		`ALTER TABLE etl_runs ADD COLUMN refs_json TEXT NOT NULL DEFAULT '{}'`)
+}
+
+// ensureColumn 幂等补齐旧库缺失的列。
+func ensureColumn(db *sql.DB, table, column, alterSQL string) error {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(alterSQL)
 	return err
 }
 

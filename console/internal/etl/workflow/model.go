@@ -152,12 +152,21 @@ type ActionType interface {
 	Execute(ctx context.Context, ec *ExecContext, cfg any) (Outcome, error)
 }
 
+// DefRef 是作业项引用的其他定义（如「运行转换」引用的转换）。
+// 触发运行时按此把被引定义文档一并存入运行快照，保证续跑/复跑语义不被后续修改影响。
+type DefRef struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"` // pipeline | workflow
+}
+
 // ActionDefinition 用泛型绑定配置结构。
 type ActionDefinition[C any] struct {
 	Meta     core.Meta
 	Defaults func() C
 	Migrate  func(from int, raw json.RawMessage) (json.RawMessage, error)
 	Outputs  func(cfg *C) map[string]core.Kind
+	// Refs 可选：声明该作业项引用的定义，供运行快照收集。
+	Refs     func(cfg *C) []DefRef
 	Validate func(vc *ValidateContext, cfg *C) error
 	Execute  func(ctx context.Context, ec *ExecContext, cfg *C) (Outcome, error)
 }
@@ -220,3 +229,40 @@ func (t *typedAction[C]) Execute(ctx context.Context, ec *ExecContext, cfg any) 
 
 // Actions 是全局作业项注册表（actions 包 init 注册）。
 var Actions = core.NewRegistry[ActionType]()
+
+// refLister 是实现了引用声明的作业项类型。
+type refLister interface{ RefList(cfg any) []DefRef }
+
+// RefList 实现 refLister（未声明 Refs 时返回 nil）。
+func (t *typedAction[C]) RefList(cfg any) []DefRef {
+	if t.d.Refs == nil {
+		return nil
+	}
+	return t.d.Refs(cfg.(*C))
+}
+
+// CollectRefs 收集作业定义中全部作业项声明的引用（去重前的原始列表）。
+// 未知类型或解码失败的节点跳过——编译校验会另行报告，此处只做尽力收集。
+func CollectRefs(def *Definition) []DefRef {
+	var out []DefRef
+	for _, n := range def.Nodes {
+		at, ok := Actions.Get(n.Type)
+		if !ok {
+			continue
+		}
+		rl, ok := at.(refLister)
+		if !ok {
+			continue
+		}
+		cfg, err := at.Decode(n.Config, n.Version)
+		if err != nil {
+			continue
+		}
+		for _, r := range rl.RefList(cfg) {
+			if r.ID != "" {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}

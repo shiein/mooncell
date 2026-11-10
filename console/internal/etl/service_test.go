@@ -243,3 +243,157 @@ func TestDrainGate(t *testing.T) {
 	}
 	h.s.EndDrain()
 }
+
+// 作业引用的转换定义随运行快照固定：触发后修改转换不影响本次执行与续跑。
+func TestRunSnapshotRefs(t *testing.T) {
+	h := newHarness(t)
+	target := filepath.Join(t.TempDir(), "target.db")
+	ct, _ := h.s.box.Seal("pw", "conn_t")
+	c, err := h.s.st.CreateConnectionWithID(store.Connection{Config: conn.Config{ID: "conn_t", Name: "目标", DBType: "sqlite", Database: target}}, &ct, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hd, err := h.s.pool.Get(t.Context(), c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hd.DB.Exec(`CREATE TABLE out (n INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+
+	pipeDoc := func(limit int, connID string) json.RawMessage {
+		b, _ := json.Marshal(map[string]any{
+			"kind": "pipeline", "params": []any{},
+			"nodes": []map[string]any{
+				{"id": "gen", "type": "generate_rows", "name": "生成", "config": map[string]any{"limit": limit, "sequenceField": "n"}},
+				{"id": "out", "type": "table_output", "name": "写入", "config": map[string]any{"connection": connID, "table": "out"}},
+			},
+			"hops": []map[string]any{{"id": "h", "from": "gen", "fromPort": "main", "to": "out", "toPort": "main"}},
+		})
+		return b
+	}
+	wfDoc := func(pid string) json.RawMessage {
+		b, _ := json.Marshal(map[string]any{
+			"kind": "workflow", "params": []any{},
+			"nodes": []map[string]any{
+				{"id": "start", "type": "start", "name": "开始", "config": map[string]any{}},
+				{"id": "t", "type": "pipeline", "name": "转换", "config": map[string]any{"pipeline": pid, "params": map[string]any{}}},
+			},
+			"hops": []map[string]any{{"id": "h", "from": "start", "fromPort": "success", "to": "t", "toPort": "main"}},
+		})
+		return b
+	}
+	waitDone := func(runID string) store.Run {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			r, _ := h.s.st.GetRun(runID)
+			if r.Status != store.RunQueued && r.Status != store.RunRunning {
+				return r
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		t.Fatal("运行未在时限内结束")
+		return store.Run{}
+	}
+
+	// ① 触发即固定引用：运行后修改转换，refs 仍是触发时版本
+	p, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "写目标", Doc: pipeDoc(3, c.ID)}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := h.s.st.CreateDefinition(store.Definition{Kind: "workflow", Name: "作业", Doc: wfDoc(p.ID)}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := h.s.Trigger(w.ID, TriggerOptions{Trigger: "manual", User: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1 := waitDone(run.ID)
+	if r1.Status != store.RunSucceeded {
+		t.Fatalf("首次运行应成功：%s %s", r1.Status, r1.Error)
+	}
+	// 修改转换（limit 3→9），快照仍应是 v1
+	if _, err := h.s.st.UpdateDefinition(store.Definition{ID: p.ID, Kind: "pipeline", Name: "写目标", Doc: pipeDoc(9, c.ID)}, p.Revision, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := h.s.st.GetRun(run.ID)
+	var refs map[string]runRef
+	if err := json.Unmarshal(got.Refs, &refs); err != nil || len(refs) != 1 {
+		t.Fatalf("refs 应含 1 个被引定义：%s %v", got.Refs, err)
+	}
+	rr := refs[p.ID]
+	if rr.Name != "写目标" || rr.Revision != 1 || rr.Kind != "pipeline" {
+		t.Fatalf("refs 内容异常：%+v", rr)
+	}
+	var snapDoc struct {
+		Nodes []struct {
+			Config struct {
+				Limit int `json:"limit"`
+			} `json:"config"`
+		} `json:"nodes"`
+	}
+	_ = json.Unmarshal(rr.Doc, &snapDoc)
+	if snapDoc.Nodes[0].Config.Limit != 3 {
+		t.Fatalf("快照应固定 limit=3，实际 %d", snapDoc.Nodes[0].Config.Limit)
+	}
+	var n int
+	hd.DB.QueryRow(`SELECT count(*) FROM out`).Scan(&n)
+	if n != 3 {
+		t.Fatalf("目标表应 3 行：%d", n)
+	}
+
+	// ② 续跑固定快照：转换在快照中是坏版本（连接不存在），续跑前修好定义也不应生效
+	p2, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "坏转换", Doc: pipeDoc(1, "missing_conn")}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2, err := h.s.st.CreateDefinition(store.Definition{Kind: "workflow", Name: "坏作业", Doc: wfDoc(p2.ID)}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run2, err := h.s.Trigger(w2.ID, TriggerOptions{Trigger: "manual", User: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := waitDone(run2.ID)
+	if r2.Status != store.RunFailed {
+		t.Fatalf("连接缺失的运行应失败：%s", r2.Status)
+	}
+	// 修好转换：换成真连接
+	if _, err := h.s.st.UpdateDefinition(store.Definition{ID: p2.ID, Kind: "pipeline", Name: "坏转换", Doc: pipeDoc(1, c.ID)}, p2.Revision, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	// 续跑必须用快照里的坏版本，仍应失败（修复前行为：读当前定义 → 会成功）
+	res2, err := h.s.Trigger("", TriggerOptions{Trigger: "resume", ResumeOf: run2.ID, User: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr2 := waitDone(res2.ID)
+	if rr2.Status != store.RunFailed {
+		t.Fatalf("续跑应沿用快照中的坏版本而失败，实际 %s", rr2.Status)
+	}
+
+	// ③ 兼容：旧运行无 refs（模拟 refs_json='{}'），续跑回落当前定义 → 修好的转换应成功
+	if _, err := h.db.Exec(`UPDATE etl_runs SET refs_json='{}' WHERE id=?`, run2.ID); err != nil {
+		t.Fatal(err)
+	}
+	res3, err := h.s.Trigger("", TriggerOptions{Trigger: "resume", ResumeOf: run2.ID, User: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr3 := waitDone(res3.ID)
+	if rr3.Status != store.RunSucceeded {
+		t.Fatalf("旧运行（无 refs）续跑应回落当前定义并成功：%s %s", rr3.Status, rr3.Error)
+	}
+
+	// ④ 引用缺失在触发时尽早报错
+	wBad, err := h.s.st.CreateDefinition(store.Definition{Kind: "workflow", Name: "空引用", Doc: wfDoc("no_such_def")}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.s.Trigger(wBad.ID, TriggerOptions{Trigger: "manual"}); err == nil || !strings.Contains(err.Error(), "引用的定义") {
+		t.Fatalf("引用缺失应在触发时报错：%v", err)
+	}
+}
