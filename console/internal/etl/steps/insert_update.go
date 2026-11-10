@@ -507,39 +507,26 @@ func (u *upserter) upsertAll(ctx context.Context, tx conn.Querier, rows []iuRow,
 	return affected, nil
 }
 
-// updateBatch 用一条 CASE UPDATE 更新多行（通用路径，不要求唯一约束）。
-// 每行参数 = set 列数×(键数+1) + 键数，按 MaxParams 分块。
+// updateBatch 用「派生行集 + 连接更新」批量 UPDATE（通用路径，不要求唯一约束）。
+// 每行参数 = 键数 + set 列数（行主序），按 MaxParams 与 CommitSize 分块。
 func (u *upserter) updateBatch(ctx context.Context, tx conn.Querier, rows []iuRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	d := u.h.Dialect
-	set, keys := columnNames(u.plan.update), columnNames(u.plan.keys)
-	casts := make([]string, len(u.plan.update))
-	for i := range casts {
-		casts[i] = d.CaseCast(u.plan.update[i].target)
+	keys := make([]conn.DerivedCol, len(u.plan.keys))
+	for i, c := range u.plan.keys {
+		keys[i] = conn.DerivedCol{Name: c.column.Name, Cast: d.ParamCast(c.target)}
 	}
-	perRow := len(set)*(len(keys)+1) + len(keys)
+	set := make([]conn.DerivedCol, len(u.plan.update))
+	for i, c := range u.plan.update {
+		set[i] = conn.DerivedCol{Name: c.column.Name, Cast: d.ParamCast(c.target)}
+	}
+	perRow := len(keys) + len(set)
 	per := min(u.cfg.CommitSize, max(1, d.MaxParams()/perRow))
 	for start := 0; start < len(rows); start += per {
 		end := min(start+per, len(rows))
 		args := make([]any, 0, (end-start)*perRow)
-		for i := range set {
-			for _, r := range rows[start:end] {
-				for j, v := range r.keyVals {
-					b, err := d.Bind(v, u.plan.keys[j].target)
-					if err != nil {
-						return err
-					}
-					args = append(args, b)
-				}
-				b, err := d.Bind(r.updVals[i], u.plan.update[i].target)
-				if err != nil {
-					return err
-				}
-				args = append(args, b)
-			}
-		}
 		for _, r := range rows[start:end] {
 			for i, v := range r.keyVals {
 				b, err := d.Bind(v, u.plan.keys[i].target)
@@ -548,8 +535,15 @@ func (u *upserter) updateBatch(ctx context.Context, tx conn.Querier, rows []iuRo
 				}
 				args = append(args, b)
 			}
+			for i, v := range r.updVals {
+				b, err := d.Bind(v, u.plan.update[i].target)
+				if err != nil {
+					return err
+				}
+				args = append(args, b)
+			}
 		}
-		if _, err := tx.ExecContext(ctx, conn.UpdateCaseSQL(d, u.table, set, keys, casts, end-start), args...); err != nil {
+		if _, err := tx.ExecContext(ctx, conn.UpdateFromSQL(d, u.table, keys, set, end-start), args...); err != nil {
 			return fmt.Errorf("更新 %s 失败：%w", u.table, err)
 		}
 	}

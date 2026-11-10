@@ -225,49 +225,109 @@ func keyCond(d Dialect, b *strings.Builder, keys []string, p int) int {
 	return p
 }
 
-// UpdateCaseSQL 生成 CASE 批量 UPDATE：一条语句更新 nrows 行，
-// 参数顺序为（每 set 列 × 每行：key 参数 + 值）+（每行 key 参数）。
-// 键列不可能是 NULL（上游已过滤），等值匹配安全。
-// casts 与 set 一一对应：非空时 THEN 参数显式 CAST，消除不能推断参数类型的方言歧义。
-func UpdateCaseSQL(d Dialect, t TableRef, set, keys, casts []string, nrows int) string {
+// DerivedCol 是派生行集中的一列：目标列名 + 首行参数可选的 CAST 目标类型。
+type DerivedCol struct {
+	Name string
+	Cast string // 空 = 方言可自动推断参数类型（见 Dialect.ParamCast）
+}
+
+// UpdateFromSQL 生成「派生行集 + 连接更新」的批量 UPDATE：一条语句更新 nrows 行。
+// 参数顺序为按行主序的 keys+set 值；首行参数按 DerivedCol.Cast 显式 CAST（UNION 列
+// 类型由首行决定）。键列不可能是 NULL（上游已过滤），等值匹配安全。
+//
+//	UPDATE t SET c = m.c FROM (SELECT ? AS k, ? AS c UNION ALL …) m WHERE t.k = m.k   (PG/KB/DM/SQLite)
+//	UPDATE t JOIN (SELECT ? AS k, ? AS c UNION ALL …) m ON t.k = m.k SET t.c = m.c    (MySQL)
+func UpdateFromSQL(d Dialect, t TableRef, keys, set []DerivedCol, nrows int) string {
+	cols := append(append(make([]DerivedCol, 0, len(keys)+len(set)), keys...), set...)
 	var b strings.Builder
+	p := 1
+	next := func() string {
+		s := d.Placeholder(p)
+		p++
+		return s
+	}
+	mysql := d.ID() == "mysql"
 	b.WriteString("UPDATE ")
 	b.WriteString(d.Qualified(t))
-	b.WriteString(" SET ")
-	p := 1
-	for i, c := range set {
-		if i > 0 {
-			b.WriteString(", ")
+	if mysql {
+		b.WriteString(" t JOIN (")
+	} else {
+		// 表别名关键字：SQLite 要求 AS，Oracle 系（达梦）不允许 AS，PG 系两种皆可
+		if d.ID() == "dm" {
+			b.WriteString(" t SET ")
+		} else {
+			b.WriteString(" AS t SET ")
 		}
-		b.WriteString(d.Quote(c))
-		b.WriteString(" = CASE")
-		for r := 0; r < nrows; r++ {
-			b.WriteString(" WHEN ")
-			p = keyCond(d, &b, keys, p)
-			b.WriteString(" THEN ")
-			if casts[i] != "" {
-				b.WriteString("CAST(")
-				b.WriteString(d.Placeholder(p))
-				b.WriteString(" AS ")
-				b.WriteString(casts[i]) // 服务器元数据给出的类型名，非用户输入
-				b.WriteString(")")
-			} else {
-				b.WriteString(d.Placeholder(p))
+		for i, c := range set {
+			if i > 0 {
+				b.WriteString(", ")
 			}
-			p++
+			b.WriteString(d.Quote(c.Name))
+			b.WriteString(" = m.")
+			b.WriteString(d.Quote(c.Name))
 		}
-		b.WriteString(" ELSE ")
-		b.WriteString(d.Quote(c))
-		b.WriteString(" END")
+		b.WriteString(" FROM (")
 	}
-	b.WriteString(" WHERE ")
 	for r := 0; r < nrows; r++ {
 		if r > 0 {
-			b.WriteString(" OR ")
+			b.WriteString(" UNION ALL ")
 		}
-		b.WriteByte('(')
-		p = keyCond(d, &b, keys, p)
-		b.WriteByte(')')
+		b.WriteString("SELECT ")
+		for i, c := range cols {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if r == 0 && c.Cast != "" {
+				b.WriteString("CAST(")
+				b.WriteString(next())
+				b.WriteString(" AS ")
+				b.WriteString(c.Cast) // 服务器元数据给出的类型名，非用户输入
+				b.WriteString(")")
+			} else {
+				b.WriteString(next())
+			}
+			if r == 0 {
+				b.WriteString(" AS ")
+				b.WriteString(d.Quote(c.Name))
+			}
+		}
+		if r == 0 && d.ID() == "dm" {
+			b.WriteString(" FROM DUAL") // 达梦 SELECT 必须有 FROM
+		}
+	}
+	b.WriteString(") m ")
+	if mysql {
+		b.WriteString("ON ")
+		for i, c := range keys {
+			if i > 0 {
+				b.WriteString(" AND ")
+			}
+			b.WriteString("t.")
+			b.WriteString(d.Quote(c.Name))
+			b.WriteString(" = m.")
+			b.WriteString(d.Quote(c.Name))
+		}
+		b.WriteString(" SET ")
+		for i, c := range set {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString("t.")
+			b.WriteString(d.Quote(c.Name))
+			b.WriteString(" = m.")
+			b.WriteString(d.Quote(c.Name))
+		}
+		return b.String()
+	}
+	b.WriteString("WHERE ")
+	for i, c := range keys {
+		if i > 0 {
+			b.WriteString(" AND ")
+		}
+		b.WriteString("t.")
+		b.WriteString(d.Quote(c.Name))
+		b.WriteString(" = m.")
+		b.WriteString(d.Quote(c.Name))
 	}
 	return b.String()
 }

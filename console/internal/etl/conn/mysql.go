@@ -227,5 +227,29 @@ func (d mysqlDialect) UpsertSQL(t TableRef, cols, keys, set []string, nrows int,
 	return b.String(), true
 }
 
-// CaseCast：go-sql-driver 按 Go 类型声明参数，MySQL 服务端按列类型推断，无需 CAST。
-func (mysqlDialect) CaseCast(core.Field) string { return "" }
+// ParamCast：派生行集的列类型由首行参数决定——文本绑定参数（如 DECIMAL 键走字符串）
+// 若不加 CAST，与数值列连接时会被强制 DOUBLE 比较（丢精度且废索引）。按逻辑类型映射
+// 为 MySQL CAST 安全目标（VARCHAR/DATETIME/UNSIGNED 等原生名不可作 CAST 目标）。
+func (mysqlDialect) ParamCast(f core.Field) string {
+	switch f.Kind {
+	case core.KindInteger:
+		if strings.Contains(strings.ToUpper(f.NativeType), "UNSIGNED") {
+			return "UNSIGNED"
+		}
+		return "SIGNED"
+	case core.KindDecimal:
+		if f.Precision > 0 {
+			return fmt.Sprintf("DECIMAL(%d,%d)", f.Precision, max(f.Scale, 0))
+		}
+		return "DECIMAL(65,30)"
+	case core.KindTimestamp:
+		return "DATETIME"
+	case core.KindDate:
+		return "DATE"
+	case core.KindBoolean:
+		return "SIGNED"
+	case core.KindBinary:
+		return "BINARY"
+	}
+	return "" // 字符串 / 浮点 / JSON 等：隐式转换正确且不影响连接类型
+}

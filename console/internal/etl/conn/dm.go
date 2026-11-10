@@ -210,8 +210,8 @@ func (dm) UpsertSQL(TableRef, []string, []string, []string, int, bool) (string, 
 	return "", false
 }
 
-// CaseCast：达梦驱动按 Go 类型声明参数（DM8 真机验证 CASE THEN 无需 CAST）。
-func (dm) CaseCast(core.Field) string { return "" }
+// ParamCast：达梦驱动按 Go 类型声明参数，服务端按 Oracle 风格隐式转换（DM8 真机验证）。
+func (dm) ParamCast(core.Field) string { return "" }
 
 func firstNonEmpty(ss ...string) string {
 	for _, s := range ss {

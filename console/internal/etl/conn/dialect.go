@@ -142,10 +142,10 @@ type Dialect interface {
 	// ok=false 表示方言不支持原生 upsert，调用方走通用 CASE 批量更新。
 	UpsertSQL(t TableRef, cols, keys, set []string, nrows int, doUpdate bool) (string, bool)
 
-	// CaseCast 返回 CASE 批量 UPDATE 中 THEN 参数应 CAST 到的 SQL 类型；
-	// 空串表示方言/驱动能按上下文推断参数类型，无需显式 CAST。
-	// gokb 以未知类型发送参数，Kingbase 把 THEN 分支解析为 TEXT，与非文本列冲突。
-	CaseCast(f core.Field) string
+	// ParamCast 返回派生行集参数应 CAST 到的 SQL 类型；空串表示方言/驱动
+	// 能按上下文推断参数类型，无需显式 CAST。派生行集（VALUES/UNION ALL）中
+	// 无类型参数会被服务端按 TEXT 推断，与非文本列连接或赋值冲突（gokb 尤甚）。
+	ParamCast(f core.Field) string
 }
 
 // DialectMeta 是下发前端的方言目录项。

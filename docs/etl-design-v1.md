@@ -295,9 +295,13 @@ type Dialect interface {
     （`VALUES(col)` 兼容 5.7/8/MariaDB）；`noUpdate` 时 `DO NOTHING` / `key=key` 空更新。
     MySQL 额外要求表上不存在键以外的唯一索引——`ON DUPLICATE` 对任意唯一冲突都会更新命中行，
     可能改到不匹配键的行，此时回退通用路径。达梦无冲突子句 upsert，走通用路径。
-  * 通用路径：一条 `UPDATE … SET c = CASE WHEN k=… THEN ? ELSE c END WHERE (k=…) OR …`，
-    按 `MaxParams` 与 `commitSize` 分块；Kingbase 需对 THEN 参数 `CAST` 到列原生类型
-    （gokb 参数无类型，服务端把 THEN 解析为 TEXT）。
+  * 通用路径：`UPDATE t SET c = m.c FROM (SELECT ? k, ? c UNION ALL …) m WHERE t.k = m.k`
+    （MySQL 为 `UPDATE t JOIN (…) m ON … SET t.c = m.c`；达梦首行 SELECT 带 `FROM DUAL`），
+    派生行集 + 连接更新 O(n)——不用 `CASE WHEN k=…`（每行线性扫 WHEN 链，随批大小平方退化，
+    实测 MySQL 5000 行 CASE 更新 ~2.4s/条）。首行参数按 `Dialect.ParamCast` 显式 CAST：
+    UNION 列类型由首行决定，无类型/文本绑定参数与非文本列连接会冲突或强制 DOUBLE 比较
+    （PG/KB CAST 到列原生类型；MySQL 按逻辑类型映射 SIGNED/DECIMAL(p,s)/DATETIME…；
+    DM/SQLite 无需 CAST）。按 `MaxParams` 与 `commitSize` 分块。
 * 读：`QueryContext` + 流式 `rows.Next()`。
 
 **真机认证结论**（`conn/live_test.go` + `actions/live_test.go`，build tag `etl_live`，

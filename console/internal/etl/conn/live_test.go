@@ -316,11 +316,11 @@ func liveDialect(t *testing.T, id string) {
 	if dc.extra != nil {
 		dc.extra(t, h, cfg, pw)
 	}
-	liveCaseUpdate(t, h)
+	liveUpdateFrom(t, h)
 }
 
-// CASE 批量 UPDATE（insert_update 通用路径）：2 行一批更新、未命中行不变。
-func liveCaseUpdate(t *testing.T, h *conn.Handle) {
+// 派生行集连接 UPDATE（insert_update 通用路径）：2 行一批更新、未命中行不变。
+func liveUpdateFrom(t *testing.T, h *conn.Handle) {
 	ctx := context.Background()
 	d := h.Dialect
 	ref := conn.TableRef{Schema: d.FoldIdent(conn.EffectiveSchema(h.Config, "")), Name: d.FoldIdent("etl_case")}
@@ -337,22 +337,19 @@ func liveCaseUpdate(t *testing.T, h *conn.Handle) {
 	if err != nil {
 		t.Fatalf("Columns 失败：%v", err)
 	}
-	castOf := func(name string) string {
+	colOf := func(name string) conn.DerivedCol {
 		for _, c := range cols {
 			if strings.EqualFold(c.Name, name) {
-				return d.CaseCast(d.FieldFor(c))
+				return conn.DerivedCol{Name: c.Name, Cast: d.ParamCast(d.FieldFor(c))}
 			}
 		}
-		return ""
+		t.Fatalf("列 %s 不存在", name)
+		return conn.DerivedCol{}
 	}
-	q := conn.UpdateCaseSQL(d, ref, []string{v, n}, []string{k}, []string{castOf(v), castOf(n)}, 2)
-	// 参数顺序：set v（每行 key+val）→ set n（每行 key+val）→ WHERE（每行 key）
-	res, err := h.DB.ExecContext(ctx, q, int64(1), "x", int64(2), "y", int64(1), int64(10), int64(2), int64(20), int64(1), int64(2))
-	if err != nil {
-		t.Fatalf("CASE 批量 UPDATE 失败：%v", err)
-	}
-	if aff, _ := res.RowsAffected(); aff != 2 {
-		t.Errorf("CASE UPDATE 应影响 2 行，实际 %d", aff)
+	q := conn.UpdateFromSQL(d, ref, []conn.DerivedCol{colOf(k)}, []conn.DerivedCol{colOf(v), colOf(n)}, 2)
+	// 参数顺序：行主序（key, v, n）× 2 行；RowsAffected 各方言语义不一（达梦报逻辑行数），按值校验
+	if _, err := h.DB.ExecContext(ctx, q, int64(1), "x", int64(10), int64(2), "y", int64(20)); err != nil {
+		t.Fatalf("派生行集批量 UPDATE 失败：%v", err)
 	}
 	var sv string
 	var sn int

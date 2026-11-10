@@ -184,13 +184,10 @@ func (d *postgres) UpsertSQL(t TableRef, cols, keys, set []string, nrows int, do
 	return UpsertOnConflict(d, t, cols, keys, set, nrows, doUpdate), true
 }
 
-// CaseCast：gokb 以未知类型发送参数，Kingbase 把 CASE THEN 分支解析为 TEXT，
-// 与 INTEGER 等非文本列的 ELSE 分支冲突；CAST 到列原生类型（服务器元数据给出）消除歧义。
-// pgx 为参数声明了确切 oid，postgres 无需 CAST。
-func (d *postgres) CaseCast(f core.Field) string {
-	if d.id != "kingbase" || f.NativeType == "" {
-		return ""
-	}
+// ParamCast：派生行集（UNION ALL/VALUES）的首行参数决定列类型——文本绑定的参数
+//（如 decimal 走字符串）会被推断为 TEXT，与 numeric 列赋值冲突；gokb 更是把全部参数
+// 当无类型发送。CAST 到列原生类型（服务器元数据给出）消除歧义。
+func (d *postgres) ParamCast(f core.Field) string {
 	return f.NativeType
 }
 

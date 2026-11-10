@@ -16,28 +16,36 @@ func mustDialect(t *testing.T, id string) Dialect {
 	return d
 }
 
-func TestUpdateCaseSQL(t *testing.T) {
+func TestUpdateFromSQL(t *testing.T) {
 	pg := mustDialect(t, "postgres")
 	tab := TableRef{Schema: "public", Name: "t"}
-	// 2 set 列、1 键、2 行：占位符应为 set1(k1,k2,v1,v2)=4 + set2=4 + where(k,k)=2
-	q := UpdateCaseSQL(pg, tab, []string{"a", "b"}, []string{"k"}, []string{"", ""}, 2)
-	want := `UPDATE "public"."t" SET "a" = CASE WHEN "k" = $1 THEN $2 WHEN "k" = $3 THEN $4 ELSE "a" END, ` +
-		`"b" = CASE WHEN "k" = $5 THEN $6 WHEN "k" = $7 THEN $8 ELSE "b" END WHERE ("k" = $9) OR ("k" = $10)`
+	// PG/KB/SQLite/DM 形态：UPDATE … SET c=m.c FROM (SELECT … UNION ALL …) m WHERE t.k=m.k
+	keys := []DerivedCol{{Name: "k", Cast: "bigint"}}
+	set := []DerivedCol{{Name: "a", Cast: "numeric(12,2)"}, {Name: "b"}}
+	q := UpdateFromSQL(pg, tab, keys, set, 2)
+	want := `UPDATE "public"."t" AS t SET "a" = m."a", "b" = m."b" FROM (` +
+		`SELECT CAST($1 AS bigint) AS "k", CAST($2 AS numeric(12,2)) AS "a", $3 AS "b" ` +
+		`UNION ALL SELECT $4, $5, $6) m WHERE t."k" = m."k"`
 	if q != want {
-		t.Errorf("CASE UPDATE 不符：\n%s\n期望：\n%s", q, want)
+		t.Errorf("PG 派生行集 UPDATE 不符：\n%s\n期望：\n%s", q, want)
 	}
-	// 复合键 + CAST：每个 WHEN 两个键参数，THEN 带 CAST
-	q = UpdateCaseSQL(pg, tab, []string{"a"}, []string{"k1", "k2"}, []string{"numeric"}, 2)
-	want = `UPDATE "public"."t" SET "a" = CASE WHEN "k1" = $1 AND "k2" = $2 THEN CAST($3 AS numeric) ` +
-		`WHEN "k1" = $4 AND "k2" = $5 THEN CAST($6 AS numeric) ELSE "a" END WHERE ("k1" = $7 AND "k2" = $8) OR ("k1" = $9 AND "k2" = $10)`
-	if q != want {
-		t.Errorf("复合键 CASE UPDATE 不符：\n%s\n期望：\n%s", q, want)
-	}
-	// MySQL 占位符为 ?
+	// MySQL 形态：UPDATE … JOIN (SELECT … UNION ALL …) m ON … SET t.c=m.c
 	my := mustDialect(t, "mysql")
-	q = UpdateCaseSQL(my, TableRef{Schema: "db", Name: "t"}, []string{"a"}, []string{"k"}, []string{""}, 2)
-	if n := strings.Count(q, "?"); n != 6 {
-		t.Errorf("MySQL CASE UPDATE 占位符应为 6（2行×2 + 2行×1），实际 %d：%s", n, q)
+	q = UpdateFromSQL(my, TableRef{Schema: "db", Name: "t"},
+		[]DerivedCol{{Name: "k"}}, []DerivedCol{{Name: "a"}}, 2)
+	want = "UPDATE `db`.`t` t JOIN (SELECT ? AS `k`, ? AS `a` UNION ALL SELECT ?, ?) m " +
+		"ON t.`k` = m.`k` SET t.`a` = m.`a`"
+	if q != want {
+		t.Errorf("MySQL 派生行集 UPDATE 不符：\n%s\n期望：\n%s", q, want)
+	}
+	// 达梦首行 SELECT 需 FROM DUAL
+	dmd := mustDialect(t, "dm")
+	q = UpdateFromSQL(dmd, tab, []DerivedCol{{Name: "k"}}, []DerivedCol{{Name: "a"}}, 1)
+	if !strings.Contains(q, "SELECT ? AS \"k\", ? AS \"a\" FROM DUAL") {
+		t.Errorf("达梦派生行集应含 FROM DUAL：%s", q)
+	}
+	if !strings.Contains(q, ") m WHERE t.\"k\" = m.\"k\"") {
+		t.Errorf("达梦 UPDATE...FROM 形态不符：%s", q)
 	}
 }
 
@@ -75,16 +83,35 @@ func TestUpsertSQL(t *testing.T) {
 	}
 }
 
-func TestCaseCast(t *testing.T) {
-	kb := mustDialect(t, "kingbase")
-	if got := kb.CaseCast(core.Field{NativeType: "numeric(12,2)"}); got != "numeric(12,2)" {
-		t.Errorf("kingbase 应 CAST 到列原生类型：%q", got)
+func TestParamCast(t *testing.T) {
+	// PG 系统一返回列原生类型（派生行集首行 CAST 目标）
+	for _, id := range []string{"postgres", "kingbase"} {
+		if got := mustDialect(t, id).ParamCast(core.Field{NativeType: "numeric(12,2)"}); got != "numeric(12,2)" {
+			t.Errorf("%s 应 CAST 到列原生类型：%q", id, got)
+		}
 	}
-	if got := kb.CaseCast(core.Field{NativeType: ""}); got != "" {
-		t.Errorf("无原生类型时不 CAST：%q", got)
+	// MySQL 按逻辑类型映射 CAST 安全目标
+	my := mustDialect(t, "mysql")
+	cases := []struct {
+		f    core.Field
+		want string
+	}{
+		{core.Field{Kind: core.KindInteger, NativeType: "bigint"}, "SIGNED"},
+		{core.Field{Kind: core.KindInteger, NativeType: "bigint unsigned"}, "UNSIGNED"},
+		{core.Field{Kind: core.KindDecimal, NativeType: "decimal", Precision: 14, Scale: 2}, "DECIMAL(14,2)"},
+		{core.Field{Kind: core.KindDecimal, NativeType: "decimal", Precision: -1}, "DECIMAL(65,30)"},
+		{core.Field{Kind: core.KindTimestamp}, "DATETIME"},
+		{core.Field{Kind: core.KindString, NativeType: "varchar(64)"}, ""},
+		{core.Field{Kind: core.KindNumber}, ""},
 	}
-	for _, id := range []string{"postgres", "mysql", "dm", "sqlite"} {
-		if got := mustDialect(t, id).CaseCast(core.Field{NativeType: "int"}); got != "" {
+	for _, c := range cases {
+		if got := my.ParamCast(c.f); got != c.want {
+			t.Errorf("mysql ParamCast(%+v) = %q，期望 %q", c.f, got, c.want)
+		}
+	}
+	// DM/SQLite 无需 CAST
+	for _, id := range []string{"dm", "sqlite"} {
+		if got := mustDialect(t, id).ParamCast(core.Field{Kind: core.KindInteger, NativeType: "int"}); got != "" {
 			t.Errorf("%s 无需 CAST：%q", id, got)
 		}
 	}

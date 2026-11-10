@@ -132,5 +132,5 @@ func (d sqliteDialect) UpsertSQL(t TableRef, cols, keys, set []string, nrows int
 	return UpsertOnConflict(d, t, cols, keys, set, nrows, doUpdate), true
 }
 
-// CaseCast：SQLite 动态亲和类型，CASE THEN 参数无需 CAST。
-func (sqliteDialect) CaseCast(core.Field) string { return "" }
+// ParamCast：SQLite 动态亲和类型，派生行集参数无需 CAST。
+func (sqliteDialect) ParamCast(core.Field) string { return "" }
