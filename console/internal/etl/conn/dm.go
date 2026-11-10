@@ -15,8 +15,14 @@ import (
 
 // dm 是达梦 DM8 方言。元数据走 Oracle 兼容视图（all_tab_columns 等）。
 //
-// TODO(真机)：① 大结果集是否需要显式 fetch size 才能流式读取；② NUMBER/DECIMAL 扫描出的 Go 类型；
-// ③ 单语句参数上限（当前保守取 8000）；④ TIMESTAMP WITH TIME ZONE 的读写语义。
+// 真机结论（DM8 + gitee.com/chunanyong/dm v1.8.20，CASE_SENSITIVE=Y）：
+//   - 流式读取无需显式 fetch size：5000 行结果集首行 ~350µs 即返回。
+//   - 扫描 Go 类型：NUMBER/DECIMAL → string（走文本→decimal 路径）；BIT → int8；
+//     DATE/TIMESTAMP → time.Time；TIMESTAMP WITH TIME ZONE（元数据名
+//     DATETIME WITH TIME ZONE）→ 带固定偏移的 time.Time。
+//   - 单语句绑定参数上限实测 65535（IN 列表二分探测）。
+//   - 未加引号标识符一律存为大写：FoldIdent 把全小写输入折叠为大写，
+//     元数据查询用 UPPER()=UPPER() 匹配两种存储形态。
 type dm struct{}
 
 func init() { register(dm{}) }
@@ -27,11 +33,21 @@ func (dm) DefaultPort() int       { return 5236 }
 func (dm) DriverName() string     { return "dm" }
 func (dm) HasCatalog() bool       { return false }
 func (dm) Internal() bool         { return false }
-func (dm) MaxParams() int         { return 8000 }
+// 真机实测（DM8，dmdms/chunanyong 驱动）：单语句绑定参数上限 65535。
+func (dm) MaxParams() int         { return 65535 }
 func (dm) VersionSQL() string     { return "SELECT banner FROM v$version WHERE rownum = 1" }
 func (dm) Placeholder(int) string { return "?" }
 func (dm) Quote(s string) string  { return quoteDouble(s) }
-func (dm) Lexer() sqltext.Options { return sqltext.Options{} }
+// DM8 CASE_SENSITIVE=Y（与既有业务库一致）下未加引号标识符一律存为大写。
+// 全小写输入按未加引号 SQL 语义折叠为大写；含大写的输入视为用户刻意给出确切大小写
+// （可能是引号创建的混合大小写对象），原样引用。
+func (dm) FoldIdent(s string) string {
+	if s == strings.ToLower(s) {
+		return strings.ToUpper(s)
+	}
+	return s
+}
+func (dm) Lexer() sqltext.Options    { return sqltext.Options{} }
 
 func (d dm) Qualified(t TableRef) string {
 	if t.Schema == "" {
@@ -58,7 +74,7 @@ func (d dm) DSN(c Config, password string) (string, error) {
 		return "", fmt.Errorf("模式名不能包含 ? 或 &")
 	}
 	if schema != "" {
-		dsn += "?schema=" + d.Quote(schema)
+		dsn += "?schema=" + d.Quote(d.FoldIdent(schema))
 	}
 	return dsn, nil
 }
@@ -91,7 +107,7 @@ func (dm) ListSchemas(ctx context.Context, q Querier, c Config) ([]string, error
 
 func (dm) ListTables(ctx context.Context, q Querier, schema string) ([]TableInfo, error) {
 	rows, err := q.QueryContext(ctx, `SELECT object_name, object_type FROM all_objects
-		WHERE owner = ? AND object_type IN ('TABLE','VIEW') ORDER BY object_name`, schema)
+		WHERE UPPER(owner) = UPPER(?) AND object_type IN ('TABLE','VIEW') ORDER BY object_name`, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +132,7 @@ func (dm) Columns(ctx context.Context, q Querier, t TableRef) ([]ColumnMeta, err
 		         WHERE k.owner = c.owner AND k.table_name = c.table_name
 		           AND k.constraint_type = 'P' AND kc.column_name = c.column_name) THEN 1 ELSE 0 END
 		FROM all_tab_columns c
-		WHERE c.owner = ? AND c.table_name = ?
+		WHERE UPPER(c.owner) = UPPER(?) AND UPPER(c.table_name) = UPPER(?)
 		ORDER BY c.column_id`, t.Schema, t.Name)
 	if err != nil {
 		return nil, err
@@ -147,7 +163,7 @@ func (dm) Indexes(ctx context.Context, q Querier, t TableRef) ([]IndexMeta, erro
 		       ic.column_name
 		FROM all_indexes i
 		JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name
-		WHERE i.table_owner = ? AND i.table_name = ?
+		WHERE UPPER(i.table_owner) = UPPER(?) AND UPPER(i.table_name) = UPPER(?)
 		ORDER BY i.index_name, ic.column_position`, t.Schema, t.Name)
 	if err != nil {
 		return nil, err

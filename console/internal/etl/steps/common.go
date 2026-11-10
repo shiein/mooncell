@@ -193,7 +193,10 @@ func columnNames(cols []boundColumn) []string {
 }
 
 func tableRef(h *conn.Handle, schema, table string) conn.TableRef {
-	return conn.TableRef{Schema: conn.EffectiveSchema(h.Config, schema), Name: strings.TrimSpace(table)}
+	ref := conn.TableRef{Schema: conn.EffectiveSchema(h.Config, schema), Name: strings.TrimSpace(table)}
+	// 用户输入按方言折叠为服务器规范形式（达梦 → 大写），否则限定引用找不到对象。
+	ref.Schema, ref.Name = h.Dialect.FoldIdent(ref.Schema), h.Dialect.FoldIdent(ref.Name)
+	return ref
 }
 
 // withOrigin 返回把全部字段 Origin 设为 nodeID 的新 Schema。

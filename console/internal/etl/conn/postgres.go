@@ -11,7 +11,15 @@ import (
 	"mooncell/console/internal/etl/sqltext"
 )
 
-// postgres 方言；Kingbase 复用其实现，仅 ID/驱动/默认端口不同（兼容性差异在真机认证后按需覆写）。
+// postgres 方言；Kingbase 复用其实现，仅 ID/驱动/默认端口与少量目录查询不同。
+//
+// 真机结论（KingbaseES V008R003，aarch64，initdb --case-insensitive）：
+//   - 系统目录为 sys_*（sys_class/sys_index/sys_namespace/sys_attribute），
+//     无 pg_catalog 兼容层；Indexes() 按方言切换目录前缀，列名与 pg 相同。
+//   - ON CONFLICT DO NOTHING / DO UPDATE 可用（与 PG 语义一致）。
+//   - information_schema 的 schema/table 名存储为大写（PUBLIC 等），
+//     元数据查询统一用 UPPER()=UPPER() 兼容两种部署形态。
+//   - 无独立 catalog 层差异，ListSchemas 过滤 SYS_*/XLOG_* 等系统模式。
 type postgres struct {
 	id, label, driver string
 	port              int
@@ -31,6 +39,7 @@ func (d *postgres) Internal() bool           { return false }
 func (d *postgres) MaxParams() int           { return 65535 }
 func (d *postgres) VersionSQL() string       { return "SELECT version()" }
 func (d *postgres) Quote(s string) string    { return quoteDouble(s) }
+func (d *postgres) FoldIdent(s string) string { return s } // 保留用户输入大小写
 func (d *postgres) Placeholder(i int) string { return fmt.Sprintf("$%d", i) }
 func (d *postgres) Lexer() sqltext.Options   { return sqltext.Options{DollarQuotes: true} }
 
@@ -73,15 +82,26 @@ func (d *postgres) Normalize(v any, f core.Field, loc *time.Location) (any, erro
 func (d *postgres) Bind(v any, f core.Field) (any, error) { return bindCommon(v, f) }
 
 func (d *postgres) ListSchemas(ctx context.Context, q Querier, _ Config) ([]string, error) {
-	return scanStrings(ctx, q, `SELECT schema_name FROM information_schema.schemata
-		WHERE schema_name NOT IN ('pg_catalog','information_schema','pg_toast')
-		  AND schema_name NOT LIKE 'pg_temp_%' AND schema_name NOT LIKE 'pg_toast_temp_%'
-		ORDER BY schema_name`)
+	names, err := scanStrings(ctx, q, `SELECT schema_name FROM information_schema.schemata ORDER BY schema_name`)
+	if err != nil {
+		return nil, err
+	}
+	// Kingbase 无 pg_catalog：系统 schema 为 sys_catalog/SYS_*；pg 为 pg_catalog/pg_toast/pg_temp_*。
+	var out []string
+	for _, s := range names {
+		u := strings.ToUpper(s)
+		if u == "INFORMATION_SCHEMA" || strings.HasPrefix(u, "PG_") || strings.HasPrefix(u, "SYS_") ||
+			u == "SYSLOGICAL" || u == "SYSAUDIT" || strings.HasPrefix(u, "XLOG_") {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 func (d *postgres) ListTables(ctx context.Context, q Querier, schema string) ([]TableInfo, error) {
 	rows, err := q.QueryContext(ctx, `SELECT table_name, table_type FROM information_schema.tables
-		WHERE table_schema = $1 ORDER BY table_name`, schema)
+		WHERE UPPER(table_schema) = UPPER($1) ORDER BY table_name`, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +131,7 @@ func (d *postgres) Columns(ctx context.Context, q Querier, t TableRef) ([]Column
 		               WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = c.table_schema
 		                 AND tc.table_name = c.table_name AND k.column_name = c.column_name)
 		FROM information_schema.columns c
-		WHERE c.table_schema = $1 AND c.table_name = $2
+		WHERE UPPER(c.table_schema) = UPPER($1) AND UPPER(c.table_name) = UPPER($2)
 		ORDER BY c.ordinal_position`, t.Schema, t.Name)
 	if err != nil {
 		return nil, err
@@ -131,16 +151,21 @@ func (d *postgres) Columns(ctx context.Context, q Querier, t TableRef) ([]Column
 }
 
 func (d *postgres) Indexes(ctx context.Context, q Querier, t TableRef) ([]IndexMeta, error) {
-	rows, err := q.QueryContext(ctx, `
+	// KingbaseES 的系统目录为 sys_*（无 pg_catalog 兼容层）；PostgreSQL 为 pg_*。
+	cat := "pg"
+	if d.id == "kingbase" {
+		cat = "sys"
+	}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
 		SELECT i.relname, ix.indisunique, ix.indisprimary, a.attname
-		FROM pg_class tbl
-		JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
-		JOIN pg_index ix ON ix.indrelid = tbl.oid
-		JOIN pg_class i ON i.oid = ix.indexrelid
+		FROM %[1]s_class tbl
+		JOIN %[1]s_namespace ns ON ns.oid = tbl.relnamespace
+		JOIN %[1]s_index ix ON ix.indrelid = tbl.oid
+		JOIN %[1]s_class i ON i.oid = ix.indexrelid
 		JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
-		JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = k.attnum
-		WHERE ns.nspname = $1 AND tbl.relname = $2
-		ORDER BY i.relname, k.ord`, t.Schema, t.Name)
+		JOIN %[1]s_attribute a ON a.attrelid = tbl.oid AND a.attnum = k.attnum
+		WHERE UPPER(ns.nspname) = UPPER($1) AND UPPER(tbl.relname) = UPPER($2)
+		ORDER BY i.relname, k.ord`, cat), t.Schema, t.Name)
 	if err != nil {
 		return nil, err
 	}

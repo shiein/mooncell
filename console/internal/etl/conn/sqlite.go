@@ -25,7 +25,8 @@ func (sqliteDialect) Internal() bool         { return true }
 func (sqliteDialect) MaxParams() int         { return 32766 }
 func (sqliteDialect) VersionSQL() string     { return "SELECT sqlite_version()" }
 func (sqliteDialect) Placeholder(int) string { return "?" }
-func (sqliteDialect) Quote(s string) string  { return quoteDouble(s) }
+func (sqliteDialect) Quote(s string) string      { return quoteDouble(s) }
+func (sqliteDialect) FoldIdent(s string) string  { return s }
 func (sqliteDialect) Lexer() sqltext.Options { return sqltext.Options{} }
 
 func (d sqliteDialect) Qualified(t TableRef) string {

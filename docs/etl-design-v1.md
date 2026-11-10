@@ -271,6 +271,7 @@ type Dialect interface {
     DriverName() string
     DSN(c Config, password string) string
     Quote(ident string) string
+    FoldIdent(ident string) string        // 用户输入标识符 → 服务器规范形式（达梦折叠大写）
     Placeholder(i int) string            // 1-based
     MaxParams() int                      // 单条语句参数上限，批量写据此切块
     FieldFor(col ColumnMeta) core.Field  // 数据库列 → 逻辑字段
@@ -288,7 +289,22 @@ type Dialect interface {
   （单键 `IN (…)`，复合键 `(k1=? AND k2=?) OR …`），批内去重（后者覆盖前者），拆为插入批与更新批；
   可选「不执行更新」；关键字段 NULL 按 `IS NULL` 比较或报错（配置项）；一个键命中多行则全部更新。
   预检检查关键字段是否有索引（无索引 → warning）。目标有唯一约束时可选原生 upsert 加速（TODO）。
-* 读：`QueryContext` + 流式 `rows.Next()`；达梦驱动 fetch size 是否需显式设置**待真机验证**。
+* 读：`QueryContext` + 流式 `rows.Next()`。
+
+**真机认证结论**（`conn/live_test.go` + `actions/live_test.go`，build tag `etl_live`，
+环境变量 `ETL_LIVE_<DIALECT>` 注入连接；库版本 MySQL 8.4 / DM8 / KingbaseES V008R003 / PostgreSQL 16.4）：
+
+* 全库通用：类型往返、元数据（Columns/Indexes/ListTables/ListSchemas）、ProbeSQL、
+  「A 取 max → B 计数 → 条件 → 增量插入/更新」端到端（含无增量重跑分支）全部通过。
+* 达梦：无需显式 fetch size 即可流式读；NUMBER→string、BIT→int8、TSWTZ→带偏移 time.Time；
+  单语句参数上限实测 **65535**（已从保守值 8000 调整）；未加引号标识符存大写，
+  `FoldIdent` 折叠用户输入（全小写→大写，含大写视为刻意），元数据查询 `UPPER()=UPPER()`。
+* Kingbase：系统目录为 `sys_*`（无 `pg_catalog` 兼容层），`Indexes` 按方言切换目录前缀；
+  `ON CONFLICT` 可用；information_schema 名称存大写，比较用 `UPPER()=UPPER()`。
+* MySQL：`BIT(1)`→布尔（`BIT(n>1)`→整数，扫描为 []byte 大端位串）；`TINYINT(1)` 经
+  information_schema 为布尔，但 SELECT 探测路径无法与 tinyint(4) 区分（读为整数）；
+  `BIGINT UNSIGNED`（探测名 `UNSIGNED BIGINT`，精度 20）映射为精确小数；
+  `DATETIME`/`TIMESTAMP` 由驱动按 `Loc`（=连接时区）双向换算，墙上时钟往返不变。
 
 ---
 

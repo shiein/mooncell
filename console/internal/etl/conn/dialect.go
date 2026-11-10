@@ -116,6 +116,10 @@ type Dialect interface {
 	DSN(c Config, password string) (string, error)
 	Lexer() sqltext.Options
 	Quote(ident string) string
+	// FoldIdent 把用户输入的标识符折叠为服务器规范形式，用于 DML/元数据查询前的归一化。
+	// 达梦 CASE_SENSITIVE=Y 时未加引号标识符存为大写，必须折叠否则 "name" 引用不到 NAME；
+	// 其余库保持原样（PG 习惯全小写，用户常引用混合大小写对象）。
+	FoldIdent(ident string) string
 	Qualified(t TableRef) string
 	Placeholder(i int) string // 1-based
 	MaxParams() int
@@ -179,6 +183,10 @@ func baseTypeName(t string) string {
 	t = strings.Join(strings.Fields(t), " ")
 	for _, mod := range []string{" ZEROFILL", " UNSIGNED", " SIGNED"} {
 		t = strings.TrimSuffix(t, mod)
+	}
+	// go-sql-driver 的 DatabaseTypeName 用前缀形式（如 UNSIGNED BIGINT）。
+	for _, pre := range []string{"UNSIGNED ", "SIGNED ", "ZEROFILL "} {
+		t = strings.TrimPrefix(t, pre)
 	}
 	return t
 }

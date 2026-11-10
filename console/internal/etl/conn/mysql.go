@@ -15,6 +15,16 @@ import (
 	"mooncell/console/internal/etl/sqltext"
 )
 
+// mysql 方言（go-sql-driver/mysql）。
+//
+// 真机结论（MySQL 8.4）：
+//   - BIT(n) 扫描为 []byte（大端位串）；BIT(1) 映射布尔，BIT(n>1) 映射整数。
+//   - TINYINT(1) 经 information_schema 识别为布尔；SELECT 探测路径驱动不暴露
+//     声明宽度（DatabaseTypeName=TINYINT、DecimalSize 恒 (0,0)），与 tinyint(4) 不可区分，读为整数。
+//   - UNSIGNED 整数：information_schema 类型名带 unsigned；探测路径为前缀形式
+//     UNSIGNED BIGINT。BIGINT UNSIGNED（精度 20，超 int64）映射为精确小数。
+//   - DATETIME/TIMESTAMP：驱动按 DSN 的 Loc（=连接时区）做双向换算，
+//     与「无时区时间按连接时区解释」一致，往返墙上时钟不变。
 type mysqlDialect struct{}
 
 func init() { register(mysqlDialect{}) }
@@ -28,7 +38,8 @@ func (mysqlDialect) Internal() bool         { return false }
 func (mysqlDialect) MaxParams() int         { return 65535 }
 func (mysqlDialect) VersionSQL() string     { return "SELECT VERSION()" }
 func (mysqlDialect) Placeholder(int) string { return "?" }
-func (mysqlDialect) Quote(s string) string  { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
+func (mysqlDialect) Quote(s string) string     { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
+func (mysqlDialect) FoldIdent(s string) string { return s }
 func (mysqlDialect) Lexer() sqltext.Options {
 	return sqltext.Options{BackslashEscapes: true, HashComments: true}
 }
@@ -64,18 +75,45 @@ func (mysqlDialect) DSN(c Config, password string) (string, error) {
 
 func (mysqlDialect) FieldFor(col ColumnMeta) core.Field {
 	t := baseTypeName(col.DBType)
+	lower := strings.ToLower(col.DBType)
 	// TINYINT(1) 是 MySQL 的事实布尔类型；BIT(1) 同理。
-	if (t == "TINYINT" && col.Precision == 3 && strings.Contains(strings.ToLower(col.DBType), "tinyint(1)")) ||
+	// 经 information_schema 的列带声明宽度（tinyint(1)）；SELECT 探测路径的
+	// DatabaseTypeName 不含宽度，Precision 恒为类型最大宽度（tinyint=3），无法区分。
+	if (t == "TINYINT" && col.Precision == 3 && strings.Contains(lower, "tinyint(1)")) ||
 		(t == "BIT" && col.Precision <= 1) {
 		return fieldFromColumn(col, core.KindBoolean)
 	}
+	if t == "BIT" {
+		return fieldFromColumn(col, core.KindInteger) // BIT(n>1) 是整数位串
+	}
 	if t == "YEAR" {
 		return fieldFromColumn(col, core.KindInteger)
+	}
+	// unsigned 范围超 int64 的整数映射为精确小数（BIGINT UNSIGNED 最大值 2^64-1）。
+	// information_schema 路径类型带 unsigned；SELECT 探测路径为前缀形式 UNSIGNED BIGINT。
+	if strings.Contains(lower, "unsigned") && (t == "BIGINT" || col.Precision > 18) {
+		return fieldFromColumn(col, core.KindDecimal)
 	}
 	return fieldFromColumn(col, kindForType(col))
 }
 
 func (mysqlDialect) Normalize(v any, f core.Field, loc *time.Location) (any, error) {
+	// BIT(n) 扫描为 []byte（大端位串）：布尔取「非零」，整数按大端累计。
+	if b, ok := v.([]byte); ok && strings.HasPrefix(strings.ToUpper(f.NativeType), "BIT") {
+		if f.Kind == core.KindBoolean {
+			for _, c := range b {
+				if c != 0 {
+					return true, nil
+				}
+			}
+			return false, nil
+		}
+		var n uint64
+		for _, c := range b {
+			n = n<<8 | uint64(c)
+		}
+		v = n
+	}
 	return normalizeCommon(v, f, loc)
 }
 
