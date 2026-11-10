@@ -50,6 +50,7 @@ function Designer({ defId, onBack, onOpenRun }) {
   const [validated, setValidated] = React.useState(false);
   const [drawer, setDrawer] = React.useState({ open: false, tab: 'problems' });
   const [preview, setPreview] = React.useState({ nodeId: null, loading: false, result: null, error: '' });
+  const [previewVals, setPreviewVals] = React.useState({}); // 预览参数输入（文本）；空 → 用声明默认值
   const [live, setLive] = React.useState({ runId: null, run: null, nodes: {}, logs: [] });
   const [pipelines, setPipelines] = React.useState([]);
   const [scheduleCount, setScheduleCount] = React.useState(null);
@@ -254,7 +255,13 @@ function Designer({ defId, onBack, onOpenRun }) {
   const runPreview = async (nodeId, limit) => {
     setPreview({ nodeId, loading: true, result: null, error: '' });
     try {
-      const res = await etlApi.preview(doc, nodeId, limit, defaultParams(doc));
+      const params = {};
+      (doc.params || []).forEach((p) => {
+        const t = previewVals[p.name];
+        if (t != null && t !== '') params[p.name] = makeValue(p.kind, t);
+        else if (p.default) params[p.name] = p.default; // 未填 → 沿用默认值
+      });
+      const res = await etlApi.preview(doc, nodeId, limit, params);
       setPreview({ nodeId, loading: false, result: res, error: '' });
     } catch (e) {
       setPreview({ nodeId, loading: false, result: null, error: e.message });
@@ -425,7 +432,7 @@ function Designer({ defId, onBack, onOpenRun }) {
   const d = {
     kind, catalog, doc, meta, setMeta, selection, updateDoc, updateNode, updateHop, removeNodes, removeHops,
     problems, allProblems: validation.problems, nodeSchemas: validation.nodes, hopFields: validation.hops, vars: validation.vars,
-    pipelines, scheduleCount, drawer, setDrawer, preview, runPreview, live, focusNode, validating, validated,
+    pipelines, scheduleCount, drawer, setDrawer, preview, previewVals, setPreviewVals, runPreview, live, focusNode, validating, validated,
     openRun: onOpenRun,
   };
   const saveState = saving ? 'saving' : dirty ? 'dirty' : 'saved';
@@ -513,12 +520,6 @@ function Designer({ defId, onBack, onOpenRun }) {
       {versionsOpen ? <VersionsDialog meta={meta} dirty={dirty} onClose={() => setVersionsOpen(false)} onRestored={() => { setVersionsOpen(false); load(); }} /> : null}
     </DesignerContext.Provider>
   );
-}
-
-function defaultParams(doc) {
-  const out = {};
-  (doc.params || []).forEach((p) => { if (p.default) out[p.name] = p.default; });
-  return out;
 }
 
 function RunParamsDialog({ doc, onClose, onRun }) {

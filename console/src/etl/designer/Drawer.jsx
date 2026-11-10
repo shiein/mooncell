@@ -88,6 +88,22 @@ function PreviewTab({ d }) {
           {p.loading ? <Spinner size={12} /> : null}{p.loading ? '预览中' : '预览'}
         </Btn>
       </div>
+      {(d.doc.params || []).length ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 12px', borderBottom: '1px solid var(--border)', flex: 'none', overflowX: 'auto' }}>
+          <span className="etl-muted" style={{ fontSize: 12, flex: 'none' }}>参数</span>
+          {d.doc.params.map((prm) => (
+            <label key={prm.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flex: 'none', fontSize: 12 }}
+              title={`${KIND_LABEL[prm.kind] || prm.kind}${prm.description ? ' · ' + prm.description : ''}`}>
+              <span className="mono" style={{ color: 'var(--fg)' }}>{prm.name}{prm.required ? '*' : ''}</span>
+              <input className="input mono" style={{ width: 130, fontSize: 12, padding: '3px 8px' }}
+                placeholder={prm.default && prm.default.value != null ? `默认 ${prm.default.value}` : KIND_LABEL[prm.kind] || ''}
+                value={d.previewVals[prm.name] || ''}
+                onChange={(e) => d.setPreviewVals((s) => ({ ...s, [prm.name]: e.target.value }))} />
+            </label>
+          ))}
+          <span className="etl-muted" style={{ fontSize: 11.5, flex: 'none' }}>留空使用默认值</span>
+        </div>
+      ) : null}
       {p.error && p.nodeId === sel.id ? <div style={{ padding: 12, color: 'var(--error)', fontSize: 12.5 }}>{p.error}</div> : null}
       {res && res.error ? <div style={{ padding: '8px 12px', color: 'var(--error)', fontSize: 12.5 }}>{res.error}</div> : null}
       {data ? (
