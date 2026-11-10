@@ -18,6 +18,8 @@ import { DataResourcesPage } from './pages/DataResources.jsx';
 import { DataWorkspacePage } from './pages/DataWorkspace.jsx';
 import { ServerResourcesPage } from './pages/ServerResources.jsx';
 import { ServerWorkspacePage } from './pages/ServerWorkspace.jsx';
+// 数据集成按需加载：画布库只在进入该模块时下载
+const EtlModule = React.lazy(() => import('./etl/EtlModule.jsx').then((m) => ({ default: m.EtlModule })));
 import { logout as apiLogout, getSession, touchSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setCabinetFilePublic, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
@@ -66,6 +68,10 @@ function App() {
     if (r.page === "server-operations" && !(f && f.serverOperations)) {
       return roleNow === "admin" ? { page: "overview" } : { page: "apps" };
     }
+    // 数据集成：功能开关 fail-closed，且仅管理员
+    if ((r.page === "etl" || r.page === "etl-designer" || r.page === "etl-run") && !(f && f.etl)) {
+      return roleNow === "admin" ? { page: "overview" } : { page: "apps" };
+    }
     if (roleNow && roleNow !== "admin") {
       const allowed = new Set(["apps", "app-detail", "data-resources", "data-workspace", "server-operations"]);
       if (!allowed.has(r.page)) return { page: "apps" };
@@ -84,6 +90,8 @@ function App() {
       resourceId: opts.resourceId,
       resource: opts.resource,
       workspace: opts.workspace,
+      defId: opts.defId,
+      runId: opts.runId,
     }, role, features);
     setRoute(r);
     try {
@@ -474,6 +482,9 @@ function App() {
     route.page === "data-resources" ? [{ label: "数据资源" }] :
     route.page === "data-workspace" ? [{ label: "数据资源", onClick: () => nav("data-resources") }, { label: route.resource?.name || "工作台" }] :
     route.page === "server-operations" ? [{ label: "服务器运维" }] :
+    route.page === "etl" ? [{ label: "数据集成" }] :
+    route.page === "etl-run" ? [{ label: "数据集成", onClick: () => nav("etl", { tab: "runs" }) }, { label: "运行详情" }] :
+    route.page === "etl-designer" ? [{ label: "数据集成", onClick: () => nav("etl") }, { label: "设计器" }] :
     route.page === "cabinet" ? [{ label: "文件柜" }] :
     route.page === "users" ? [{ label: "用户管理" }] :
     route.page === "agents" ? [{ label: "Agent 管理" }] :
@@ -485,6 +496,7 @@ function App() {
     route.page === "app-detail" ? `应用详情 · ${detailApp ? detailApp.name : ""}` :
     route.page === "data-workspace" ? `数据工作台 · ${route.resource?.name || ""}` :
     route.page === "server-operations" ? "服务器运维" :
+    route.page === "etl" || route.page === "etl-designer" || route.page === "etl-run" ? "数据集成" :
     ({ overview: "总览", apps: "应用列表", "data-resources": "数据资源", cabinet: "文件柜", audit: "审计日志", users: "用户管理", agents: "Agent 管理", system: "系统" })[route.page] || route.page;
 
   // 工作台独立全页（已登录 + hash 匹配）；功能关闭时 fail-closed 并给出明确提示。
@@ -545,6 +557,11 @@ function App() {
               <DataResourcesPage onOpenWorkspace={(res, workspace) => nav("data-workspace", { resourceId: res.id, resource: res, workspace })} />
             ) : null}
             {route.page === "server-operations" ? <ServerResourcesPage /> : null}
+            {route.page === "etl" || route.page === "etl-designer" || route.page === "etl-run" ? (
+              <React.Suspense fallback={<div style={{ padding: 60, textAlign: "center", color: "var(--muted-fg)" }}>正在加载数据集成…</div>}>
+                <EtlModule route={route} nav={nav} />
+              </React.Suspense>
+            ) : null}
             {route.page === "cabinet" ? <CabinetPage /> : null}
             {route.page === "audit" ? <AuditPage /> : null}
             {route.page === "users" ? <UsersPage /> : null}

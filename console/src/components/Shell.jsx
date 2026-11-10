@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { id: "data-resources", label: "数据资源", en: "Data Resources", icon: "server" },
   // featureFlag: 由 App 根据 session.features.serverOperations 过滤；默认 fail-closed 隐藏
   { id: "server-operations", label: "服务器运维", en: "Server Operations", icon: "terminal", feature: "serverOperations" },
+  { id: "etl", label: "数据集成", en: "Data Integration", icon: "flow", adminOnly: true, feature: "etl" },
   { id: "cabinet", label: "文件柜", en: "Cabinet", icon: "folder", adminOnly: true },
   { id: "audit", label: "审计日志", en: "Audit", icon: "shield", adminOnly: true },
   { id: "agents", label: "Agent 管理", en: "Agents", icon: "server", adminOnly: true },
@@ -65,6 +66,7 @@ function Sidebar({ page, onNav, user, role, onLogout, agent, features }) {
             page === n.id
             || (n.id === "apps" && page === "app-detail")
             || (n.id === "data-resources" && page === "data-workspace")
+            || (n.id === "etl" && (page === "etl-designer" || page === "etl-run"))
           )}
             onClick={() => onNav(n.id)}>
             <Icon name={n.icon} size={16} />

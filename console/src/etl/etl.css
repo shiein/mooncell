@@ -1,0 +1,364 @@
+/* 数据集成模块样式：只使用全局设计令牌，不引入新色系。前缀 etl- */
+
+/* ---------------- 模块壳 ---------------- */
+.etl-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
+.etl-head h2 { font-size: 20px; letter-spacing: -0.015em; }
+.etl-head p { font-size: 13px; color: var(--muted-fg); margin-top: 3px; }
+.etl-tabs { margin-bottom: 18px; }
+
+.etl-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.etl-stat { padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.etl-stat-label { font-size: 12px; color: var(--muted-fg); font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.etl-stat-value { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.etl-stat-sub { font-size: 11.5px; color: var(--muted-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.etl-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.etl-search { position: relative; width: 260px; max-width: 100%; }
+.etl-search .input { padding-left: 32px; }
+.etl-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted-fg); pointer-events: none; }
+
+.etl-table td { vertical-align: middle; }
+.etl-row { cursor: pointer; }
+.etl-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.etl-name-title { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.etl-name-desc { font-size: 12px; color: var(--muted-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 420px; }
+.etl-kind-chip {
+  width: 30px; height: 30px; border-radius: 8px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+}
+.etl-kind-chip[data-kind="workflow"] { background: var(--primary-soft); color: var(--primary); }
+.etl-kind-chip[data-kind="pipeline"] { background: var(--info-soft); color: var(--info); }
+.etl-muted { color: var(--muted-fg); font-size: 12.5px; }
+.etl-num { font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 12px; }
+.etl-actions { display: flex; gap: 2px; justify-content: flex-end; opacity: .55; transition: opacity .12s; }
+tr:hover .etl-actions { opacity: 1; }
+
+/* 空状态：概念说明 */
+.etl-empty { padding: 48px 24px 40px; text-align: center; }
+.etl-empty h3 { font-size: 16px; margin-top: 14px; }
+.etl-empty p { font-size: 13px; color: var(--muted-fg); margin-top: 6px; }
+.etl-concepts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 640px; margin: 24px auto 0; text-align: left; }
+.etl-concept { padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.etl-concept-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; }
+.etl-concept p { margin-top: 6px; font-size: 12.5px; line-height: 1.6; }
+
+/* 菜单（新建下拉、更多操作） */
+.etl-menu {
+  position: fixed; z-index: 250; min-width: 200px; padding: 5px; background: var(--card);
+  border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg);
+}
+.etl-menu button {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: 7px;
+  font-size: 13px; color: var(--fg); text-align: left; cursor: pointer;
+}
+.etl-menu button:hover { background: var(--muted); }
+.etl-menu button[data-danger="true"] { color: var(--error); }
+.etl-menu-sub { font-size: 11.5px; color: var(--muted-fg); margin-top: 1px; }
+.etl-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
+
+/* ---------------- 设计器（沉浸式全窗） ---------------- */
+.etl-designer {
+  position: fixed; inset: 0; z-index: 150; background: var(--bg);
+  display: grid; grid-template-rows: 52px 1fr; min-width: 0;
+}
+.etl-dz-top {
+  display: flex; align-items: center; gap: 10px; padding: 0 12px 0 10px;
+  border-bottom: 1px solid var(--border); background: var(--bg); min-width: 0;
+}
+.etl-dz-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.etl-dz-name {
+  font-size: 14px; font-weight: 650; border: 1px solid transparent; background: transparent; border-radius: 6px;
+  padding: 3px 6px; min-width: 60px; max-width: 360px; color: var(--fg); outline: none;
+}
+.etl-dz-name:hover { border-color: var(--border); }
+.etl-dz-name:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); background: var(--card); }
+.etl-save-state { font-size: 12px; color: var(--muted-fg); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.etl-save-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.etl-save-state[data-state="dirty"] { color: var(--warn); }
+.etl-save-state[data-state="error"] { color: var(--error); }
+.etl-dz-sep { width: 1px; height: 22px; background: var(--border); flex: none; }
+
+.etl-dz-body { display: flex; min-height: 0; min-width: 0; }
+.etl-dz-center { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.etl-canvas { flex: 1; min-height: 0; position: relative; background: var(--bg-sunken); }
+
+/* 组件面板 */
+.etl-palette {
+  width: 244px; flex: none; border-right: 1px solid var(--border); background: var(--bg);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.etl-palette-head { padding: 12px 12px 8px; }
+.etl-palette-scroll { flex: 1; overflow-y: auto; padding: 2px 8px 16px; }
+.etl-palette-group { margin-top: 10px; }
+.etl-palette-group-title {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px; font-size: 12px; font-weight: 600; color: var(--fg-secondary);
+  width: 100%; cursor: pointer; border-radius: 6px;
+}
+.etl-palette-group-title:hover { background: var(--muted); }
+.etl-palette-group-title .count { margin-left: auto; font-size: 11px; color: var(--muted-fg); font-weight: 500; }
+.etl-palette-item {
+  display: flex; align-items: center; gap: 9px; padding: 6px; border-radius: 8px; cursor: grab; user-select: none;
+  border: 1px solid transparent; width: 100%; text-align: left;
+}
+.etl-palette-item:hover { background: var(--card); border-color: var(--border); box-shadow: var(--shadow-sm); }
+.etl-palette-item:active { cursor: grabbing; }
+.etl-palette-item[data-planned="true"] { cursor: not-allowed; opacity: .5; }
+.etl-palette-item[data-planned="true"]:hover { background: transparent; border-color: transparent; box-shadow: none; }
+.etl-palette-label { font-size: 13px; font-weight: 500; color: var(--fg); }
+.etl-palette-hint { font-size: 11px; color: var(--muted-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.etl-chip {
+  width: 28px; height: 28px; border-radius: 7px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+}
+
+/* 画布节点 */
+.etl-node {
+  width: 220px; background: var(--card); border: 1px solid var(--border-strong); border-radius: 11px;
+  box-shadow: var(--shadow-sm); position: relative; transition: border-color .12s, box-shadow .12s;
+}
+.etl-node:hover { box-shadow: var(--shadow-md); }
+.etl-node[data-selected="true"] { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow-md); }
+.etl-node[data-status="running"] { border-color: var(--info); }
+.etl-node[data-status="succeeded"] { border-color: var(--success); }
+.etl-node[data-status="failed"] { border-color: var(--error); box-shadow: 0 0 0 3px var(--error-soft); }
+.etl-node[data-status="skipped"] { opacity: .55; border-style: dashed; }
+.etl-node-main { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+.etl-node-text { min-width: 0; flex: 1; }
+.etl-node-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.etl-node-type { font-size: 11px; color: var(--muted-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.etl-node-badge {
+  position: absolute; top: -7px; right: -7px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 99px;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 10.5px; font-weight: 700; color: #fff;
+  box-shadow: 0 0 0 2px var(--bg-sunken);
+}
+.etl-node-badge[data-tone="error"] { background: var(--error); }
+.etl-node-badge[data-tone="warning"] { background: var(--warn); }
+.etl-node-foot {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--muted-fg); font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  background: var(--bg); border-radius: 0 0 11px 11px;
+}
+.etl-node-foot .ok { color: var(--success); }
+.etl-node-foot .bad { color: var(--error); }
+.etl-node-ports { position: absolute; right: 0; top: 0; bottom: 0; pointer-events: none; }
+.etl-port-label {
+  position: absolute; right: 12px; transform: translateY(-50%); font-size: 10.5px; font-weight: 600; white-space: nowrap;
+  padding: 0 4px; background: var(--card); border-radius: 4px;
+}
+.etl-node-start {
+  width: auto; min-width: 120px; border-radius: 999px; background: var(--primary); border-color: var(--primary); color: var(--primary-fg);
+}
+.etl-node-start .etl-node-name, .etl-node-start .etl-node-type { color: var(--primary-fg); }
+.etl-node-start .etl-node-type { opacity: .8; }
+.etl-node-start[data-selected="true"] { box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow-md); }
+
+/* React Flow 连接点（base.css 之上） */
+.etl-canvas .react-flow__handle {
+  width: 11px; height: 11px; border-radius: 50%; background: var(--card); border: 2px solid var(--border-strong);
+  transition: transform .12s, border-color .12s, background .12s;
+}
+.etl-canvas .react-flow__handle:hover { transform: scale(1.25); border-color: var(--primary); }
+.etl-canvas .react-flow__handle.connectingto, .etl-canvas .react-flow__handle.valid { border-color: var(--success); background: var(--success-soft); }
+.etl-canvas .react-flow__handle[data-tone="success"] { border-color: var(--success); }
+.etl-canvas .react-flow__handle[data-tone="error"] { border-color: var(--error); }
+.etl-canvas .react-flow__handle[data-tone="warn"] { border-color: var(--warn); }
+/* 错误输出端口平时弱化，悬停节点或已连线时再强调，避免每个节点底部都有醒目红点 */
+.etl-canvas .etl-handle-error { width: 9px; height: 9px; opacity: .35; }
+.etl-canvas .react-flow__node:hover .etl-handle-error,
+.etl-canvas .react-flow__node.selected .etl-handle-error,
+.etl-canvas .etl-handle-error.connectionindicator:hover { opacity: 1; }
+.etl-canvas .react-flow__edge-path { stroke: var(--border-strong); stroke-width: 1.6; }
+.etl-canvas .react-flow__edge:hover .react-flow__edge-path { stroke: var(--fg-secondary); }
+.etl-canvas .react-flow__edge.selected .react-flow__edge-path { stroke: var(--primary); stroke-width: 2.2; }
+.etl-canvas .react-flow__connection-path { stroke: var(--primary); stroke-width: 1.8; stroke-dasharray: 5 4; }
+.etl-canvas .react-flow__selection { background: rgba(192, 91, 51, .06); border: 1px dashed var(--primary); }
+.etl-canvas .react-flow__minimap { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow-sm); }
+.etl-canvas .react-flow__minimap-mask { fill: var(--bg-sunken); fill-opacity: .6; }
+.etl-canvas .react-flow__minimap-node { fill: var(--border-strong); stroke: none; }
+.etl-canvas .react-flow__attribution { display: none; }
+.etl-edge-label {
+  position: absolute; pointer-events: all; font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 99px;
+  background: var(--card); border: 1px solid var(--border); color: var(--fg-secondary); white-space: nowrap;
+  font-variant-numeric: tabular-nums; box-shadow: var(--shadow-sm);
+}
+.etl-edge-label[data-live="true"] { color: var(--info); border-color: var(--info); font-family: var(--font-mono); }
+@keyframes etl-dash { to { stroke-dashoffset: -18; } }
+@media (prefers-reduced-motion: no-preference) {
+  .etl-canvas .etl-edge-live .react-flow__edge-path { stroke: var(--info); stroke-dasharray: 6 3; animation: etl-dash .9s linear infinite; }
+}
+
+/* 画布浮层：缩放控件、空状态 */
+.etl-canvas-tools {
+  position: absolute; left: 14px; bottom: 14px; z-index: 5; display: flex; gap: 2px; padding: 3px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-sm);
+}
+.etl-canvas-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 4;
+}
+.etl-canvas-empty-card {
+  text-align: center; padding: 26px 30px; border: 1.5px dashed var(--border-strong); border-radius: 14px; background: var(--bg);
+  color: var(--muted-fg); max-width: 360px;
+}
+.etl-canvas-empty-card strong { display: block; color: var(--fg); font-size: 14px; margin: 10px 0 4px; }
+.etl-canvas-empty-card span { font-size: 12.5px; line-height: 1.6; }
+
+/* 属性检查器 */
+.etl-inspector {
+  width: 380px; flex: none; border-left: 1px solid var(--border); background: var(--bg);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.etl-insp-head { padding: 14px 16px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 11px; align-items: flex-start; }
+.etl-insp-title { font-size: 14px; font-weight: 650; }
+.etl-insp-name {
+  font-size: 14px; font-weight: 650; border: 1px solid transparent; background: transparent; border-radius: 6px;
+  padding: 2px 6px; margin-left: -6px; width: 100%; color: var(--fg); outline: none;
+}
+.etl-insp-name:hover { border-color: var(--border); }
+.etl-insp-name:focus { border-color: var(--primary); background: var(--card); box-shadow: 0 0 0 3px var(--primary-soft); }
+.etl-insp-desc { font-size: 12px; color: var(--muted-fg); margin-top: 3px; line-height: 1.55; }
+.etl-insp-tabs { padding: 0 12px; }
+.etl-insp-body { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.etl-insp-section { display: flex; flex-direction: column; gap: 10px; }
+.etl-insp-section-title { font-size: 12.5px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 8px; }
+.etl-insp-section-title .hint { font-weight: 400; color: var(--muted-fg); font-size: 11.5px; }
+.etl-insp-problems { padding: 10px 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; }
+.etl-problem { display: flex; gap: 8px; font-size: 12px; line-height: 1.5; align-items: flex-start; }
+.etl-problem svg { flex: none; margin-top: 2px; }
+.etl-problem[data-sev="error"] { color: var(--error); }
+.etl-problem[data-sev="warning"] { color: var(--warn); }
+.etl-problem button { color: inherit; text-align: left; cursor: pointer; }
+.etl-problem button:hover { text-decoration: underline; }
+.etl-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.etl-inline { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+.etl-inline-label { display: flex; flex-direction: column; gap: 2px; }
+.etl-inline-label small { color: var(--muted-fg); font-size: 11.5px; }
+
+/* 列表编辑器（字段映射、赋值等） */
+.etl-list { border: 1px solid var(--border); border-radius: 9px; background: var(--card); overflow: hidden; }
+.etl-list-head, .etl-list-row { display: grid; gap: 6px; align-items: center; padding: 6px 8px; }
+.etl-list-head { font-size: 11.5px; color: var(--muted-fg); font-weight: 500; background: var(--bg); border-bottom: 1px solid var(--border); padding-top: 7px; padding-bottom: 7px; }
+.etl-list-row { border-bottom: 1px solid var(--border); }
+.etl-list-row:last-child { border-bottom: none; }
+.etl-list-row .input, .etl-list-row .select-el { height: 28px; font-size: 12.5px; padding-left: 8px; border-radius: 6px; }
+.etl-list-row .select-el { padding-right: 24px; }
+.etl-list-row .select-caret { right: 7px; }
+.etl-list-empty { padding: 14px; text-align: center; font-size: 12px; color: var(--muted-fg); }
+.etl-list-foot { display: flex; gap: 6px; padding: 6px; border-top: 1px solid var(--border); background: var(--bg); }
+.etl-list-x { width: 24px; height: 24px; border-radius: 6px; color: var(--muted-fg); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.etl-list-x:hover { background: var(--error-soft); color: var(--error); }
+
+/* 字段 chip */
+.etl-field-chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 7px; border-radius: 6px;
+  background: var(--muted); font-size: 12px; color: var(--fg-secondary); white-space: nowrap; max-width: 100%;
+}
+.etl-kind-tag { font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; color: var(--muted-fg); letter-spacing: .02em; }
+.etl-fields { display: flex; flex-direction: column; }
+.etl-field-row { display: grid; grid-template-columns: 34px 1fr auto; gap: 8px; align-items: center; padding: 6px 2px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.etl-field-row:last-child { border-bottom: none; }
+
+/* 表达式编辑器 */
+.etl-expr { border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--card); position: relative; transition: border-color .15s, box-shadow .15s; }
+.etl-expr:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.etl-expr[data-invalid="true"] { border-color: var(--error); }
+.etl-expr .cm-editor { font-size: 12.5px; background: transparent; }
+.etl-expr .cm-editor.cm-focused { outline: none; }
+.etl-expr .cm-content { font-family: var(--font-mono); padding: 6px 0; caret-color: var(--primary); }
+.etl-expr .cm-line { padding: 0 34px 0 10px; }
+.etl-expr .cm-placeholder { color: var(--muted-fg); }
+.etl-expr-fx {
+  position: absolute; right: 4px; top: 4px; width: 26px; height: 24px; border-radius: 6px; z-index: 2;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--muted-fg); cursor: pointer;
+  font-family: var(--font-mono); font-style: italic; font-weight: 600; font-size: 12px;
+}
+.etl-expr-fx:hover, .etl-expr-fx[data-open="true"] { background: var(--primary-soft); color: var(--primary); }
+.etl-expr-msg { font-size: 11.5px; margin-top: 4px; }
+.etl-expr-msg[data-tone="error"] { color: var(--error); }
+.etl-expr-msg[data-tone="muted"] { color: var(--muted-fg); }
+
+.etl-fncat {
+  position: fixed; z-index: 260; width: 600px; height: 420px; display: grid; grid-template-columns: 150px 210px 1fr;
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.etl-fncat-col { border-right: 1px solid var(--border); overflow-y: auto; min-height: 0; }
+.etl-fncat-col:last-child { border-right: none; }
+.etl-fncat-search { padding: 8px; border-bottom: 1px solid var(--border); }
+.etl-fncat-cat, .etl-fncat-fn {
+  display: block; width: 100%; text-align: left; padding: 7px 12px; font-size: 12.5px; color: var(--fg-secondary); cursor: pointer;
+}
+.etl-fncat-cat:hover, .etl-fncat-fn:hover { background: var(--muted); color: var(--fg); }
+.etl-fncat-cat[data-active="true"], .etl-fncat-fn[data-active="true"] { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+.etl-fncat-fn { font-family: var(--font-mono); font-size: 12px; }
+.etl-fncat-detail { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.etl-fncat-sig { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--fg); word-break: break-all; }
+.etl-fncat-desc { font-size: 12.5px; line-height: 1.65; color: var(--fg-secondary); }
+.etl-fncat-ex { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: var(--font-mono); font-size: 11.5px; display: flex; flex-direction: column; gap: 4px; }
+.etl-fncat-ex span { color: var(--muted-fg); }
+
+/* 底部抽屉 */
+.etl-drawer { border-top: 1px solid var(--border); background: var(--bg); display: flex; flex-direction: column; flex: none; min-height: 0; }
+.etl-drawer-bar { display: flex; align-items: center; gap: 6px; padding: 0 8px 0 4px; height: 38px; flex: none; }
+.etl-drawer-bar .tabs { border-bottom: none; }
+.etl-drawer-bar .tab { padding: 8px 12px; font-size: 12.5px; }
+.etl-drawer-body { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); }
+.etl-drawer .console { border-radius: 0; height: 100%; }
+.etl-preview-table { font-size: 12px; }
+.etl-preview-table th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+.etl-preview-table td { font-family: var(--font-mono); font-size: 11.5px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 6px 12px; }
+.etl-null { color: var(--muted-fg); font-style: italic; }
+
+/* 运行详情 */
+.etl-run-head { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
+.etl-run-meta { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; margin-bottom: 18px; }
+.etl-run-meta > div { padding: 12px 16px; border-right: 1px solid var(--border); min-width: 0; }
+.etl-run-meta > div:last-child { border-right: none; }
+.etl-run-meta label { font-size: 11.5px; color: var(--muted-fg); display: block; margin-bottom: 4px; }
+.etl-run-meta strong { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.etl-gantt { display: flex; flex-direction: column; }
+.etl-gantt-row { display: grid; grid-template-columns: 220px 1fr 110px; gap: 12px; align-items: center; padding: 7px 14px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.etl-gantt-row:last-child { border-bottom: none; }
+.etl-gantt-row[data-clickable="true"] { cursor: pointer; }
+.etl-gantt-row[data-clickable="true"]:hover { background: var(--muted); }
+.etl-gantt-track { position: relative; height: 16px; background: var(--bg); border-radius: 4px; }
+.etl-gantt-bar { position: absolute; top: 3px; height: 10px; border-radius: 3px; min-width: 3px; }
+.etl-gantt-bar[data-status="succeeded"], .etl-gantt-bar[data-status="reused"] { background: var(--success); }
+.etl-gantt-bar[data-status="failed"] { background: var(--error); }
+.etl-gantt-bar[data-status="running"] { background: var(--info); }
+.etl-gantt-bar[data-status="canceled"] { background: var(--warn); }
+.etl-log-tools { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.etl-log { height: 420px; border-radius: 0 0 10px 10px; }
+.etl-log .node { color: #9A9378; }
+.etl-log .msg-error { color: #E59A8C; }
+
+/* 调度 */
+.etl-cron-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.etl-cron-preset {
+  height: 26px; padding: 0 10px; border-radius: 99px; border: 1px solid var(--border-strong); background: var(--card);
+  font-size: 12px; color: var(--fg-secondary); cursor: pointer;
+}
+.etl-cron-preset:hover { border-color: var(--primary); color: var(--primary); }
+.etl-cron-preset[data-active="true"] { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+.etl-cron-box { border: 1px solid var(--border); border-radius: 10px; background: var(--bg); padding: 12px 14px; }
+.etl-cron-desc { font-size: 14px; font-weight: 600; }
+.etl-cron-next { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; margin-top: 8px; font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-secondary); }
+
+/* 连接卡片 */
+.etl-conn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.etl-conn { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.etl-conn-top { display: flex; align-items: center; gap: 11px; }
+.etl-conn-name { font-weight: 650; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.etl-conn-addr { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.etl-conn-foot { display: flex; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+.etl-dialect {
+  width: 38px; height: 38px; border-radius: 10px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-weight: 600; font-size: 11px; letter-spacing: -.02em;
+}
+
+@media (max-width: 1100px) {
+  .etl-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .etl-run-meta { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .etl-inspector { width: 330px; }
+}
+@media (max-width: 820px) {
+  .etl-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .etl-concepts { grid-template-columns: 1fr; }
+  .etl-palette { display: none; }
+}
