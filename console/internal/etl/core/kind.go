@@ -363,6 +363,20 @@ func FormatValue(v any) string {
 	return formatString(Normalize(v), ConvertOptions{})
 }
 
+// FormatFieldValue 按字段元数据格式化展示文本：decimal 字段声明了 Scale 时
+// 按该标度补齐尾零（12.50 不显示为 12.5）；值本身不做任何舍入改写。
+func FormatFieldValue(v any, f Field) string {
+	if v == nil {
+		return "<null>"
+	}
+	if f.Kind == KindDecimal && f.Scale > 0 {
+		if d, ok := Normalize(v).(decimal.Decimal); ok {
+			return d.StringFixed(int32(f.Scale))
+		}
+	}
+	return FormatValue(v)
+}
+
 func preview(v any) string {
 	if b, ok := v.([]byte); ok {
 		return fmt.Sprintf("<%d 字节>", len(b))

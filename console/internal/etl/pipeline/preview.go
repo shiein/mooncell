@@ -67,7 +67,7 @@ func Preview(ctx context.Context, def *Definition, nodeID string, limit int, opt
 					nulls[i] = true
 					continue
 				}
-				vals[i] = core.FormatValue(v)
+				vals[i] = core.FormatFieldValue(v, pp.Fields[i])
 			}
 			pp.Rows = append(pp.Rows, vals)
 			pp.Nulls = append(pp.Nulls, nulls)
