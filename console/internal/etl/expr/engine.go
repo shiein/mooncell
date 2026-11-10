@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/expr-lang/expr"
+	"github.com/expr-lang/expr/ast"
 	"github.com/expr-lang/expr/vm"
 	"github.com/shopspring/decimal"
 
@@ -94,10 +95,28 @@ func Compile(src string, env Env) (*Program, error) {
 	}
 	p.prog = prog
 	p.Kind = kindOfType(prog.Node().Type())
+	if p.Kind == core.KindTimestamp {
+		p.Kind = dateResult(prog.Node(), p.Kind)
+	}
 	if err := checkNames(src, schema, env.Vars); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// dateFns 是语义上返回日期（丢弃时分秒）的函数。
+var dateFns = map[string]bool{"today": true, "toDate": true, "truncDay": true}
+
+// dateResult 整个表达式就是 date 函数调用时返回 KindDate（库只认 time.Time，推导为 timestamp）。
+func dateResult(n ast.Node, kind core.Kind) core.Kind {
+	call, ok := n.(*ast.CallNode)
+	if !ok {
+		return kind
+	}
+	if id, ok := call.Callee.(*ast.IdentifierNode); ok && dateFns[id.Value] {
+		return core.KindDate
+	}
+	return kind
 }
 
 // checkNames 静态检查 field("x") / var("x") 的字面量参数是否存在，尽早暴露拼写错误。

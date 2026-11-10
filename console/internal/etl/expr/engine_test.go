@@ -88,6 +88,27 @@ func TestTypesAndFunctions(t *testing.T) {
 	}
 }
 
+// 日期函数推导为 date（time.Time 值不变，仅输出类型标记）；时间戳函数不受影响。
+func TestDateFunctionsInferDate(t *testing.T) {
+	for src, want := range map[string]core.Kind{
+		`today()`:                    core.KindDate,
+		`toDate("2026-11-10 08:30:00")`: core.KindDate,
+		`truncDay(created_at)`:       core.KindDate,
+		`toDate(toDate("2026-11-10"))`: core.KindDate,
+		`now()`:                       core.KindTimestamp,
+		`parseDate("20261110")`:       core.KindTimestamp,
+		`created_at`:                  core.KindTimestamp,
+	} {
+		p, err := Compile(src, Env{Schema: testSchema})
+		if err != nil {
+			t.Fatalf("编译 %q 失败：%v", src, err)
+		}
+		if p.Kind != want {
+			t.Errorf("%s 推导类型 %q，期望 %q", src, p.Kind, want)
+		}
+	}
+}
+
 func TestNullSemantics(t *testing.T) {
 	r := row()
 	r[1] = nil // qty = NULL
