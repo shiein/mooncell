@@ -256,9 +256,11 @@ func normalizeCommon(v any, f core.Field, loc *time.Location) (any, error) {
 			v = int64(x)
 		}
 	case time.Time:
-		// 无时区列（PG timestamp / 达梦 TIMESTAMP 等）：驱动把墙上时钟标成 UTC 返回。
-		// 按连接时区重新解释墙上时钟，使其与 now() 等本地时间可直接比较；写回时驱动取墙上时钟，往返不变。
-		if x.Location() == time.UTC && !hasTimeZone(f.NativeType) && loc != nil && loc != time.UTC {
+		// 无时区列（PG timestamp / MySQL DATETIME / 达梦 TIMESTAMP 等）：
+		// 驱动对墙上时钟标注的时区不一（UTC / 会话偏移 / 连接 Loc），一律忽略其标注，
+		// 墙上时钟分量按连接时区解释，使其与 now() 等本地时间可直接比较；写回时
+		// 各驱动再按自己的绑定区还原墙上时钟，往返不变（达梦见 dm.DSN 的 timeZone 参数）。
+		if !hasTimeZone(f.NativeType) && loc != nil {
 			x = time.Date(x.Year(), x.Month(), x.Day(), x.Hour(), x.Minute(), x.Second(), x.Nanosecond(), loc)
 			v = x
 		}

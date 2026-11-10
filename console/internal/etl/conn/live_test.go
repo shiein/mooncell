@@ -31,7 +31,7 @@ type dialectCase struct {
 	ddl     string // CREATE TABLE etl_src (...)
 	pk      string // 主键列名（大小写与读出列名一致）
 	cols    []colCase
-	extra   func(t *testing.T, h *conn.Handle)
+	extra   func(t *testing.T, h *conn.Handle, cfg conn.Config, pw string)
 	ordered string // ORDER BY 表达式（空 = 主键）
 }
 
@@ -314,7 +314,7 @@ func liveDialect(t *testing.T, id string) {
 	t.Logf("类型往返通过：%d 行 × %d 列", nrows, len(dc.cols))
 
 	if dc.extra != nil {
-		dc.extra(t, h)
+		dc.extra(t, h, cfg, pw)
 	}
 }
 
@@ -402,7 +402,7 @@ func bytesEq(a, b []byte) bool {
 
 // ------------------------------------------------ 各方言专项认证
 
-func mysqlExtra(t *testing.T, h *conn.Handle) {
+func mysqlExtra(t *testing.T, h *conn.Handle, _ conn.Config, _ string) {
 	ctx := context.Background()
 	// DATETIME 与 TIMESTAMP 的时区行为：两者都按连接时区 Loc 解释（驱动行为）。
 	// MySQL TIMESTAMP 在服务器端存 UTC、按会话 tz 转换；驱动 parseTime+Loc 下读回应为同一墙上时钟。
@@ -436,7 +436,7 @@ func mysqlExtra(t *testing.T, h *conn.Handle) {
 	}
 }
 
-func dmExtra(t *testing.T, h *conn.Handle) {
+func dmExtra(t *testing.T, h *conn.Handle, cfg conn.Config, pw string) {
 	ctx := context.Background()
 	d := h.Dialect
 	// ① NUMBER/DECIMAL 扫描出的 Go 类型
@@ -520,9 +520,41 @@ func dmExtra(t *testing.T, h *conn.Handle) {
 	if err := h.DB.QueryRowContext(ctx, "SELECT dtz FROM etl_src WHERE id = 1").Scan(&tzv); err == nil {
 		t.Logf("TSWTZ 扫描值 %T %#v", tzv, tzv)
 	}
+	// ⑦ 不同连接时区下的无时区语义：以 UTC 连接重开，dt 读回必须仍是同一墙上时钟。
+	cfg2 := cfg
+	cfg2.Options.TimeZone = "UTC"
+	h2, err := conn.Open(ctx, cfg2, pw)
+	if err != nil {
+		t.Fatalf("UTC 连接失败：%v", err)
+	}
+	defer h2.DB.Close()
+	rows2, err := h2.DB.QueryContext(ctx, "SELECT dt, dtz FROM etl_src WHERE id = 1")
+	if err != nil {
+		t.Fatalf("UTC 连接查询失败：%v", err)
+	}
+	s2, err := conn.SchemaFromRows(h2.Dialect, rows2)
+	if err != nil {
+		t.Fatalf("UTC SchemaFromRows 失败：%v", err)
+	}
+	r2 := conn.NewRowReader(h2, rows2, s2)
+	row, ok, err := r2.Next()
+	r2.Close()
+	if err != nil || !ok {
+		t.Fatalf("UTC 连接读行失败：%v", err)
+	}
+	dt := row[s2.Index("DT")].(time.Time)
+	if dt.Hour() != 13 || dt.Minute() != 14 || dt.Location() != time.UTC {
+		t.Errorf("UTC 连接下无时区列应读为同一墙上时钟(UTC 标记)：%v", dt)
+	}
+	dtz := row[s2.Index("DTZ")].(time.Time)
+	t.Logf("UTC 连接：dt=%v（墙上时钟不变）dtz=%v（瞬时：%v）", dt, dtz, dtz.UTC())
+	if dtz.Hour() != 19 && dtz.Hour() != 3 { // far=2030-01-02 03:04:05+0800 = 19:04 UTC 前一天
+		// dtz 为带时区列，保持瞬时；值随绑定时的会话偏移而定，仅记录
+		t.Logf("dtz 小时 %d", dtz.Hour())
+	}
 }
 
-func kingbaseExtra(t *testing.T, h *conn.Handle) {
+func kingbaseExtra(t *testing.T, h *conn.Handle, _ conn.Config, _ string) {
 	ctx := context.Background()
 	// ① ON CONFLICT / pg_catalog / information_schema 兼容性
 	_, err := h.DB.ExecContext(ctx, `INSERT INTO etl_src (id) VALUES (1) ON CONFLICT (id) DO NOTHING`)

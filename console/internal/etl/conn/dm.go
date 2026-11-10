@@ -73,8 +73,18 @@ func (d dm) DSN(c Config, password string) (string, error) {
 	if strings.ContainsAny(schema, "?&") {
 		return "", fmt.Errorf("模式名不能包含 ? 或 &")
 	}
+	var params []string
 	if schema != "" {
-		dsn += "?schema=" + d.Quote(d.FoldIdent(schema))
+		params = append(params, "schema="+d.Quote(d.FoldIdent(schema)))
+	}
+	// 驱动的 localTimezone 决定时间值的绑定/扫描区（默认进程本地时区）。
+	// 显式配置连接时区时写进 DSN，保证「无时区时间=连接时区墙上时钟」成立。
+	if c.Options.TimeZone != "" {
+		_, off := time.Now().In(c.Options.Location()).Zone()
+		params = append(params, fmt.Sprintf("timeZone=%d", off/60))
+	}
+	if len(params) > 0 {
+		dsn += "?" + strings.Join(params, "&")
 	}
 	return dsn, nil
 }
