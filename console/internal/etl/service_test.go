@@ -124,7 +124,7 @@ func TestServiceLifecycle(t *testing.T) {
 	}
 
 	var v struct {
-		Problems []map[string]any         `json:"problems"`
+		Problems []map[string]any             `json:"problems"`
 		Hops     map[string][]conn.ColumnMeta `json:"hops"`
 	}
 	h.call("POST", "/api/etl/definitions/validate", map[string]any{"kind": "pipeline", "doc": doc}, &v)

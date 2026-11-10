@@ -90,7 +90,7 @@ func planSelect(in *core.Schema, c *SelectFieldsConfig) (*selectPlan, []core.Pro
 func init() {
 	core.Steps.Register(core.Define(core.Definition[SelectFieldsConfig]{
 		Meta: core.Meta{
-			ID: "select_fields", Label: "字段选择", Category: core.CategoryTransform, Icon: "columns",
+			ID: "select_fields", Order: 20, Label: "字段选择", Category: core.CategoryTransform, Icon: "columns",
 			Description: "选择、重命名、调整顺序与转换字段类型。类型转换失败的行可连到错误输出。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},
@@ -205,7 +205,7 @@ func planCalc(in *core.Schema, vars map[string]core.Kind, c *CalculatorConfig) (
 func init() {
 	core.Steps.Register(core.Define(core.Definition[CalculatorConfig]{
 		Meta: core.Meta{
-			ID: "calculator", Label: "表达式", Category: core.CategoryTransform, Icon: "function",
+			ID: "calculator", Order: 10, Label: "表达式", Category: core.CategoryTransform, Icon: "function",
 			Description: "用表达式计算新字段或改写已有字段，支持字符串、数值、日期、空值处理等函数。求值失败的行可连到错误输出。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},
@@ -266,7 +266,7 @@ type FilterRowsConfig struct {
 func init() {
 	core.Steps.Register(core.Define(core.Definition[FilterRowsConfig]{
 		Meta: core.Meta{
-			ID: "filter_rows", Label: "过滤记录", Category: core.CategoryFlow, Icon: "filter",
+			ID: "filter_rows", Order: 10, Label: "过滤记录", Category: core.CategoryFlow, Icon: "filter",
 			Description: "按条件把记录分成两路：满足条件走「是」，不满足（含 NULL）走「否」。未连接的分支直接丢弃。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs: []core.PortDecl{
@@ -327,7 +327,7 @@ const uniqueEntryBytes = 64
 func init() {
 	core.Steps.Register(core.Define(core.Definition[UniqueHashConfig]{
 		Meta: core.Meta{
-			ID: "unique_hash", Label: "唯一行（哈希）", Category: core.CategoryTransform, Icon: "fingerprint",
+			ID: "unique_hash", Order: 30, Label: "唯一行（哈希）", Category: core.CategoryTransform, Icon: "fingerprint",
 			Description: "按指定字段去重并保留首次出现的行，不要求输入有序。键数量受转换内存预算限制，超大数据量请改用排序后去重。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},
@@ -412,7 +412,7 @@ type DummyConfig struct{}
 func init() {
 	core.Steps.Register(core.Define(core.Definition[DummyConfig]{
 		Meta: core.Meta{
-			ID: "dummy", Label: "空操作", Category: core.CategoryFlow, Icon: "circle",
+			ID: "dummy", Order: 90, Label: "空操作", Category: core.CategoryFlow, Icon: "circle",
 			Description: "原样透传。可用于汇合多条流（字段布局须一致）或作为调试观察点。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Multi: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},

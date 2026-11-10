@@ -174,11 +174,13 @@ func quoteDouble(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`
 func baseTypeName(t string) string {
 	t = strings.ToUpper(strings.TrimSpace(t))
 	if i := strings.IndexByte(t, '('); i >= 0 {
-		t = strings.TrimSpace(t[:i]) + strings.TrimSpace(afterParen(t[i:]))
+		t = strings.TrimSpace(t[:i]) + afterParen(t[i:]) // 保留括号后修饰词前的空格，供下方去除 UNSIGNED 等
 	}
-	t = strings.TrimSuffix(t, " UNSIGNED")
-	t = strings.TrimSuffix(t, " ZEROFILL")
-	return strings.TrimSpace(t)
+	t = strings.Join(strings.Fields(t), " ")
+	for _, mod := range []string{" ZEROFILL", " UNSIGNED", " SIGNED"} {
+		t = strings.TrimSuffix(t, mod)
+	}
+	return t
 }
 
 func afterParen(s string) string {
@@ -246,6 +248,12 @@ func normalizeCommon(v any, f core.Field, loc *time.Location) (any, error) {
 			v = int64(x)
 		}
 	case time.Time:
+		// 无时区列（PG timestamp / 达梦 TIMESTAMP 等）：驱动把墙上时钟标成 UTC 返回。
+		// 按连接时区重新解释墙上时钟，使其与 now() 等本地时间可直接比较；写回时驱动取墙上时钟，往返不变。
+		if x.Location() == time.UTC && !hasTimeZone(f.NativeType) && loc != nil && loc != time.UTC {
+			x = time.Date(x.Year(), x.Month(), x.Day(), x.Hour(), x.Minute(), x.Second(), x.Nanosecond(), loc)
+			v = x
+		}
 		if f.Kind == core.KindString {
 			return x.In(loc).Format("2006-01-02 15:04:05"), nil
 		}
@@ -261,6 +269,12 @@ func normalizeCommon(v any, f core.Field, loc *time.Location) (any, error) {
 		}
 	}
 	return core.Convert(v, f.Kind, core.ConvertOptions{Location: loc})
+}
+
+// hasTimeZone 判断原生类型是否带时区（timestamptz / with time zone）。
+func hasTimeZone(native string) bool {
+	t := strings.ToUpper(native)
+	return strings.Contains(t, "TZ") || strings.Contains(t, "WITH TIME ZONE")
 }
 
 func isPlain(v any) bool {

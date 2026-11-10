@@ -162,7 +162,7 @@ func init() {
 
 	// 运行转换
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[PipelineConfig]{
-		Meta: core.Meta{ID: "pipeline", Label: "运行转换", Icon: "pipeline", Description: "运行一个转换，可把作业变量映射为转换参数（表达式）。转换的步骤度量与日志汇入本次作业运行。",
+		Meta: core.Meta{ID: "pipeline", Order: 30, Label: "运行转换", Icon: "pipeline", Description: "运行一个转换，可把作业变量映射为转换参数（表达式）。转换的步骤度量与日志汇入本次作业运行。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Outputs: successPort, Keywords: []string{"Transformation", "转换"}},
 		Defaults: func() PipelineConfig { return PipelineConfig{Params: map[string]string{}} },
 		Validate: func(vc *workflow.ValidateContext, c *PipelineConfig) error {
@@ -231,7 +231,7 @@ func init() {
 
 	// 执行 SQL
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[SQLConfig]{
-		Meta: core.Meta{ID: "sql", Label: "执行 SQL", Icon: "terminal", Description: "在指定连接上执行一条 SQL（DDL / DML / 存储过程）。可把影响行数写入变量。",
+		Meta: core.Meta{ID: "sql", Order: 40, Label: "执行 SQL", Icon: "terminal", Description: "在指定连接上执行一条 SQL（DDL / DML / 存储过程）。可把影响行数写入变量。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Outputs: successPort, Keywords: []string{"SQL", "Execute SQL script"}},
 		Outputs: func(c *SQLConfig) map[string]core.Kind {
 			if c.AffectedVar == "" {
@@ -268,7 +268,7 @@ func init() {
 
 	// SQL 取值
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[SQLValueConfig]{
-		Meta: core.Meta{ID: "sql_value", Label: "SQL 取值", Icon: "variable", Description: "执行查询，把第一行的列写入作业变量（如 select max(updated_at) as maxTs）。后续作业项可直接引用。",
+		Meta: core.Meta{ID: "sql_value", Order: 10, Label: "SQL 取值", Icon: "variable", Description: "执行查询，把第一行的列写入作业变量（如 select max(updated_at) as maxTs）。后续作业项可直接引用。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Outputs: successPort, Keywords: []string{"变量", "取值", "max", "count"}},
 		Defaults: func() SQLValueConfig { return SQLValueConfig{OnEmpty: "null"} },
 		Outputs: func(c *SQLValueConfig) map[string]core.Kind {
@@ -355,7 +355,7 @@ func init() {
 
 	// 条件
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[ConditionConfig]{
-		Meta: core.Meta{ID: "condition", Label: "条件", Icon: "branch", Description: "对作业变量求布尔表达式（如 cnt > 1000），按结果走「是 / 否」分支。",
+		Meta: core.Meta{ID: "condition", Order: 20, Label: "条件", Icon: "branch", Description: "对作业变量求布尔表达式（如 cnt > 1000），按结果走「是 / 否」分支。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}},
 			Outputs: []core.PortDecl{{Name: core.PortTrue, Label: "是", Tone: "success"}, {Name: core.PortFalse, Label: "否", Tone: "warn"},
 				{Name: core.PortFailure, Label: "出错", Tone: "error"}}, Keywords: []string{"Simple evaluation", "判断", "if"}},
@@ -390,7 +390,7 @@ func init() {
 
 	// 设置变量
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[SetVarsConfig]{
-		Meta: core.Meta{ID: "set_vars", Label: "设置变量", Icon: "variable", Description: "用表达式计算并设置作业变量，例如 addDays(today(), -1)。",
+		Meta: core.Meta{ID: "set_vars", Order: 50, Label: "设置变量", Icon: "variable", Description: "用表达式计算并设置作业变量，例如 addDays(today(), -1)。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Outputs: successPort, Keywords: []string{"Set variables"}},
 		Outputs: func(c *SetVarsConfig) map[string]core.Kind {
 			m := map[string]core.Kind{}
@@ -438,7 +438,7 @@ func init() {
 
 	// 等待
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[WaitConfig]{
-		Meta: core.Meta{ID: "wait", Label: "等待", Icon: "clock", Description: "等待指定秒数后继续。",
+		Meta: core.Meta{ID: "wait", Order: 60, Label: "等待", Icon: "clock", Description: "等待指定秒数后继续。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Outputs: []core.PortDecl{{Name: core.PortSuccess, Label: "继续", Tone: "success"}}, Keywords: []string{"Wait", "sleep"}},
 		Defaults: func() WaitConfig { return WaitConfig{Seconds: 10} },
 		Validate: func(vc *workflow.ValidateContext, c *WaitConfig) error {
@@ -459,7 +459,7 @@ func init() {
 
 	// 成功
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[struct{}]{
-		Meta: core.Meta{ID: "success", Label: "成功", Icon: "check", Description: "标记分支正常结束。",
+		Meta: core.Meta{ID: "success", Order: 80, Label: "成功", Icon: "check", Description: "标记分支正常结束。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Keywords: []string{"Success"}},
 		Execute: func(ctx context.Context, ec *workflow.ExecContext, _ *struct{}) (workflow.Outcome, error) {
 			return workflow.Outcome{}, nil
@@ -468,7 +468,7 @@ func init() {
 
 	// 中止
 	workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[AbortConfig]{
-		Meta: core.Meta{ID: "abort", Label: "中止", Icon: "stop", Description: "以失败状态终止整个作业，并记录原因（可引用变量：${cnt}）。",
+		Meta: core.Meta{ID: "abort", Order: 90, Label: "中止", Icon: "stop", Description: "以失败状态终止整个作业，并记录原因（可引用变量：${cnt}）。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Keywords: []string{"Abort", "失败"}},
 		Execute: func(ctx context.Context, ec *workflow.ExecContext, c *AbortConfig) (workflow.Outcome, error) {
 			msg := c.Message
@@ -490,6 +490,7 @@ func init() {
 		{ID: "notify", Label: "通知", Icon: "bell", Description: "发送运行结果通知（邮件 / Webhook）。"},
 	} {
 		m.Maturity = core.MaturityPlanned
+		m.Order = 100
 		m.Inputs = []core.PortDecl{{Name: core.PortMain, Label: "输入"}}
 		m.Outputs = successPort
 		workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[struct{}]{Meta: m}))

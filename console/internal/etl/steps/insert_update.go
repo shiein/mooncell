@@ -44,7 +44,7 @@ const lookupKeysPerStatement = 500
 func init() {
 	core.Steps.Register(core.Define(core.Definition[InsertUpdateConfig]{
 		Meta: core.Meta{
-			ID: "insert_update", Label: "插入 / 更新", Category: core.CategoryOutput, Icon: "upsert",
+			ID: "insert_update", Order: 20, Label: "插入 / 更新", Category: core.CategoryOutput, Icon: "upsert",
 			Description: "按查询关键字比对目标表：不存在则插入，存在且值有变化则更新。不要求唯一约束，但关键字段应有索引。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "已处理"}},

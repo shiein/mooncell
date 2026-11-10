@@ -25,7 +25,7 @@ type ConstantField struct {
 func init() {
 	core.Steps.Register(core.Define(core.Definition[GenerateRowsConfig]{
 		Meta: core.Meta{
-			ID: "generate_rows", Label: "生成记录", Category: core.CategoryInput, Icon: "sparkles",
+			ID: "generate_rows", Order: 20, Label: "生成记录", Category: core.CategoryInput, Icon: "sparkles",
 			Description: "生成指定行数的常量记录，可带自增序号。常用于测试、补数或驱动后续步骤。",
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},
 			Keywords:    []string{"Generate rows", "常量", "测试数据"},

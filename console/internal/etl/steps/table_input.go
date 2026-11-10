@@ -20,7 +20,7 @@ type TableInputConfig struct {
 func init() {
 	core.Steps.Register(core.Define(core.Definition[TableInputConfig]{
 		Meta: core.Meta{
-			ID: "table_input", Label: "表输入", Category: core.CategoryInput, Icon: "database",
+			ID: "table_input", Order: 10, Label: "表输入", Category: core.CategoryInput, Icon: "database",
 			Description: "执行 SQL 查询并流式读出结果。用 ${变量} 绑定参数（安全），#{变量} 仅可替换表名/模式名。",
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},
 			Keywords:    []string{"Table input", "SQL", "查询", "select"},

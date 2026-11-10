@@ -69,6 +69,7 @@ type Meta struct {
 	Version     int        `json:"version"`             // 当前配置结构版本
 	Maturity    Maturity   `json:"maturity"`
 	Keywords    []string   `json:"keywords,omitempty"` // 面板搜索同义词（如 Kettle 原名）
+	Order       int        `json:"order"`              // 分类内的展示顺序（小在前），相同则按 ID
 }
 
 // InputPort 返回指定名称的输入端口声明。
@@ -594,6 +595,9 @@ func (r *Registry[T]) Metas() []Meta {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Category != out[j].Category {
 			return categoryOrder(out[i].Category) < categoryOrder(out[j].Category)
+		}
+		if out[i].Order != out[j].Order {
+			return out[i].Order < out[j].Order
 		}
 		return out[i].ID < out[j].ID
 	})

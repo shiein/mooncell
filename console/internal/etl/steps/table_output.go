@@ -23,7 +23,7 @@ type TableOutputConfig struct {
 func init() {
 	core.Steps.Register(core.Define(core.Definition[TableOutputConfig]{
 		Meta: core.Meta{
-			ID: "table_output", Label: "表输出", Category: core.CategoryOutput, Icon: "table",
+			ID: "table_output", Order: 10, Label: "表输出", Category: core.CategoryOutput, Icon: "table",
 			Description: "把记录批量插入目标表，按「提交记录数」分事务提交。可选开始前清空表（全量重灌）。写入成功的记录继续向下游输出。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "已写入"}},
