@@ -120,6 +120,21 @@ func (a *sessionAdapter) Begin(ctx context.Context, readOnly bool) (Transaction,
 
 func (a *sessionAdapter) sqlDialect() sqlDialect { return dialectOf(a.DataSourceAdapter) }
 
+// flushLeakedSession：MySQL/达梦的会话变量不随事务回滚，重放过的值会残留在连接池的空闲连接上。
+// 清除记录（重置/RESET/DEFAULT）或关闭工作台时关闭全部空闲连接，后续语句拿到的是干净的新连接。
+// 局限：此刻正被并发导出/元数据请求占用的连接不会被关闭（工作台语句本身持 ws.mu，不会并发）。
+func (a *sessionAdapter) flushLeakedSession() {
+	if d := a.sqlDialect(); d != dialectMySQL && d != dialectDM {
+		return // PG/Kingbase 以 SET LOCAL 重放，事务结束即失效
+	}
+	db := a.rawDB()
+	if db == nil {
+		return
+	}
+	db.SetMaxIdleConns(0)
+	db.SetMaxIdleConns(defaultMaxIdleConns)
+}
+
 func (a *sessionAdapter) rawDB() *sql.DB {
 	if r, ok := a.DataSourceAdapter.(rawDBAdapter); ok {
 		return r.rawDB()
@@ -475,7 +490,7 @@ func isNumericWord(s string) bool {
 	return true
 }
 
-const dmSetHint = "仅支持 SET SCHEMA 模式名 与 SET TIME ZONE '…'"
+const dmSetHint = "仅支持 SET SCHEMA 模式名"
 
 func parseDMSet(ts []setTok) (*sessionChange, string) {
 	if len(ts) < 2 || ts[0].up != "SET" {
@@ -485,9 +500,9 @@ func parseDMSet(ts []setTok) (*sessionChange, string) {
 	case len(ts) == 3 && ts[1].up == "SCHEMA" && (ts[2].kind == tokWord || (ts[2].kind == tokString && strings.HasPrefix(ts[2].text, `"`))):
 		stmt := "SET SCHEMA " + ts[2].text
 		return &sessionChange{Set: []sessionSetting{{Key: "schema", Display: stmt, Replay: stmt, Session: stmt}}}, ""
-	case len(ts) == 4 && ts[1].up == "TIME" && ts[2].up == "ZONE" && ts[3].kind == tokString && strings.HasPrefix(ts[3].text, "'"):
-		stmt := "SET TIME ZONE " + ts[3].text
-		return &sessionChange{Set: []sessionSetting{{Key: "timezone", Display: stmt, Replay: stmt, Session: stmt}}}, ""
+	case len(ts) >= 3 && ts[1].up == "TIME" && ts[2].up == "ZONE":
+		// 实测（dm 驱动）：会话时区被缓存在连接器层，关闭空闲连接后新连接仍沿用，重置无法撤销
+		return nil, "达梦驱动会在连接池层缓存会话时区，工作台无法可靠撤销，因此不支持 SET TIME ZONE；请在 SQL 中做时区换算"
 	}
 	return nil, dmSetHint
 }

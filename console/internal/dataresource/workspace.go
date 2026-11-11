@@ -228,6 +228,7 @@ func (wm *WorkspaceManager) finishInvalidation(ws *Workspace, closePool bool) {
 	} else {
 		ws.clearTxLocked(false, nil)
 	}
+	ws.closeSessionState()
 	ws.mu.Unlock()
 	if closePool {
 		wm.pool.CloseSessionDB(ws.ResourceID, ws.LoginSessionID)
@@ -360,6 +361,7 @@ func (wm *WorkspaceManager) deleteWorkspaceIfIdle(ws *Workspace, now time.Time) 
 	delete(wm.workspaces, ws.ID)
 	ws.closed.Store(true)
 	ws.clearTxLocked(false, nil)
+	ws.closeSessionState()
 	return true
 }
 
@@ -543,10 +545,35 @@ func (wm *WorkspaceManager) executeSessionInWorkspace(ctx context.Context, ws *W
 			return err
 		}
 	}
-	if err := st.apply(ch); err != nil {
+	err := st.apply(ch)
+	// 试执行已作用在某条池连接上：记录失败或有键被清除时，冲掉可能残留的会话值
+	if err != nil || ch.ResetAll || len(ch.ResetKey) > 0 {
+		ws.flushSessionLeak()
+	}
+	if err != nil {
 		return &APIError{Code: "SESSION_SETTING_LIMIT", Message: err.Error()}
 	}
 	return nil
+}
+
+// flushSessionLeak 见 sessionAdapter.flushLeakedSession。
+func (ws *Workspace) flushSessionLeak() {
+	if sa, ok := ws.Adapter.(*sessionAdapter); ok {
+		sa.flushLeakedSession()
+	}
+}
+
+// closeSessionState 工作台关闭时清空记录；曾有设置则冲掉残留，避免同一登录会话的下一个工作台继承。
+func (ws *Workspace) closeSessionState() {
+	st := ws.sessionState()
+	if st == nil {
+		return
+	}
+	had := len(st.snapshot()) > 0
+	st.clear()
+	if had {
+		ws.flushSessionLeak()
+	}
 }
 
 // ResetSessionSettings 清空工作台的会话设置记录。
@@ -554,9 +581,7 @@ func (wm *WorkspaceManager) ResetSessionSettings(ws *Workspace) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	ws.LastActivity = time.Now()
-	if st := ws.sessionState(); st != nil {
-		st.clear()
-	}
+	ws.closeSessionState()
 }
 
 // executeQueryInWorkspace 执行结果集语句（不统计总数）。

@@ -69,6 +69,12 @@ func TestDangerousWriteMySQLBypasses(t *testing.T) {
 		{dialectPG, "EXPLAIN ANALYZE DELETE FROM t", true},
 		{dialectPG, "-- c\nDROP TABLE t", true},
 		{dialectDM, "DELETE FROM t WHERE id = 1", false},
+		// 匿名块体内语句不可见：一律确认
+		{dialectPG, "DO $$BEGIN DELETE FROM orders; END$$", true},
+		{dialectDM, "BEGIN DELETE FROM orders; END;", true},
+		{dialectDM, "DECLARE v INT; BEGIN DELETE FROM orders; END;", true},
+		{dialectPG, "CALL refresh_stats()", false},
+		{dialectMySQL, "CALL p()", false},
 	}
 	for _, c := range cases {
 		st := analyzeSQL(c.sql, c.d).Type

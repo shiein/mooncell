@@ -71,7 +71,6 @@ function statementHighlighter(dialect) {
 const baseTheme = EditorView.theme({
   '&': { height: '100%', fontSize: '12.5px' },
   '.cm-scroller': { overflow: 'auto', fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)' },
-  '.cm-dr-stmt': { backgroundColor: 'color-mix(in srgb, var(--primary) 7%, transparent)' },
   '.cm-dr-error': { textDecoration: 'underline wavy #e5484d', backgroundColor: 'rgba(229,72,77,.14)' },
 });
 

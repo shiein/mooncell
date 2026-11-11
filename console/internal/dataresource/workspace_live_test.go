@@ -167,10 +167,8 @@ func TestLiveWorkspaceBehaviours(t *testing.T) {
 					t.Fatal("SHOW 未直通")
 				}
 			case dialectDM:
-				mustExec(t, wm, ws, "SET TIME ZONE '+03:00'", 0, 0)
-				res = mustExec(t, wm, ws, "SELECT SESSIONTIMEZONE FROM DUAL", 0, 0)
-				if !strings.Contains(firstCell(res), "+03:00") {
-					t.Fatalf("DM 时区未重放: %v", res.Rows)
+				if _, err := wm.ExecuteInWorkspace(context.Background(), ws, "SET TIME ZONE '+03:00'", 0, 0); err == nil {
+					t.Fatal("达梦 SET TIME ZONE 应被拒绝（驱动缓存时区，无法撤销）")
 				}
 				mustExec(t, wm, ws, "SET SCHEMA SYSDBA", 0, 0)
 				res = mustExec(t, wm, ws, "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM DUAL", 0, 0)
@@ -179,6 +177,62 @@ func TestLiveWorkspaceBehaviours(t *testing.T) {
 				}
 				// 匿名块作为单语句执行
 				mustExec(t, wm, ws, "BEGIN\n  NULL;\n  NULL;\nEND;", 0, 0)
+			}
+		})
+	}
+}
+
+// 回归：MySQL/达梦会话变量不随事务回滚。重置记录、关闭工作台后，池中连接不得残留旧值。
+func TestLiveSessionResetNoLeak(t *testing.T) {
+	for _, l := range liveDBs {
+		l := l
+		if l.dbType != DriverMySQL && l.dbType != DriverDM {
+			continue
+		}
+		t.Run(l.dbType, func(t *testing.T) {
+			wm, ws, db := openLiveWorkspace(t, l)
+			tzSQL := "SELECT @@time_zone"
+			setSQL := "SET time_zone = '+03:00'"
+			marker := "+03:00"
+			if l.dbType == DriverDM {
+				_, _ = wm.ExecuteInWorkspace(context.Background(), ws, "CREATE SCHEMA DR_LEAK_S", 0, 0)
+				t.Cleanup(func() { _, _ = db.Exec("DROP SCHEMA DR_LEAK_S CASCADE") })
+				tzSQL = "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM DUAL"
+				setSQL = "SET SCHEMA DR_LEAK_S"
+				marker = "dr_leak_s"
+			}
+			mustExec(t, wm, ws, setSQL, 0, 0)
+			for i := 0; i < 5; i++ {
+				if got := firstCell(mustExec(t, wm, ws, tzSQL, 0, 0)); !strings.Contains(got, marker) {
+					t.Fatalf("设置未生效: %s", got)
+				}
+			}
+			if l.dbType == DriverMySQL {
+				mustExec(t, wm, ws, "SET @dr_leak = 7", 0, 0)
+			}
+			wm.ResetSessionSettings(ws)
+			for i := 0; i < 5; i++ {
+				if got := firstCell(mustExec(t, wm, ws, tzSQL, 0, 0)); strings.Contains(got, marker) {
+					t.Fatalf("重置后第 %d 次仍是旧时区: %s", i, got)
+				}
+			}
+			if l.dbType == DriverMySQL {
+				if got := firstCell(mustExec(t, wm, ws, "SELECT @dr_leak", 0, 0)); got != "<nil>" {
+					t.Fatalf("重置后用户变量残留: %s", got)
+				}
+			}
+			// 关闭工作台后：同一连接池上直接查询也不得残留
+			mustExec(t, wm, ws, setSQL, 0, 0)
+			mustExec(t, wm, ws, tzSQL, 0, 0)
+			wm.DeleteWorkspace(ws.ID)
+			for i := 0; i < 5; i++ {
+				var tz string
+				if err := db.QueryRow(tzSQL).Scan(&tz); err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(strings.ToLower(tz), marker) {
+					t.Fatalf("工作台关闭后池连接残留时区: %s", tz)
+				}
 			}
 		})
 	}

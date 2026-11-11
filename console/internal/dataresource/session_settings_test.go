@@ -20,7 +20,6 @@ func TestParseSessionChange(t *testing.T) {
 		{dialectMySQL, "SET @@session.time_zone = '+00:00'", "time_zone", "SET time_zone = '+00:00'"},
 		{dialectMySQL, "SET @p = -1.5", "@p", "SET @p = -1.5"},
 		{dialectDM, "SET SCHEMA APP", "schema", "SET SCHEMA APP"},
-		{dialectDM, "SET TIME ZONE '+08:00'", "timezone", "SET TIME ZONE '+08:00'"},
 	}
 	for _, c := range ok {
 		ch, reason := parseSessionChange(c.sql, c.d)
@@ -52,6 +51,7 @@ func TestParseSessionChange(t *testing.T) {
 		{dialectMySQL, "SET SESSION TRANSACTION READ WRITE"},
 		{dialectDM, "SET SCHEMA a b"},
 		{dialectDM, "SET TRANSACTION READ WRITE"},
+		{dialectDM, "SET TIME ZONE '+08:00'"},
 	}
 	for _, c := range reject {
 		if _, reason := parseSessionChange(c.sql, c.d); reason == "" {

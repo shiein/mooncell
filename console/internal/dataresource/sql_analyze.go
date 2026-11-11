@@ -216,6 +216,19 @@ func isDangerousWriteFor(st StatementType, sqlText string, d sqlDialect) bool {
 	case StmtDDL:
 		words := leadingSQLWords(sqlText, d, 1)
 		return len(words) == 1 && words[0] == "DROP"
+	case StmtCall:
+		// 匿名块（PG DO $$…$$、达梦 BEGIN…END / DECLARE…）体内语句对检查器不可见（dollar quote 被当字符串），
+		// 一律要求确认；普通 CALL/EXEC 保持原行为
+		words := leadingSQLWords(sqlText, d, 1)
+		if len(words) == 1 {
+			switch words[0] {
+			case "DO":
+				return d == dialectPG || d == dialectGeneric
+			case "BEGIN", "DECLARE":
+				return d == dialectDM
+			}
+		}
+		return false
 	case StmtDelete, StmtUpdate:
 		lexes := []sqlLexOpts{lexOptsFor(d)}
 		if d == dialectMySQL {
