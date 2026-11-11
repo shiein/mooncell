@@ -4,6 +4,10 @@
 [server]
 addr = "127.0.0.1" # 监听地址;生产若改 0.0.0.0,必须同步修改默认密码/token
 port = 8787
+# 经反向代理访问时填写代理地址(IP 或 CIDR),并在代理上设置
+#   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+# 否则审计与登录限流看到的来源都是代理地址。默认空 = 不采信任何转发头。
+# trusted_proxies = ["127.0.0.1"]
 
 [database]
 path = "mooncell.db"   # sqlite 文件路径,首次运行自动创建

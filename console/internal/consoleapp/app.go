@@ -38,6 +38,12 @@ func Run(distFS fs.FS, version string, args []string) {
 	}
 
 	cfg := loadConfig("config.toml")
+	if err := SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		log.Fatalf("[config] %v", err)
+	}
+	if len(cfg.Server.TrustedProxies) > 0 {
+		log.Printf("[config] 可信反代: %v(仅这些来源的 X-Forwarded-For 会被采信)", cfg.Server.TrustedProxies)
+	}
 
 	// 单实例锁:双开会争 sqlite(MaxOpenConns=1),登录等请求可无限挂起(浏览器一直 pending)。
 	// 自更新后若旧进程未退干净又拉起新进程,最常见症状就是「登录一直转圈」。
