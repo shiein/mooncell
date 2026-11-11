@@ -36,7 +36,7 @@ export function DesignerPage(props) {
   );
 }
 
-function Designer({ defId, onBack, onOpenRun }) {
+function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   const { catalog, error: catErr } = useCatalog();
   const rf = useReactFlow();
   const [meta, setMetaState] = React.useState(null); // { id, kind, name, description, folder, revision, updatedAt }
@@ -356,6 +356,24 @@ function Designer({ defId, onBack, onOpenRun }) {
     const n = rf.getNode(id);
     if (n) rf.setCenter(n.position.x + NODE_W / 2, n.position.y + 30, { zoom: Math.max(rf.getZoom(), 0.9), duration: 300 });
   };
+
+  // 外部定位（运行详情「失败节点定位」）：文档加载完成后选中并居中指定节点。
+  const pendingFocus = React.useRef(focusNodeId);
+  React.useEffect(() => {
+    const id = pendingFocus.current;
+    if (!id || !doc) return;
+    pendingFocus.current = null;
+    if (!doc.nodes.some((n) => n.id === id)) return;
+    let tries = 0;
+    let stop = false;
+    const tick = () => {
+      if (stop) return;
+      if (rf.getNode(id)) { focusNode(id); return; }
+      if (++tries < 30) setTimeout(tick, 50);
+    };
+    const t = setTimeout(tick, 0);
+    return () => { stop = true; clearTimeout(t); };
+  }, [doc]);
 
   const tidy = () => {
     const next = autoLayout(doc);

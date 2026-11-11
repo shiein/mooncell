@@ -33,16 +33,23 @@ type Run struct {
 	Params         json.RawMessage `json:"params"`
 	Snapshot       json.RawMessage `json:"snapshot,omitempty"`
 	// Refs 是快照引用的定义文档（{id: {kind,name,revision,doc}}）；不进 API 响应。
-	Refs json.RawMessage `json:"-"`
-	Error          string          `json:"error,omitempty"`
-	TriggeredBy    string          `json:"triggeredBy"`
-	RowsRead       int64           `json:"rowsRead"`
-	RowsWritten    int64           `json:"rowsWritten"`
-	LogCount       int64           `json:"logCount"`
-	LogDropped     int64           `json:"logDropped"`
-	QueuedAt       int64           `json:"queuedAt"`
-	StartedAt      int64           `json:"startedAt"`
-	FinishedAt     int64           `json:"finishedAt"`
+	Refs        json.RawMessage `json:"-"`
+	Error       string          `json:"error,omitempty"`
+	TriggeredBy string          `json:"triggeredBy"`
+	RowsRead    int64           `json:"rowsRead"`
+	RowsWritten int64           `json:"rowsWritten"`
+	LogCount    int64           `json:"logCount"`
+	LogDropped  int64           `json:"logDropped"`
+	QueuedAt    int64           `json:"queuedAt"`
+	StartedAt   int64           `json:"startedAt"`
+	FinishedAt  int64           `json:"finishedAt"`
+}
+
+// ErrorSample 是节点 error 端口拒绝行的采样（有上限，随运行记录保存）。
+type ErrorSample struct {
+	Fields []string `json:"fields"` // 错误行布局：基础字段 + _error_code/_error_message/_error_field/_error_step
+	Rows   [][]any  `json:"rows"`   // 采样行（值经截断清洗）
+	Total  int64    `json:"total"`  // 拒绝总数（采样只保留前几条）
 }
 
 // RunNode 是运行中一个节点（作业项或步骤）的状态。
@@ -58,6 +65,7 @@ type RunNode struct {
 	OutputVars map[string]core.Value `json:"outputVars,omitempty"`
 	Port       string                `json:"port,omitempty"`
 	Error      string                `json:"error,omitempty"`
+	Samples    *ErrorSample          `json:"samples,omitempty"`
 	StartedAt  int64                 `json:"startedAt"`
 	FinishedAt int64                 `json:"finishedAt"`
 }
@@ -190,20 +198,25 @@ func (s *Store) UpsertRunNode(n RunNode) error {
 	if n.Attempt == 0 {
 		n.Attempt = 1
 	}
+	smp := "{}"
+	if n.Samples != nil {
+		b, _ := json.Marshal(n.Samples)
+		smp = string(b)
+	}
 	_, err := s.db.Exec(`INSERT INTO etl_run_nodes (run_id, node_id, node_name, node_type, parent_node, status, attempt, metrics_json,
-			output_vars_json, port, error, started_at, finished_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+			output_vars_json, port, error, samples_json, started_at, finished_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(run_id, parent_node, node_id) DO UPDATE SET node_name=excluded.node_name, node_type=excluded.node_type,
 			status=excluded.status, attempt=excluded.attempt, metrics_json=excluded.metrics_json, output_vars_json=excluded.output_vars_json,
-			port=excluded.port, error=excluded.error, started_at=excluded.started_at, finished_at=excluded.finished_at`,
-		n.RunID, n.NodeID, n.NodeName, n.NodeType, n.ParentNode, n.Status, n.Attempt, string(m), string(v), n.Port, n.Error, n.StartedAt, n.FinishedAt)
+			port=excluded.port, error=excluded.error, samples_json=excluded.samples_json, started_at=excluded.started_at, finished_at=excluded.finished_at`,
+		n.RunID, n.NodeID, n.NodeName, n.NodeType, n.ParentNode, n.Status, n.Attempt, string(m), string(v), n.Port, n.Error, smp, n.StartedAt, n.FinishedAt)
 	return err
 }
 
 // ListRunNodes 返回运行的全部节点。
 func (s *Store) ListRunNodes(runID string) ([]RunNode, error) {
 	rows, err := s.db.Query(`SELECT run_id, node_id, node_name, node_type, parent_node, status, attempt, metrics_json, output_vars_json,
-		port, error, started_at, finished_at FROM etl_run_nodes WHERE run_id=? ORDER BY parent_node, started_at, node_id`, runID)
+		port, error, samples_json, started_at, finished_at FROM etl_run_nodes WHERE run_id=? ORDER BY parent_node, started_at, node_id`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,13 +224,17 @@ func (s *Store) ListRunNodes(runID string) ([]RunNode, error) {
 	out := []RunNode{}
 	for rows.Next() {
 		var n RunNode
-		var m, v string
+		var m, v, smp string
 		if err := rows.Scan(&n.RunID, &n.NodeID, &n.NodeName, &n.NodeType, &n.ParentNode, &n.Status, &n.Attempt, &m, &v,
-			&n.Port, &n.Error, &n.StartedAt, &n.FinishedAt); err != nil {
+			&n.Port, &n.Error, &smp, &n.StartedAt, &n.FinishedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(m), &n.Metrics)
 		_ = json.Unmarshal([]byte(v), &n.OutputVars)
+		var es ErrorSample
+		if err := json.Unmarshal([]byte(smp), &es); err == nil && len(es.Rows) > 0 {
+			n.Samples = &es
+		}
 		out = append(out, n)
 	}
 	return out, rows.Err()

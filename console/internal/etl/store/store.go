@@ -143,6 +143,7 @@ func Migrate(db *sql.DB) error {
 			output_vars_json TEXT NOT NULL DEFAULT '{}',
 			port             TEXT NOT NULL DEFAULT '',  -- 作业项结束时激活的输出端口
 			error            TEXT NOT NULL DEFAULT '',
+			samples_json     TEXT NOT NULL DEFAULT '{}', -- error 端口拒绝行采样（前 N 条）
 			started_at       INTEGER NOT NULL DEFAULT 0,
 			finished_at      INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (run_id, parent_node, node_id)
@@ -169,9 +170,13 @@ func Migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	// 旧库可能缺少 refs_json 列：幂等补齐。
-	return ensureColumn(db, "etl_runs", "refs_json",
-		`ALTER TABLE etl_runs ADD COLUMN refs_json TEXT NOT NULL DEFAULT '{}'`)
+	// 旧库可能缺少的列：幂等补齐。
+	if err := ensureColumn(db, "etl_runs", "refs_json",
+		`ALTER TABLE etl_runs ADD COLUMN refs_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return err
+	}
+	return ensureColumn(db, "etl_run_nodes", "samples_json",
+		`ALTER TABLE etl_run_nodes ADD COLUMN samples_json TEXT NOT NULL DEFAULT '{}'`)
 }
 
 // ensureColumn 幂等补齐旧库缺失的列。

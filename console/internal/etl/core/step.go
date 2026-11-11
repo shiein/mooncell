@@ -224,6 +224,9 @@ type RunContext struct {
 
 	Inputs  map[string]*InPort
 	Outputs map[string]*OutPort
+
+	// OnReject 在行被拒绝（写入 error 端口）时回调采样；可为 nil。
+	OnReject func(row Row)
 }
 
 // In 返回输入端口；未连接返回一个立即耗尽的端口，步骤无需判空。
@@ -264,6 +267,9 @@ func (rc *RunContext) Reject(ctx context.Context, row Row, cause error, field st
 	er = append(er, row...)
 	er = append(er, code, cause.Error(), nullIfEmpty(field), rc.NodeID)
 	rc.Metrics.Rejected.Add(1)
+	if rc.OnReject != nil {
+		rc.OnReject(er)
+	}
 	return rc.Outputs[PortError].buffer(ctx, er, rc.BatchSize)
 }
 

@@ -91,6 +91,7 @@ function App() {
       resource: opts.resource,
       workspace: opts.workspace,
       defId: opts.defId,
+      node: opts.node,
       runId: opts.runId,
     }, role, features);
     setRoute(r);

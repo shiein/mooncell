@@ -23,12 +23,12 @@ const TABS = [
 export function EtlModule({ route, nav }) {
   const go = {
     tab: (tab) => nav('etl', { tab }),
-    designer: (defId) => nav('etl-designer', { defId }),
+    designer: (defId, nodeId) => nav('etl-designer', { defId, node: nodeId }),
     run: (runId) => nav('etl-run', { runId }),
     back: (tab) => nav('etl', { tab: tab || 'projects' }),
   };
   if (route.page === 'etl-designer' && route.defId) {
-    return <DesignerPage defId={route.defId} onBack={() => go.back('projects')} onOpenRun={(id) => go.run(id)} />;
+    return <DesignerPage defId={route.defId} focusNodeId={route.node} onBack={() => go.back('projects')} onOpenRun={(id) => go.run(id)} />;
   }
   if (route.page === 'etl-run' && route.runId) {
     return <RunDetailPage runId={route.runId} go={go} />;

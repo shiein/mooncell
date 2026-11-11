@@ -1,6 +1,6 @@
 // 运行详情：概要、作业时间线（甘特）、步骤度量（Kettle 列）、日志（级别/节点过滤、搜索高亮、实时跟随）。
 import React from 'react';
-import { Icon, Btn, Spinner, Seg, Select, Badge, CopyChip, toast, confirmDialog } from '../../components/primitives.jsx';
+import { Icon, Btn, Spinner, Seg, Select, Badge, CopyChip, Dialog, toast, confirmDialog } from '../../components/primitives.jsx';
 import { etlApi, subscribeRun } from '../api.js';
 import { RunStatus } from '../components.jsx';
 import { NODE_STATUS, TRIGGER_LABEL, fmtDateTime, fmtDuration, fmtNum, fmtRate, fmtClock, runDuration } from '../util.js';
@@ -10,6 +10,7 @@ export function RunDetailPage({ runId, go }) {
   const [err, setErr] = React.useState('');
   const [logs, setLogs] = React.useState([]);
   const [focus, setFocus] = React.useState(null); // 作业中选中的「运行转换」作业项
+  const [sample, setSample] = React.useState(null); // { node, sample } 拒绝行采样弹窗
   const lastSeq = React.useRef(0);
 
   const loadDetail = React.useCallback(() => etlApi.runDetail(runId).then((d) => { setData(d); setErr(''); return d; }).catch((e) => setErr(e.message)), [runId]);
@@ -61,6 +62,34 @@ export function RunDetailPage({ runId, go }) {
     try { const r = await etlApi.run(run.definitionId, paramsOf(run)); toast('已重新运行'); go.run(r.id); } catch (e) { toast(e.message, { tone: 'error' }); }
   };
 
+  // 在设计器中定位节点：父链向上找到顶层祖先，再沿「作业→转换/子作业」引用链
+  // 向下解析出节点所属定义；被引定义已删除时报错不跳转。
+  const locate = async (n) => {
+    try {
+      const chain = [];
+      let cur = n;
+      let guard = 0;
+      while (cur.parentNode && guard++ < 32) {
+        const p = nodes.find((x) => x.nodeId === cur.parentNode);
+        if (!p) break;
+        chain.unshift(p);
+        cur = p;
+      }
+      let defId = run.definitionId;
+      for (const anc of chain) {
+        const def = await etlApi.definition(defId);
+        const doc = def.doc || {};
+        const node = (doc.nodes || []).find((x) => x.id === anc.nodeId);
+        const next = node && node.config && (node.config.pipeline || node.config.workflow);
+        if (!next) throw new Error(`节点「${anc.nodeName || anc.nodeId}」未引用定义`);
+        defId = next;
+      }
+      go.designer(defId, n.nodeId);
+    } catch (e) {
+      toast(`定位失败：${e.message}`, { tone: 'error' });
+    }
+  };
+
   return (
     <div>
       <div className="etl-run-head">
@@ -105,22 +134,23 @@ export function RunDetailPage({ runId, go }) {
       {run.kind === 'workflow' ? (
         <div className="card" style={{ marginBottom: 14, overflow: 'hidden' }}>
           <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: 13.5 }}>作业项时间线</div>
-          <Gantt nodes={top} run={run} onPick={(n) => setFocus(focus === n.nodeId ? null : n.nodeId)} focus={focus} hasChildren={(id) => children(id).length > 0} />
+          <Gantt nodes={top} run={run} onPick={(n) => setFocus(focus === n.nodeId ? null : n.nodeId)} focus={focus} hasChildren={(id) => children(id).length > 0} locate={locate} />
           {focus && children(focus).length ? (
             <div style={{ borderTop: '1px solid var(--border)' }}>
               <div style={{ padding: '10px 14px', fontSize: 12.5, fontWeight: 600, background: 'var(--bg)' }}>「{(top.find((n) => n.nodeId === focus) || {}).nodeName}」中的步骤</div>
-              <StepMetrics nodes={children(focus)} />
+              <StepMetrics nodes={children(focus)} locate={locate} onSample={(n) => setSample({ node: n, sample: n.samples })} />
             </div>
           ) : null}
         </div>
       ) : (
         <div className="card" style={{ marginBottom: 14, overflow: 'hidden' }}>
           <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: 13.5 }}>步骤度量</div>
-          <StepMetrics nodes={top} />
+          <StepMetrics nodes={top} locate={locate} onSample={(n) => setSample({ node: n, sample: n.samples })} />
         </div>
       )}
 
       <LogPanel logs={logs} nodes={nodes} live={live} />
+      {sample ? <SampleDialog node={sample.node} sample={sample.sample} onClose={() => setSample(null)} /> : null}
     </div>
   );
 }
@@ -139,7 +169,7 @@ function paramsOf(run) {
   try { return typeof run.params === 'string' ? JSON.parse(run.params) : (run.params || {}); } catch (e) { return {}; }
 }
 
-function Gantt({ nodes, run, onPick, focus, hasChildren }) {
+function Gantt({ nodes, run, onPick, focus, hasChildren, locate }) {
   const start = run.startedAt || run.queuedAt;
   const end = run.finishedAt || Date.now();
   const span = Math.max(1, end - start);
@@ -158,6 +188,12 @@ function Gantt({ nodes, run, onPick, focus, hasChildren }) {
               {clickable ? <Icon name={focus === n.nodeId ? 'chevronD' : 'chevronR'} size={12} style={{ color: 'var(--muted-fg)' }} /> : <span style={{ width: 12 }}></span>}
               <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.nodeName || n.nodeId}</span>
               <Badge tone={st.tone}>{st.label}</Badge>
+              {n.status === 'failed' ? (
+                <button type="button" className="link-btn" style={{ fontSize: 11.5, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+                  title="在设计器中定位该节点" onClick={(e) => { e.stopPropagation(); locate && locate(n); }}>
+                  <Icon name="locate" size={12} />定位
+                </button>
+              ) : null}
               {n.attempt > 1 ? <span className="etl-muted">×{n.attempt}</span> : null}
             </div>
             <div className="etl-gantt-track" title={n.error || ''}>
@@ -173,7 +209,7 @@ function Gantt({ nodes, run, onPick, focus, hasChildren }) {
   );
 }
 
-function StepMetrics({ nodes }) {
+function StepMetrics({ nodes, locate, onSample }) {
   const cols = [['read', '读'], ['written', '写'], ['input', '输入'], ['output', '输出'], ['updated', '更新'], ['rejected', '拒绝'], ['errors', '错误']];
   return (
     <div style={{ overflowX: 'auto' }}>
@@ -192,12 +228,24 @@ function StepMetrics({ nodes }) {
             return (
               <tr key={n.nodeId}>
                 <td>
-                  <div style={{ fontWeight: 600 }}>{n.nodeName || n.nodeId}</div>
+                  <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {n.nodeName || n.nodeId}
+                    {n.status === 'failed' ? (
+                      <button type="button" className="link-btn" style={{ fontSize: 11.5, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+                        title="在设计器中定位该节点" onClick={() => locate && locate(n)}>
+                        <Icon name="locate" size={12} />定位
+                      </button>
+                    ) : null}
+                  </div>
                   {n.error ? <div style={{ color: 'var(--error)', fontSize: 11.5, maxWidth: 360, whiteSpace: 'normal' }}>{n.error}</div> : <div className="etl-muted" style={{ fontSize: 11 }}>{n.nodeType}</div>}
                 </td>
                 <td><Badge tone={st.tone}>{st.label}</Badge></td>
                 {cols.map(([k]) => (
-                  <td key={k} className="etl-num" style={{ textAlign: 'right', color: (k === 'rejected' || k === 'errors') && m[k] ? 'var(--error)' : m[k] ? undefined : 'var(--muted-fg)' }}>{fmtNum(m[k] || 0)}</td>
+                  <td key={k} className="etl-num" style={{ textAlign: 'right', color: (k === 'rejected' || k === 'errors') && m[k] ? 'var(--error)' : m[k] ? undefined : 'var(--muted-fg)' }}>
+                    {k === 'rejected' && n.samples && n.samples.rows && n.samples.rows.length ? (
+                      <button type="button" className="link-btn etl-num" title="查看拒绝行样本" onClick={() => onSample(n)}>{fmtNum(m[k] || 0)}</button>
+                    ) : fmtNum(m[k] || 0)}
+                  </td>
                 ))}
                 <td className="etl-num" style={{ textAlign: 'right' }}>{fmtDuration(m.durationMs)}</td>
                 <td className="etl-num" style={{ textAlign: 'right' }}>{fmtRate(m.rowsPerSec) || '—'}</td>
@@ -275,5 +323,40 @@ function LogPanel({ logs, nodes, live }) {
         {!shown.length ? <span className="ts">{logs.length ? '没有符合条件的日志' : live ? '等待日志…' : '没有日志'}</span> : null}
       </div>
     </div>
+  );
+}
+
+// 拒绝行采样：error 端口前 N 条样本行（运行记录随节点保存）。
+function SampleDialog({ node, sample, onClose }) {
+  const fields = sample.fields || [];
+  const rows = sample.rows || [];
+  const cell = (v) => {
+    if (v === null || v === undefined) return <span className="etl-null">null</span>;
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  };
+  return (
+    <Dialog open onClose={onClose} width={860} title={`拒绝行采样 · ${node.nodeName || node.nodeId}`}
+      desc={sample.total > rows.length ? `共 ${fmtNum(sample.total)} 条被拒绝，仅采样前 ${rows.length} 条` : `共 ${rows.length} 条被拒绝`}>
+      <div style={{ overflow: 'auto', maxHeight: '60vh' }}>
+        <table className="table etl-preview-table" style={{ fontSize: 12.5 }}>
+          <thead>
+            <tr>
+              <th style={{ width: 44 }}>#</th>
+              {fields.map((f, i) => <th key={i}>{f}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td className="etl-muted">{i + 1}</td>
+                {(r || []).map((v, j) => <td key={j} title={typeof v === 'object' && v !== null ? JSON.stringify(v) : v}>{cell(v)}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length ? <div className="etl-list-empty">没有采样行</div> : null}
+      </div>
+    </Dialog>
   );
 }

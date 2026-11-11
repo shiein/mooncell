@@ -453,8 +453,15 @@ type Dialect interface {
 
 * 结构化：`{seq, ts, level, nodeId, message}`；级别：`error / warn / info / detail / debug`。
 * 每次运行落库上限 `etl.run_log_limit`（默认 5000 条），超出只计数（界面提示「已截断 N 条」）。
-* **行数据不落库**，只出现在预览与 debug 采样里。
+* **常规行数据不落库**；唯一例外是 error 端口拒绝行采样（见下）。
 * 保留策略：按天数与每个定义的运行数双限裁剪（`etl.run_retention_days`、`etl.run_keep_per_definition`）。
+
+### 11.4 运行详情
+
+* **拒绝行采样**：步骤把行写入 error 端口时回调采样，每个节点保留前 20 条，单值超 512 字符截断（字节值转 hex），
+  拒绝总数持续计数；随 `etl_run_nodes.samples_json` 落库，运行详情「拒绝」列可点开查看。
+* **失败节点定位**：运行详情的失败节点可一键打开对应设计器并选中该节点；
+  作业中的步骤沿「作业 → 转换/子作业」引用链解析到所属定义，被引定义已删除时提示而不跳转。
 
 ---
 
@@ -467,7 +474,7 @@ type Dialect interface {
 | `etl_definition_versions` | definition_id, revision, doc_json, saved_by, saved_at | 历史版本（保留最近 N 个，可回滚） |
 | `etl_schedules` | id, target_kind, target_id, cron, timezone, enabled, overlap, misfire, params_json, next_fire_at, last_fire_at | |
 | `etl_runs` | id, kind, definition_id, revision, trigger, schedule_id, parent_run_id, resume_of, status, params_json, snapshot_json, error, triggered_by, started_at, finished_at | |
-| `etl_run_nodes` | run_id, node_id, node_type, status, attempt, metrics_json, output_vars_json, error, started_at, finished_at | 作业项 + 步骤共用 |
+| `etl_run_nodes` | run_id, node_id, node_type, status, attempt, metrics_json, output_vars_json, error, samples_json, started_at, finished_at | 作业项 + 步骤共用；samples_json=error 端口拒绝行采样 |
 | `etl_run_logs` | run_id, seq, ts, level, node_id, message | 每运行限量 |
 | `etl_state` | scope, key, value_json, updated_at | 增量游标等 |
 

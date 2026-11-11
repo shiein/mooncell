@@ -36,6 +36,7 @@ const IC = {
   pause: <path d="M8.5 5.5v13M15.5 5.5v13" fill="none"/>,
   user: <g><circle cx="12" cy="8" r="3.8" fill="none"/><path d="M4.5 20.5c1.2-3.8 4-5.5 7.5-5.5s6.3 1.7 7.5 5.5" fill="none"/></g>,
   link: <g><path d="M10 14a4 4 0 0 0 6 .4l2.5-2.5a4 4 0 0 0-5.7-5.7L11.5 7.5" fill="none"/><path d="M14 10a4 4 0 0 0-6-.4L5.5 12a4 4 0 0 0 5.7 5.7l1.3-1.3" fill="none"/></g>,
+  locate: <g><circle cx="12" cy="12" r="6.5" fill="none"/><circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none"/><path d="M12 2.5v3.5M12 18v3.5M2.5 12H6M18 12h3.5" fill="none"/></g>,
   eye: <g><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" fill="none"/><circle cx="12" cy="12" r="2.8" fill="none"/></g>,
   settings: <g><circle cx="12" cy="12" r="3" fill="none"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1" fill="none"/></g>,
   // 铅笔编辑

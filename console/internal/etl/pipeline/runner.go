@@ -26,6 +26,8 @@ type RunOptions struct {
 	OnMetrics func(map[string]core.MetricsSnapshot)
 	// OnNodeState 在步骤开始/结束时回调；可为 nil。
 	OnNodeState func(nodeID, state string, err error)
+	// OnReject 在某步骤把错误行写入 error 端口时回调（含追加的错误字段）；可为 nil。
+	OnReject func(nodeID string, row core.Row)
 
 	// capture 由 Preview() 设置：在目标节点的输出上挂接收集器。
 	capture *capture
@@ -123,6 +125,9 @@ func Run(ctx context.Context, plan *Plan, opts RunOptions) Result {
 			Inputs: map[string]*core.InPort{}, Outputs: map[string]*core.OutPort{},
 		}
 		nodeID := pn.Node.ID
+		if opts.OnReject != nil {
+			rc.OnReject = func(row core.Row) { opts.OnReject(nodeID, row) }
+		}
 		rc.TempDir = func() (string, error) {
 			tempMu.Lock()
 			defer tempMu.Unlock()

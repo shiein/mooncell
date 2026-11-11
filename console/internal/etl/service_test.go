@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"mooncell/console/internal/etl/conn"
+	"mooncell/console/internal/etl/core"
 	"mooncell/console/internal/etl/store"
 )
 
@@ -395,5 +397,130 @@ func TestRunSnapshotRefs(t *testing.T) {
 	}
 	if _, err := h.s.Trigger(wBad.ID, TriggerOptions{Trigger: "manual"}); err == nil || !strings.Contains(err.Error(), "引用的定义") {
 		t.Fatalf("引用缺失应在触发时报错：%v", err)
+	}
+}
+
+// 拒绝行随运行记录采样：error 端口连接的步骤，其前 N 条错误行可经运行详情查看。
+func TestErrorRowSamples(t *testing.T) {
+	h := newHarness(t)
+	target := filepath.Join(t.TempDir(), "target.db")
+	ct, _ := h.s.box.Seal("pw", "conn_s")
+	c, err := h.s.st.CreateConnectionWithID(store.Connection{Config: conn.Config{ID: "conn_s", Name: "目标", DBType: "sqlite", Database: target}}, &ct, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hd, err := h.s.pool.Get(t.Context(), c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ddl := range []string{
+		`CREATE TABLE src (id INTEGER PRIMARY KEY, qty INTEGER)`,
+		`CREATE TABLE dst (id INTEGER PRIMARY KEY, qty INTEGER)`,
+		`CREATE TABLE bad (id INTEGER, qty INTEGER, _error_code TEXT, _error_message TEXT, _error_field TEXT, _error_step TEXT)`,
+	} {
+		if _, err := hd.DB.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 1; i <= 9; i++ {
+		if _, err := hd.DB.Exec(`INSERT INTO src VALUES (?, ?)`, i, i*10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := hd.DB.Exec(`INSERT INTO dst VALUES (5, 555)`); err != nil { // id=5 冲突 → 退化逐行后拒绝
+		t.Fatal(err)
+	}
+	doc, _ := json.Marshal(map[string]any{
+		"kind": "pipeline", "params": []any{},
+		"nodes": []map[string]any{
+			{"id": "in", "type": "table_input", "name": "源", "config": map[string]any{"connection": c.ID, "sql": "select id, qty from src order by id"}},
+			{"id": "out", "type": "table_output", "name": "写入", "config": map[string]any{"connection": c.ID, "table": "dst", "commitSize": 20}},
+			{"id": "err", "type": "table_output", "name": "错误表", "config": map[string]any{"connection": c.ID, "table": "bad", "commitSize": 100}},
+		},
+		"hops": []map[string]any{
+			{"id": "h1", "from": "in", "fromPort": "main", "to": "out", "toPort": "main"},
+			{"id": "h2", "from": "out", "fromPort": "error", "to": "err", "toPort": "main"},
+		},
+	})
+	def, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "冲突采样", Doc: doc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := h.s.Trigger(def.ID, TriggerOptions{Trigger: "manual", User: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var r store.Run
+	for time.Now().Before(deadline) {
+		r, _ = h.s.st.GetRun(run.ID)
+		if r.Status != store.RunQueued && r.Status != store.RunRunning {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("带错误端口的冲突行应拒绝而非失败：%s %s", r.Status, r.Error)
+	}
+	nodes, err := h.s.st.ListRunNodes(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out *store.RunNode
+	for i := range nodes {
+		if nodes[i].NodeID == "out" {
+			out = &nodes[i]
+		}
+	}
+	if out == nil || out.Samples == nil {
+		t.Fatalf("out 节点应有拒绝行采样：%+v", out)
+	}
+	es := out.Samples
+	if es.Total != 1 || len(es.Rows) != 1 {
+		t.Fatalf("采样应为 Total=1/Rows=1：%+v", es)
+	}
+	if len(es.Fields) != 6 || es.Fields[2] != "_error_code" {
+		t.Fatalf("采样字段应为基础列+4 错误字段：%v", es.Fields)
+	}
+	row := es.Rows[0]
+	if row[0] != float64(5) && row[0] != int64(5) {
+		t.Fatalf("采样行首列应为冲突的 id=5：%v", row)
+	}
+	if row[3] == nil || !strings.Contains(fmt.Sprint(row[3]), "UNIQUE") {
+		t.Fatalf("采样行 _error_message 应含约束冲突信息：%v", row)
+	}
+}
+
+// 采样上限与值截断：Total 持续计数，行数封顶 maxErrorSamples，超长字符串/字节按界截断。
+func TestErrorSampleBounds(t *testing.T) {
+	a := &activeRun{}
+	fields := []string{"id", "msg", "_error_code"}
+	for i := 0; i < maxErrorSamples+5; i++ {
+		a.addSample("", "n", fields, core.Row{i, "x", "e"})
+	}
+	es := a.samples["/n"]
+	if es.Total != maxErrorSamples+5 || len(es.Rows) != maxErrorSamples {
+		t.Fatalf("上限应为 %d 行/Total=%d：%+v", maxErrorSamples, maxErrorSamples+5, es)
+	}
+	long := strings.Repeat("长", maxSampleValueLen) // 每字符 3 字节，总长远超上限
+	a2 := &activeRun{}
+	a2.addSample("", "n", fields, core.Row{1, long, []byte{0xde, 0xad, 0xbe, 0xef}})
+	got := a2.samples["/n"].Rows[0]
+	s, ok := got[1].(string)
+	if !ok || len(s) > maxSampleValueLen+8 || !strings.HasSuffix(s, "…") {
+		t.Fatalf("超长字符串应截断：%q", got[1])
+	}
+	if got[2] != "deadbeef" {
+		t.Fatalf("字节值应转 hex：%v", got[2])
+	}
+	// 大字节串：hex 前缀 + 字节数说明
+	big := make([]byte, maxSampleValueLen+10)
+	a2.addSample("", "n", fields, core.Row{1, "m", big})
+	got = a2.samples["/n"].Rows[1]
+	if b, ok := got[2].(string); !ok || !strings.Contains(b, "字节") || len(b) > 80 {
+		t.Fatalf("大字节串应有界：%v", got[2])
+	}
+	if sampleValue(nil) != nil || sampleValue(int64(7)) != int64(7) {
+		t.Fatal("常规值应原样保留")
 	}
 }

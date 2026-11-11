@@ -62,6 +62,7 @@ type activeRun struct {
 	mu      sync.Mutex
 	nodes   map[string]store.RunNode // key = parent + "/" + nodeID
 	metrics map[string]map[string]core.MetricsSnapshot
+	samples map[string]*store.ErrorSample // key 同 nodes：error 端口拒绝行采样
 }
 
 func nodeKey(parent, id string) string { return parent + "/" + id }
@@ -279,6 +280,12 @@ func (s *Service) executePipeline(ctx context.Context, a *activeRun, vars *core.
 	return err
 }
 
+// maxErrorSamples 是单节点 error 端口拒绝行的采样上限（避免运行记录膨胀）。
+const maxErrorSamples = 20
+
+// maxSampleValueLen 限制采样中单值长度（大字段截断，防止样本行过大）。
+const maxSampleValueLen = 512
+
 // runPipeline 编译并运行转换，步骤状态以 parent 归属写入运行节点。
 func (s *Service) runPipeline(ctx context.Context, a *activeRun, parent string, def *pipeline.Definition, vars *core.Vars, logger *core.Logger) (pipeline.Result, error) {
 	e := s.env(nil)
@@ -291,8 +298,13 @@ func (s *Service) runPipeline(ctx context.Context, a *activeRun, parent string, 
 		}
 		return pipeline.Result{}, fmt.Errorf("转换编译失败：%v", plan.Problems.First())
 	}
+	// error 端口连线的步骤：采样其拒绝行供运行详情查看。
+	errFields := map[string][]string{}
 	for _, pn := range plan.Nodes {
 		a.putNode(s, store.RunNode{RunID: a.run.ID, NodeID: pn.Node.ID, NodeName: pn.Node.Name, NodeType: pn.Node.Type, ParentNode: parent, Status: "pending"}, false)
+		if es := pn.Outputs[core.PortError]; es != nil {
+			errFields[pn.Node.ID] = es.Names()
+		}
 	}
 	plog := logger
 	if parent != "" {
@@ -301,6 +313,9 @@ func (s *Service) runPipeline(ctx context.Context, a *activeRun, parent string, 
 	res := pipeline.Run(ctx, plan, pipeline.RunOptions{
 		Env: e, Vars: vars, Log: plog, TempRoot: s.cfg.TempDir,
 		OnMetrics: func(m map[string]core.MetricsSnapshot) { a.setMetrics(parent, m) },
+		OnReject: func(id string, row core.Row) {
+			a.addSample(parent, id, errFields[id], row)
+		},
 		OnNodeState: func(id, state string, err error) {
 			a.updateNode(s, parent, id, func(n *store.RunNode) {
 				n.Status = state
@@ -509,7 +524,7 @@ func (h *pipelineHost) RunWorkflow(ctx context.Context, ec *workflow.ExecContext
 		h.a.putNode(h.s, store.RunNode{RunID: h.a.run.ID, NodeID: pn.Node.ID, NodeName: pn.Node.Name, NodeType: pn.Node.Type, ParentNode: parent, Status: workflow.NodePending}, false)
 	}
 	res := workflow.Run(ctx, plan, workflow.RunOptions{
-		RunID: h.a.run.ID, Env: e, Vars: vars, Log: ec.Log.WithPrefix(parent+"/"),
+		RunID: h.a.run.ID, Env: e, Vars: vars, Log: ec.Log.WithPrefix(parent + "/"),
 		OnNode: func(ev workflow.NodeEvent) {
 			h.a.updateNode(h.s, parent, ev.NodeID, func(n *store.RunNode) {
 				n.Status, n.Port, n.Attempt, n.Error = ev.Status, ev.Port, ev.Attempt, ev.Error
@@ -572,6 +587,58 @@ func (a *activeRun) putNode(s *Service, n store.RunNode, persist bool) {
 	a.hub.publish(event{Type: "node", Data: n})
 }
 
+// addSample 采样一条 error 端口拒绝行（上限 maxErrorSamples，Total 持续计数）。
+func (a *activeRun) addSample(parent, id string, fields []string, row core.Row) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	k := nodeKey(parent, id)
+	if a.samples == nil {
+		a.samples = map[string]*store.ErrorSample{}
+	}
+	es := a.samples[k]
+	if es == nil {
+		es = &store.ErrorSample{Fields: fields}
+		a.samples[k] = es
+	}
+	es.Total++
+	if len(es.Rows) >= maxErrorSamples {
+		return
+	}
+	out := make([]any, len(row))
+	for i, v := range row {
+		out[i] = sampleValue(v)
+	}
+	if _, err := json.Marshal(out); err != nil {
+		return // 不可序列化的行不采样（不应发生：行值均为受支持类型）
+	}
+	es.Rows = append(es.Rows, out)
+}
+
+// sampleValue 截断过大的单值，保证运行记录体积受控。
+func sampleValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		if len(t) > maxSampleValueLen {
+			return t[:maxSampleValueLen] + "…"
+		}
+		return t
+	case []byte:
+		if len(t) > maxSampleValueLen {
+			return fmt.Sprintf("%x…(%d 字节)", t[:16], len(t))
+		}
+		return fmt.Sprintf("%x", t)
+	default:
+		return v
+	}
+}
+
+// attachSamples 把已采集的拒绝行样本挂到节点上（调用方须持 a.mu）。
+func (a *activeRun) attachSamples(k string, n *store.RunNode) {
+	if es := a.samples[k]; es != nil {
+		n.Samples = es
+	}
+}
+
 // updateNode 修改并持久化节点状态（状态变化频率低，直接落库）。
 func (a *activeRun) updateNode(s *Service, parent, id string, fn func(*store.RunNode)) {
 	a.mu.Lock()
@@ -582,6 +649,7 @@ func (a *activeRun) updateNode(s *Service, parent, id string, fn func(*store.Run
 	if m, ok := a.metrics[parent][id]; ok {
 		n.Metrics = m
 	}
+	a.attachSamples(k, &n)
 	a.nodes[k] = n
 	a.mu.Unlock()
 	if err := s.st.UpsertRunNode(n); err != nil {
@@ -607,12 +675,13 @@ func (a *activeRun) setMetrics(parent string, m map[string]core.MetricsSnapshot)
 	a.hub.publish(event{Type: "metrics", Data: map[string]any{"parent": parent, "metrics": m}})
 }
 
-// flushNodes 把某层节点（含最终度量）落库。
+// flushNodes 把某层节点（含最终度量与错误行样本）落库。
 func (a *activeRun) flushNodes(s *Service, parent string) {
 	a.mu.Lock()
 	var list []store.RunNode
-	for _, n := range a.nodes {
+	for k, n := range a.nodes {
 		if n.ParentNode == parent {
+			a.attachSamples(k, &n)
 			list = append(list, n)
 		}
 	}
