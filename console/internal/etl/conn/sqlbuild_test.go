@@ -19,15 +19,27 @@ func mustDialect(t *testing.T, id string) Dialect {
 func TestUpdateFromSQL(t *testing.T) {
 	pg := mustDialect(t, "postgres")
 	tab := TableRef{Schema: "public", Name: "t"}
-	// PG/KB/SQLite/DM 形态：UPDATE … SET c=m.c FROM (SELECT … UNION ALL …) m WHERE t.k=m.k
+	// PG/KB/SQLite 形态：UPDATE … SET c=m.c FROM (VALUES …) AS m(…) WHERE t.k=m.k
+	// （VALUES 派生表替代 N×SELECT UNION ALL，省掉每语句 N 个 SELECT 的解析/规划开销）
 	keys := []DerivedCol{{Name: "k", Cast: "bigint"}}
 	set := []DerivedCol{{Name: "a", Cast: "numeric(12,2)"}, {Name: "b"}}
 	q := UpdateFromSQL(pg, tab, keys, set, 2)
-	want := `UPDATE "public"."t" AS t SET "a" = m."a", "b" = m."b" FROM (` +
-		`SELECT CAST($1 AS bigint) AS "k", CAST($2 AS numeric(12,2)) AS "a", $3 AS "b" ` +
-		`UNION ALL SELECT $4, $5, $6) m WHERE t."k" = m."k"`
+	want := `UPDATE "public"."t" AS t SET "a" = m."a", "b" = m."b" ` +
+		`FROM (VALUES (CAST($1 AS bigint), CAST($2 AS numeric(12,2)), $3), ($4, $5, $6)) ` +
+		`AS m("k", "a", "b") WHERE t."k" = m."k"`
 	if q != want {
 		t.Errorf("PG 派生行集 UPDATE 不符：\n%s\n期望：\n%s", q, want)
+	}
+	// DM/SQLite 保留 UNION ALL（不支持 AS m(列名) 的 VALUES 派生表）
+	for _, id := range []string{"dm", "sqlite"} {
+		dd := mustDialect(t, id)
+		q = UpdateFromSQL(dd, tab, keys, set, 2)
+		if strings.Contains(q, "VALUES (") {
+			t.Errorf("%s 不应使用 VALUES 派生表：%s", id, q)
+		}
+		if !strings.Contains(q, "UNION ALL") {
+			t.Errorf("%s 应保留 UNION ALL 派生行集：%s", id, q)
+		}
 	}
 	// MySQL 形态：UPDATE … JOIN (SELECT … UNION ALL …) m ON … SET t.c=m.c
 	my := mustDialect(t, "mysql")

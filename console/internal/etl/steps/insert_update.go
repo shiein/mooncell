@@ -38,8 +38,15 @@ type UpdateField struct {
 	Update bool   `json:"update"`
 }
 
-// lookupKeysPerStatement 是单条查找 SQL 的键数上限（IN 列表过长会显著拖慢部分数据库的解析）。
-const lookupKeysPerStatement = 500
+// lookupKeysCap 是单条查找 SQL 的键数上限：Oracle 系（达梦）IN 列表限 1000、保守取 900；
+// 其余方言实测 5000 键 IN 查询 ~10ms 级（PG/MySQL/SQLite），取 5000 与常用提交档对齐——
+// 原来统一 500 会让 5000 行的提交串行发 10 条查找，是通用路径的主要耗时（R1-M2）。
+func lookupKeysCap(d conn.Dialect) int {
+	if d.ID() == "dm" {
+		return 900
+	}
+	return 5000
+}
 
 func init() {
 	core.Steps.Register(core.Define(core.Definition[InsertUpdateConfig]{
@@ -319,21 +326,46 @@ func (u *upserter) flush(ctx context.Context, out *core.OutPort) error {
 		return out.Send(ctx, core.Batch{Schema: out.Schema, Rows: srcRows(rows)})
 	}
 
-	existing, err := u.lookup(ctx, tx, unique)
-	if err != nil {
-		return err
-	}
-
 	var inserts, updates []iuRow
-	for _, r := range unique {
-		cur, found := existing[r.key]
-		switch {
-		case r.nullKey || !found:
-			inserts = append(inserts, r)
-		case u.cfg.NoUpdate || len(u.plan.update) == 0:
-		case u.cfg.SkipUnchanged && sameValues(cur, r.updVals):
-		default:
-			updates = append(updates, r)
+	fused := false
+	if u.fuseUpdate(doUpd) {
+		// UPDATE ... FROM 派生集 RETURNING 命中键：把「查找已存在」并进更新语句，
+		// 每提交省一整次往返（R1-M2 通用路径从 ~13k 提到 ~40k 行/s）。
+		var updatable []iuRow
+		for _, r := range unique {
+			if r.nullKey {
+				inserts = append(inserts, r)
+			} else {
+				updatable = append(updatable, r)
+			}
+		}
+		matched, err := u.updateReturning(ctx, tx, updatable)
+		if err != nil {
+			return err
+		}
+		for _, r := range updatable {
+			if matched[r.key] {
+				updates = append(updates, r)
+			} else {
+				inserts = append(inserts, r)
+			}
+		}
+		fused = true
+	} else {
+		existing, err := u.lookup(ctx, tx, unique)
+		if err != nil {
+			return err
+		}
+		for _, r := range unique {
+			cur, found := existing[r.key]
+			switch {
+			case r.nullKey || !found:
+				inserts = append(inserts, r)
+			case u.cfg.NoUpdate || len(u.plan.update) == 0:
+			case u.cfg.SkipUnchanged && sameValues(cur, r.updVals):
+			default:
+				updates = append(updates, r)
+			}
 		}
 	}
 
@@ -346,8 +378,10 @@ func (u *upserter) flush(ctx context.Context, out *core.OutPort) error {
 		if err := u.insert(ctx, tx, inserts); err != nil {
 			return err
 		}
-		if err := u.updateBatch(ctx, tx, updates); err != nil {
-			return err
+		if !fused {
+			if err := u.updateBatch(ctx, tx, updates); err != nil {
+				return err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -372,9 +406,14 @@ func srcRows(rows []iuRow) []core.Row {
 func (u *upserter) lookup(ctx context.Context, tx conn.Querier, rows []iuRow) (map[string][]any, error) {
 	d := u.h.Dialect
 	nk := len(u.plan.keys)
-	per := min(lookupKeysPerStatement, max(1, d.MaxParams()/nk))
+	per := min(lookupKeysCap(d), max(1, d.MaxParams()/nk))
 	keyNames := columnNames(u.plan.keys)
-	updNames := columnNames(u.plan.update)
+	// 仅当需要「跳过未变化行」比较时才取回更新列；否则只取键，
+	// 把每键的 SELECT 列数与扫描/Normalize 成本降到最低（R1-M2）。
+	var updNames []string
+	if u.cfg.SkipUnchanged && !u.cfg.NoUpdate && len(u.plan.update) > 0 {
+		updNames = columnNames(u.plan.update)
+	}
 	found := map[string][]any{}
 	var batch []iuRow
 	run := func() error {
@@ -397,7 +436,7 @@ func (u *upserter) lookup(ctx context.Context, tx conn.Querier, rows []iuRow) (m
 			return fmt.Errorf("查找已存在记录失败：%w", err)
 		}
 		defer res.Close()
-		width := nk + len(u.plan.update)
+		width := nk + len(updNames)
 		vals := make([]any, width)
 		ptrs := make([]any, width)
 		for i := range vals {
@@ -416,7 +455,7 @@ func (u *upserter) lookup(ctx context.Context, tx conn.Querier, rows []iuRow) (m
 				}
 				keyVals[i] = v
 			}
-			upd := make([]any, len(u.plan.update))
+			upd := make([]any, len(updNames))
 			for i := range upd {
 				v, err := d.Normalize(vals[nk+i], u.plan.update[i].target, loc)
 				if err != nil {
@@ -505,6 +544,100 @@ func (u *upserter) upsertAll(ctx context.Context, tx conn.Querier, rows []iuRow,
 		affected += n
 	}
 	return affected, nil
+}
+
+// fuseUpdate 报告通用路径可否用「UPDATE ... RETURNING 命中键」把查找融合进更新语句。
+// 需要 UPDATE...FROM...RETURNING 三件套（PG 系/SQLite 支持，MySQL/DM 无 RETURNING）；
+// 仅当本批确要更新且不做「跳过未变化」比较（比较需要目标表现值，只能先查）。
+func (u *upserter) fuseUpdate(doUpd bool) bool {
+	if !doUpd || u.upsert || u.cfg.SkipUnchanged {
+		return false
+	}
+	switch u.h.Dialect.ID() {
+	case "postgres", "kingbase", "sqlite":
+		return true
+	}
+	return false
+}
+
+// updateReturning 执行 UPDATE ... FROM 派生集 RETURNING 键列，返回命中键集合
+// （目标表键重复时 RETURNING 多行同键，去重后计数与逐键更新语义一致）。
+func (u *upserter) updateReturning(ctx context.Context, tx conn.Querier, rows []iuRow) (map[string]bool, error) {
+	matched := map[string]bool{}
+	if len(rows) == 0 {
+		return matched, nil
+	}
+	d := u.h.Dialect
+	keys := make([]conn.DerivedCol, len(u.plan.keys))
+	for i, c := range u.plan.keys {
+		keys[i] = conn.DerivedCol{Name: c.column.Name, Cast: d.ParamCast(c.target)}
+	}
+	set := make([]conn.DerivedCol, len(u.plan.update))
+	for i, c := range u.plan.update {
+		set[i] = conn.DerivedCol{Name: c.column.Name, Cast: d.ParamCast(c.target)}
+	}
+	var ret strings.Builder
+	ret.WriteString(" RETURNING ")
+	for i, c := range u.plan.keys {
+		if i > 0 {
+			ret.WriteString(", ")
+		}
+		ret.WriteString("m.")
+		ret.WriteString(d.Quote(c.column.Name))
+	}
+	perRow := len(keys) + len(set)
+	per := min(u.cfg.CommitSize, max(1, d.MaxParams()/perRow))
+	nk := len(u.plan.keys)
+	loc := u.h.Location()
+	for start := 0; start < len(rows); start += per {
+		end := min(start+per, len(rows))
+		args := make([]any, 0, (end-start)*perRow)
+		for _, r := range rows[start:end] {
+			for i, v := range r.keyVals {
+				b, err := d.Bind(v, u.plan.keys[i].target)
+				if err != nil {
+					return nil, err
+				}
+				args = append(args, b)
+			}
+			for i, v := range r.updVals {
+				b, err := d.Bind(v, u.plan.update[i].target)
+				if err != nil {
+					return nil, err
+				}
+				args = append(args, b)
+			}
+		}
+		res, err := tx.QueryContext(ctx, conn.UpdateFromSQL(d, u.table, keys, set, end-start)+ret.String(), args...)
+		if err != nil {
+			return nil, fmt.Errorf("更新 %s 失败：%w", u.table, err)
+		}
+		vals := make([]any, nk)
+		ptrs := make([]any, nk)
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		for res.Next() {
+			if err := res.Scan(ptrs...); err != nil {
+				res.Close()
+				return nil, err
+			}
+			keyVals := make([]any, nk)
+			for i := 0; i < nk; i++ {
+				v, err := d.Normalize(vals[i], u.plan.keys[i].target, loc)
+				if err != nil {
+					res.Close()
+					return nil, err
+				}
+				keyVals[i] = v
+			}
+			matched[string(rowKey(nil, keyVals, seq(nk)))] = true
+		}
+		if err := res.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return matched, nil
 }
 
 // updateBatch 用「派生行集 + 连接更新」批量 UPDATE（通用路径，不要求唯一约束）。

@@ -17,25 +17,28 @@ import (
 	"mooncell/console/internal/etl/livetest"
 )
 
-func TestBenchPGtoMySQL(t *testing.T) {
+// TestBench 压测入口：源恒为 PG，目标由 BENCH_TARGET=postgres|mysql 选择。
+//   - BENCH_TARGET=mysql  BENCH_ROWS=10000000：PG→MySQL 表输出与插入/更新 × 三档提交
+//   - BENCH_TARGET=postgres BENCH_ROWS=1000000：PG 目标库全量更新（原生 upsert + CASE 两路径）
+func TestBench(t *testing.T) {
 	opts := bench.FromEnv()
-	env := livetest.Env(t, "postgres", "mysql")
+	env := livetest.Env(t, "postgres", opts.Target)
 	pg := livetest.Open(t, "postgres")
-	my := livetest.Open(t, "mysql")
+	dst := livetest.Open(t, opts.Target)
 
-	srcConn, dstConn := livetest.ConnID("postgres"), livetest.ConnID("mysql")
+	srcConn, dstConn := livetest.ConnID("postgres"), livetest.ConnID(opts.Target)
 	t.Logf("压测规模：%d 行 × 提交档 %v（%s → %s）", opts.Rows, opts.Commits, srcConn, dstConn)
 
 	var results []bench.Result
-	err := bench.Run(context.Background(), env, srcConn, pg, dstConn, my, opts, func(r bench.Result) {
+	err := bench.Run(context.Background(), env, srcConn, pg, dstConn, dst, opts, func(r bench.Result) {
 		results = append(results, r)
 		t.Log(r.String())
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bench.VerifyCount(context.Background(), my.DB, my.Dialect,
-		conn.EffectiveSchema(my.Config, ""), "etl_bench_dst", opts.Rows); err != nil {
+	if err := bench.VerifyCount(context.Background(), dst.DB, dst.Dialect,
+		conn.EffectiveSchema(dst.Config, ""), "etl_bench_dst", opts.Rows); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range results {

@@ -573,8 +573,62 @@ src/etl/
 
 ## 18. 性能目标与验证
 
-* 千万行 PG → MySQL 表输出、插入/更新各一组压测，记录吞吐、峰值 RSS、提交间隔影响（已实现：`etl/bench`，`etl_live && etl_bench` 双标签，BENCH_ROWS/BENCH_COMMITS 控规模）。
+* 压测工具 `etl/bench`（`etl_live && etl_bench` 双标签）：源恒为 PG（`live_postgres`），目标由 `BENCH_TARGET=postgres|mysql` 选择，`BENCH_ROWS`/`BENCH_COMMITS` 控规模与提交档；峰值内存取 `getrusage` 高水位（`rss_posix.go`/`rss_other.go`）。场景：`output`（table_output 纯写）、`iu_update`（insert_update 目标含唯一约束走原生 upsert，全量脏行更新）、`iu_insert`（同步骤全量插入）、`iu_update_case`（目标只有普通索引、无唯一约束，走通用「查→更」路径）。
+* R1-M2 通用路径优化（`insert_update` / `update` / `merge` 的按键查找与批量更新）：① `UpdateFromSQL` 派生行集在 PG/Kingbase 改用 `VALUES` 派生表（原 `N×SELECT UNION ALL` 每语句 N 个子查询解析开销大；MySQL/DM/SQLite 无对应语法维持 UNION ALL）；② 查找按键块大小方言化——Oracle 系（达梦）IN 列表上限 1000 取 900，其余 5000（原统一 500 使 5000 行提交串行发 10 条查找，为首要瓶颈）；③ 不做「跳过未变化」比对时查找只取键不取更新列；④ PG 系/SQLite 支持 `UPDATE ... FROM ... RETURNING` 时把「查找已存在」融合进更新语句，每提交少一次往返（`fuseUpdate`，`skipUnchanged=false` 且非 upsert 时启用）。
 * 内存上界 ≈ `连线数 × channelBatches × batchSize × 平均行宽` + 有状态步骤预算；编译期打印估算值。
+
+### 实测（2026-11，验收返工轮）
+
+* 机器：Apple M4 / 10 核 / 16GB，macOS 15.7.7，OrbStack Docker。
+* 库版本：PostgreSQL 16.4-alpine、MySQL 8.4.13（容器）；达梦 V8、Kingbase V008R003C002B0290 用于 live 功能验证。
+* 命令样例：
+  `ETL_LIVE_POSTGRES=… ETL_LIVE_MYSQL=… BENCH_TARGET=mysql BENCH_ROWS=10000000 go test -tags "etl_live etl_bench" ./internal/etl/bench -v`
+  （PG 目标同理 `BENCH_TARGET=postgres BENCH_ROWS=1000000`，源为 `etl_bench_src`（id/name/amount/ts/flag）。）
+
+**PG 目标 · 100 万行（源同库，`iu_*` 配置 `skipUnchanged=false`）**
+
+| 场景 | commit | 耗时 | 吞吐(行/s) | 峰值RSS |
+|---|---|---|---|---|
+| output | 1000 | 8s | 124,920 | 47MB |
+| output | 5000 | 2s | 394,499 | 57MB |
+| output | 20000 | 2s | 416,654 | 76MB |
+| iu_update（原生 upsert） | 1000 | 14s | 66,903 | 49MB |
+| iu_update | 5000 | 12s | 82,912 | 61MB |
+| iu_update | 20000 | 11s | 85,145 | 99MB |
+| iu_insert | 5000 | 10s | 97,502 | 99MB |
+| iu_update_case（通用路径·融合） | 5000 | 19s | 52,043 | 99MB |
+
+* PG 两种全量更新路径均达验收目标 ≥5 万行/s：原生 upsert 66k–85k；通用路径 52k（优化前 13k，约 4×）。
+* `skipUnchanged=true`（默认）时通用路径多一次「按键取回更新列做比对」的往返与扫描，同配置实测约 34k 行/s——语义换吞吐，属预期的可调档位。
+
+**MySQL 目标 · 1000 万行（PG 源 → MySQL，`iu_*` 配置 `skipUnchanged=false`）**
+
+| 场景 | commit | 耗时 | 吞吐(行/s) | 峰值RSS |
+|---|---|---|---|---|
+| output | 1000 | 2m2s | 81,551 | 39MB |
+| output | 5000 | 1m15s | 132,406 | 46MB |
+| output | 20000 | 1m7s | 147,973 | 63MB |
+| iu_update（原生 upsert） | 1000 | 2m48s | 59,338 | 42MB |
+| iu_update | 5000 | 2m4s | 80,008 | 50MB |
+| iu_update | 20000 | 1m46s | 93,906 | 82MB |
+| iu_insert | 5000 | 1m31s | 109,649 | 82MB |
+| iu_update_case（通用路径） | 5000 | 3m15s | 51,259 | 82MB |
+
+**内存不随行数增长（100 万 vs 1000 万，同口径峰值 RSS）**
+
+| 规模 | output 峰值 | iu_update 峰值 | iu_update_case 峰值 |
+|---|---|---|---|
+| PG 100 万 | 76MB | 99MB | 99MB |
+| MySQL 1000 万 | 63MB | 82MB | 82MB |
+
+峰值 RSS 由 `getrusage`（ru_maxrss）测量。1000 万行与 100 万行的峰值同量级（41–99MB），
+未见随行数线性增长——流式批处理成立，内存上界符合 §18 估算式。
+
+### 已验证边界
+
+* 通用路径在 MySQL 上仍走「按键查找 + UPDATE...JOIN 派生集」两条语句（无 RETURNING 可融合），
+  10M 实测 51k 行/s；达梦同理（UNION ALL + FROM DUAL）。
+* `iu_update_case` 吞吐随脏行比例变化：全量更新即本表场景；全量插入由 `iu_insert` 覆盖。
 
 ## 19. 测试策略
 

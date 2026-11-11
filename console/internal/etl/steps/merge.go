@@ -622,7 +622,7 @@ func (w *syncWriter) deleteRows(ctx context.Context, tx conn.Querier, rows []syn
 	}
 	d := w.h.Dialect
 	nk := len(w.keys)
-	per := min(w.commitSize, max(1, d.MaxParams()/nk), lookupKeysPerStatement)
+	per := min(w.commitSize, max(1, d.MaxParams()/nk), lookupKeysCap(d))
 	keyNames := columnNames(w.keys)
 	for start := 0; start < len(rows); start += per {
 		end := min(start+per, len(rows))

@@ -249,11 +249,15 @@ type DerivedCol struct {
 }
 
 // UpdateFromSQL 生成「派生行集 + 连接更新」的批量 UPDATE：一条语句更新 nrows 行。
-// 参数顺序为按行主序的 keys+set 值；首行参数按 DerivedCol.Cast 显式 CAST（UNION 列
+// 参数顺序为按行主序的 keys+set 值；首行参数按 DerivedCol.Cast 显式 CAST（派生列
 // 类型由首行决定）。键列不可能是 NULL（上游已过滤），等值匹配安全。
 //
-//	UPDATE t SET c = m.c FROM (SELECT ? AS k, ? AS c UNION ALL …) m WHERE t.k = m.k   (PG/KB/DM/SQLite)
-//	UPDATE t JOIN (SELECT ? AS k, ? AS c UNION ALL …) m ON t.k = m.k SET t.c = m.c    (MySQL)
+//	UPDATE t SET c = m.c FROM (VALUES (…), …) AS m(k, c) WHERE t.k = m.k             (PG/KB/SQLite)
+//	UPDATE t SET c = m.c FROM (SELECT ? AS k UNION ALL …) m WHERE t.k = m.k          (达梦)
+//	UPDATE t JOIN (SELECT ? AS k UNION ALL …) m ON t.k = m.k SET t.c = m.c           (MySQL)
+//
+// VALUES 派生表是单个计划节点；N×SELECT UNION ALL 让优化器按 N 个子查询解析规划，
+// 大批量下解析开销显著（R1-M2 实测 PG 通用路径 13k 行/s，改 VALUES 后见 §18）。
 func UpdateFromSQL(d Dialect, t TableRef, keys, set []DerivedCol, nrows int) string {
 	cols := append(append(make([]DerivedCol, 0, len(keys)+len(set)), keys...), set...)
 	var b strings.Builder
@@ -285,34 +289,68 @@ func UpdateFromSQL(d Dialect, t TableRef, keys, set []DerivedCol, nrows int) str
 		}
 		b.WriteString(" FROM (")
 	}
-	for r := 0; r < nrows; r++ {
-		if r > 0 {
-			b.WriteString(" UNION ALL ")
+	if id := d.ID(); id == "postgres" || id == "kingbase" {
+		// PG 系：VALUES 派生表，单计划节点（SQLite/DM 不支持 AS m(列名) 形态，走 UNION ALL）
+		b.WriteString("VALUES ")
+		for r := 0; r < nrows; r++ {
+			if r > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteByte('(')
+			for i, c := range cols {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				if r == 0 && c.Cast != "" {
+					b.WriteString("CAST(")
+					b.WriteString(next())
+					b.WriteString(" AS ")
+					b.WriteString(c.Cast) // 服务器元数据给出的类型名，非用户输入
+					b.WriteString(")")
+				} else {
+					b.WriteString(next())
+				}
+			}
+			b.WriteByte(')')
 		}
-		b.WriteString("SELECT ")
+		b.WriteString(") AS m(")
 		for i, c := range cols {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			if r == 0 && c.Cast != "" {
-				b.WriteString("CAST(")
-				b.WriteString(next())
-				b.WriteString(" AS ")
-				b.WriteString(c.Cast) // 服务器元数据给出的类型名，非用户输入
-				b.WriteString(")")
-			} else {
-				b.WriteString(next())
+			b.WriteString(d.Quote(c.Name))
+		}
+		b.WriteString(") ")
+	} else {
+		for r := 0; r < nrows; r++ {
+			if r > 0 {
+				b.WriteString(" UNION ALL ")
 			}
-			if r == 0 {
-				b.WriteString(" AS ")
-				b.WriteString(d.Quote(c.Name))
+			b.WriteString("SELECT ")
+			for i, c := range cols {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				if r == 0 && c.Cast != "" {
+					b.WriteString("CAST(")
+					b.WriteString(next())
+					b.WriteString(" AS ")
+					b.WriteString(c.Cast) // 服务器元数据给出的类型名，非用户输入
+					b.WriteString(")")
+				} else {
+					b.WriteString(next())
+				}
+				if r == 0 {
+					b.WriteString(" AS ")
+					b.WriteString(d.Quote(c.Name))
+				}
+			}
+			if r == 0 && d.ID() == "dm" {
+				b.WriteString(" FROM DUAL") // 达梦 SELECT 必须有 FROM
 			}
 		}
-		if r == 0 && d.ID() == "dm" {
-			b.WriteString(" FROM DUAL") // 达梦 SELECT 必须有 FROM
-		}
+		b.WriteString(") m ")
 	}
-	b.WriteString(") m ")
 	if mysql {
 		b.WriteString("ON ")
 		for i, c := range keys {

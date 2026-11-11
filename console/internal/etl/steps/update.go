@@ -188,7 +188,7 @@ func keySrcRows(rows []keyRow) []core.Row {
 func (w *keyWriter) lookup(ctx context.Context, tx conn.Querier, rows []keyRow) (map[string]bool, error) {
 	d := w.h.Dialect
 	nk := len(w.plan.keys)
-	per := min(lookupKeysPerStatement, max(1, d.MaxParams()/nk))
+	per := min(lookupKeysCap(d), max(1, d.MaxParams()/nk))
 	keyNames := columnNames(w.plan.keys)
 	found := map[string]bool{}
 	var batch []keyRow
@@ -295,7 +295,7 @@ func (w *keyWriter) deleteBatch(ctx context.Context, tx conn.Querier, rows []key
 	}
 	d := w.h.Dialect
 	nk := len(w.plan.keys)
-	per := min(w.commitSize, max(1, d.MaxParams()/nk), lookupKeysPerStatement)
+	per := min(w.commitSize, max(1, d.MaxParams()/nk), lookupKeysCap(d))
 	keyNames := columnNames(w.plan.keys)
 	for start := 0; start < len(rows); start += per {
 		end := min(start+per, len(rows))
