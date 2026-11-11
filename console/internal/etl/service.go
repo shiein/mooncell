@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,15 +30,21 @@ type Config struct {
 	RetentionDays     int    // 运行记录保留天数，默认 30
 	KeepPerDefinition int    // 每个定义至少/至多保留的运行数，默认 200
 	TempDir           string // 有状态步骤溢写目录，默认系统临时目录
+	// FileRoot：csv_input/csv_output 等文件步骤的相对路径根目录（R1-B1），
+	// 默认 <数据库所在目录>/etl-files。文件步骤的 path 只能落在该目录内，对管理员同样生效。
+	FileRoot string
 }
 
 func (c Config) normalized(dbPath string) Config {
+	dir := "."
+	if dbPath != "" {
+		dir = filepath.Dir(strings.SplitN(dbPath, "?", 2)[0])
+	}
 	if c.KeyFile == "" {
-		dir := "."
-		if dbPath != "" {
-			dir = filepath.Dir(strings.SplitN(dbPath, "?", 2)[0])
-		}
 		c.KeyFile = filepath.Join(dir, "mooncell-etl.key")
+	}
+	if c.FileRoot == "" {
+		c.FileRoot = filepath.Join(dir, "etl-files")
 	}
 	if c.MaxConcurrentRuns <= 0 {
 		c.MaxConcurrentRuns = 4
@@ -87,6 +94,18 @@ func New(db *sql.DB, dbPath string, cfg Config) (*Service, error) {
 	if created {
 		log.Printf("[etl] 已生成凭据密钥 %s —— 请与数据库一起备份，丢失后已保存的连接密码将无法解密", cfg.KeyFile)
 	}
+	// 文件根：csv_input/csv_output 的相对路径根，限定文件步骤只能访问该目录内（R1-B1）。
+	if err := os.MkdirAll(cfg.FileRoot, 0o750); err != nil {
+		return nil, fmt.Errorf("ETL 文件根目录创建失败（%s）：%w", cfg.FileRoot, err)
+	}
+	if err := os.Chmod(cfg.FileRoot, 0o750); err != nil {
+		return nil, fmt.Errorf("ETL 文件根目录权限设置失败（%s）：%w", cfg.FileRoot, err)
+	}
+	root, err := filepath.EvalSymlinks(cfg.FileRoot)
+	if err != nil {
+		return nil, fmt.Errorf("ETL 文件根目录不可用（%s）：%w", cfg.FileRoot, err)
+	}
+	cfg.FileRoot = root
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{cfg: cfg, st: store.New(db), box: box, ctx: ctx, cancel: cancel, audit: func(string, string, string, string) {}}
 	s.pool = conn.NewPool(s.resolveConnection)

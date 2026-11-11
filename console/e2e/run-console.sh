@@ -10,6 +10,7 @@ if [ ! -x "$BIN" ]; then
 fi
 DIR="$(mktemp -d)"
 FAKE_AGENT_PORT="${FAKE_AGENT_PORT:-9111}"
-printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n[agent]\naddr="127.0.0.1:%s"\ntoken="tok"\n' "$PORT" "$DIR" "$FAKE_AGENT_PORT" > "$DIR/config.toml"
+mkdir -p /tmp/mc-e2e-etlroot
+printf '[server]\naddr="127.0.0.1"\nport=%s\n[database]\npath="%s/e2e.db"\n[etl]\nfile_root="/tmp/mc-e2e-etlroot"\n[agent]\naddr="127.0.0.1:%s"\ntoken="tok"\n' "$PORT" "$DIR" "$FAKE_AGENT_PORT" > "$DIR/config.toml"
 cd "$DIR"
 exec "$BIN"

@@ -620,7 +620,7 @@ registerForm('pipeline', 'csv_input', ({ cfg, set }) => {
   const rows = cfg.fields || [];
   return (
     <React.Fragment>
-      <Field label="文件路径" hint="服务器上的绝对路径"><input className="input mono" value={cfg.path || ''} onChange={(e) => set({ path: e.target.value })} /></Field>
+      <Field label="文件路径" hint="相对 ETL 文件根目录（file_root）的相对路径"><input className="input mono" value={cfg.path || ''} onChange={(e) => set({ path: e.target.value })} /></Field>
       <div className="etl-row2">
         <Field label="分隔符"><input className="input" value={cfg.delimiter || ','} onChange={(e) => set({ delimiter: e.target.value })} /></Field>
         <Field label="编码"><Select options={[{ value: 'utf-8', label: 'UTF-8' }, { value: 'gbk', label: 'GBK' }]} value={cfg.encoding || 'utf-8'} onChange={(encoding) => set({ encoding })} /></Field>
@@ -635,7 +635,7 @@ registerForm('pipeline', 'csv_input', ({ cfg, set }) => {
 
 registerForm('pipeline', 'csv_output', ({ cfg, set }) => (
   <React.Fragment>
-    <Field label="文件路径" hint="服务器上的绝对路径"><input className="input mono" value={cfg.path || ''} onChange={(e) => set({ path: e.target.value })} /></Field>
+    <Field label="文件路径" hint="相对 ETL 文件根目录（file_root）的相对路径"><input className="input mono" value={cfg.path || ''} onChange={(e) => set({ path: e.target.value })} /></Field>
     <div className="etl-row2">
       <Field label="分隔符"><input className="input" value={cfg.delimiter || ','} onChange={(e) => set({ delimiter: e.target.value })} /></Field>
       <Field label="编码"><Select options={[{ value: 'utf-8', label: 'UTF-8' }, { value: 'gbk', label: 'GBK' }]} value={cfg.encoding || 'utf-8'} onChange={(encoding) => set({ encoding })} /></Field>

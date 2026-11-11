@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ type harness struct {
 	s    *Service
 	srv  *httptest.Server
 	db   *sql.DB
+	dir  string // 数据目录（db 与 file_root 所在）
 	user string
 	role string
 }
@@ -47,7 +49,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	s.Start()
 	mux := http.NewServeMux()
-	h := &harness{t: t, s: s, db: db, user: "admin", role: "admin"}
+	h := &harness{t: t, s: s, db: db, dir: dir, user: "admin", role: "admin"}
 	s.RegisterRoutes(mux, func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) { next(w, WithUser(r, h.user, h.role)) }
 	})
@@ -821,5 +823,113 @@ func TestDefinitionGrants(t *testing.T) {
 	h.user, h.role = "admin", "admin"
 	if code := h.call("GET", "/api/etl/definitions", nil, &defs); code != 200 || len(defs.Definitions) < 2 {
 		t.Fatalf("admin 应见全部定义：%d %v", code, defs.Definitions)
+	}
+}
+
+// R1-B1：file_root 边界——非管理员经 preview / run 路径都拿不到根外内容、写不出根外文件。
+// file_root 默认 <dbdir>/etl-files；攻击目标文件放在 <dbdir>（根外一层）。
+func TestCSVFileRootService(t *testing.T) {
+	h := newHarness(t)
+
+	// 根外哨兵文件（与 etl-files 同级，即 <dbdir>/secret.csv）+ 根内合法文件
+	os.WriteFile(filepath.Join(h.dir, "secret.csv"), []byte("v\nTOP-SECRET\n"), 0o600)
+	root := filepath.Join(h.dir, "etl-files")
+	os.MkdirAll(root, 0o750)
+	os.WriteFile(filepath.Join(root, "in.csv"), []byte("v\n1\n"), 0o644)
+
+	csvDoc := func(path string) map[string]any {
+		return map[string]any{
+			"kind": "pipeline", "params": []any{},
+			"nodes": []map[string]any{
+				{"id": "csv", "type": "csv_input", "name": "读", "config": map[string]any{"path": path, "hasHeader": true,
+					"fields": []map[string]any{{"name": "v", "kind": "string"}}}},
+				{"id": "d", "type": "dummy", "name": "空", "config": map[string]any{}},
+			},
+			"hops": []map[string]any{{"id": "h", "from": "csv", "fromPort": "main", "to": "d", "toPort": "main"}},
+		}
+	}
+
+	// 非管理员 u1：授予任一 edit 授权（preview 的准入门槛）
+	docRaw, _ := json.Marshal(csvDoc("in.csv"))
+	d1, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "跳板", Doc: docRaw}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetUserGrants(h.db, "u1", []store.DefinitionGrant{{DefinitionID: d1.ID, AccessMode: store.ModeEdit}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	h.user, h.role = "u1", "user"
+
+	// ① 预览：绝对路径 / .. 越界都应在编译期报错，响应不得含根外内容
+	absSecret := filepath.Join(h.dir, "secret.csv")
+	for _, p := range []string{absSecret, "../secret.csv", "../../etc/hosts"} {
+		var res map[string]any
+		if code := h.call("POST", "/api/etl/pipelines/preview",
+			map[string]any{"doc": csvDoc(p), "nodeId": "csv", "limit": 5}, &res); code != 200 {
+			t.Fatalf("预览应 200：%d %v", code, res)
+		}
+		raw, _ := json.Marshal(res)
+		if strings.Contains(string(raw), "TOP-SECRET") {
+			t.Fatalf("预览泄露根外文件内容：path=%q", p)
+		}
+		probs, _ := res["problems"].([]any)
+		hasErr := false
+		for _, pr := range probs {
+			if m, ok := pr.(map[string]any); ok && m["severity"] == "error" {
+				hasErr = true
+			}
+		}
+		if !hasErr {
+			t.Fatalf("越界路径 %q 预览应报编译错误：%v", p, res)
+		}
+	}
+	// 合法根内路径：预览应能读出内容且无编译错误
+	var okRes map[string]any
+	if code := h.call("POST", "/api/etl/pipelines/preview",
+		map[string]any{"doc": csvDoc("in.csv"), "nodeId": "csv", "limit": 5}, &okRes); code != 200 {
+		t.Fatalf("合法预览应 200：%d %v", code, okRes)
+	}
+	if probs, _ := okRes["problems"].([]any); len(probs) != 0 {
+		t.Fatalf("合法路径预览不应报错：%v", okRes)
+	}
+	rows, _ := okRes["ports"].(map[string]any)["main"].(map[string]any)["rows"].([]any)
+	if len(rows) != 1 || fmt.Sprint(rows[0]) != "[1]" && fmt.Sprint(rows[0]) != "map[v:1]" {
+		t.Fatalf("合法路径预览应读出根内文件内容：%v", okRes)
+	}
+
+	// ② 运行：csv_output 写 ../evil.csv → 运行失败且根外不落盘
+	outDoc, _ := json.Marshal(map[string]any{
+		"kind": "pipeline", "params": []any{},
+		"nodes": []map[string]any{
+			{"id": "g", "type": "generate_rows", "name": "生成", "config": map[string]any{"limit": 3}},
+			{"id": "o", "type": "csv_output", "name": "写", "config": map[string]any{"path": "../evil.csv"}},
+		},
+		"hops": []map[string]any{{"id": "h", "from": "g", "fromPort": "main", "to": "o", "toPort": "main"}},
+	})
+	evil, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "越界写", Doc: outDoc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.s.st.Grant("u1", evil.ID, store.ModeUse, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	var run store.Run
+	if code := h.call("POST", "/api/etl/definitions/"+evil.ID+"/run", map[string]any{}, &run); code != 200 {
+		t.Fatalf("use 授权应可触发运行：%d", code)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var r store.Run
+	for time.Now().Before(deadline) {
+		r, _ = h.s.st.GetRun(run.ID)
+		if r.Status != store.RunQueued && r.Status != store.RunRunning {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if r.Status != store.RunFailed {
+		t.Fatalf("越界写路径的运行应失败：%s %s", r.Status, r.Error)
+	}
+	if _, err := os.Lstat(filepath.Join(h.dir, "evil.csv")); !os.IsNotExist(err) {
+		t.Fatal("不应在 file_root 之外写出文件")
 	}
 }

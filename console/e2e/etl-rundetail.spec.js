@@ -1,5 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync } from 'node:fs';
+
+// csv 文件步骤的 path 相对 Console 的 file_root（e2e 配置为 /tmp/mc-e2e-etlroot）。
+const FILE_ROOT = '/tmp/mc-e2e-etlroot';
+mkdirSync(FILE_ROOT, { recursive: true });
 
 // 数据集成运行详情（P2.14）：拒绝行采样查看 + 失败节点一键定位到设计器。
 const ADMIN = { user: 'admin', pass: '1qaz@WSX' };
@@ -39,8 +43,8 @@ test('运行详情：拒绝行采样 + 失败节点定位', async ({ page }) => 
   const tag = `R${Date.now() % 100000}`;
 
   // ---- 拒绝行采样：csv_input 声明 integer 字段，混入一条无法转换的行 → error 端口拒绝
-  const csvPath = `/tmp/mc-e2e-err-${tag}.csv`;
-  writeFileSync(csvPath, 'id,name\n1,甲\n2,乙\nbad,丙\n4,丁\n');
+  const csvPath = `mc-e2e-err-${tag}.csv`;
+  writeFileSync(`${FILE_ROOT}/${csvPath}`, 'id,name\n1,甲\n2,乙\nbad,丙\n4,丁\n');
   const p1 = await makePipeline(page, `${tag}-采样`, [
     { id: 'csv', type: 'csv_input', name: '读文件', version: 1, config: { path: csvPath, hasHeader: true, fields: [{ name: 'id', kind: 'integer' }, { name: 'name', kind: 'string' }] }, ui: { x: 96, y: 128 } },
     { id: 'ok', type: 'dummy', name: '正常行', version: 1, config: {}, ui: { x: 448, y: 96 } },
@@ -67,7 +71,7 @@ test('运行详情：拒绝行采样 + 失败节点定位', async ({ page }) => 
 
   // ---- 失败节点定位：csv_input 读不存在文件 → 运行时失败
   const p2 = await makePipeline(page, `${tag}-定位`, [
-    { id: 'src', type: 'csv_input', name: '表输入', version: 1, config: { path: `/tmp/mc-e2e-missing-${tag}.csv`, fields: [{ name: 'id', kind: 'integer' }] }, ui: { x: 96, y: 128 } },
+    { id: 'src', type: 'csv_input', name: '表输入', version: 1, config: { path: `mc-e2e-missing-${tag}.csv`, fields: [{ name: 'id', kind: 'integer' }] }, ui: { x: 96, y: 128 } },
     { id: 'dst', type: 'dummy', name: '空操作', version: 1, config: {}, ui: { x: 448, y: 128 } },
   ], [{ id: 'h1', from: 'src', fromPort: 'main', to: 'dst', toPort: 'main' }]);
   await runAndWait(page, p2.id, 'failed');

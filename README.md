@@ -122,9 +122,12 @@ Console 内置可视化数据集成:画布拖拽编排**转换**(输入/清洗/�
 [etl]
 enabled = true                # 关闭则整个模块不出现在导航与 API
 key_file = ""                 # 凭据密钥路径,缺省与数据库同目录 mooncell-etl.key
+file_root = ""                # csv_input/csv_output 的相对路径根目录,缺省与数据库同目录 etl-files(0750)
 max_concurrent_runs = 4       # 同时运行的作业数上限
 retention_days = 30           # 运行记录保留天数
 ```
+
+- **文件边界**:csv_input / csv_output 的 `path` 一律解释为 `file_root` 下的相对路径——绝对路径、`..` 越界、指向根外的符号链接在编译期与运行期都被拒绝,对管理员同样生效。需要读写服务器其它目录时,把 `file_root` 指向该目录,或把数据复制/挂载进 `file_root`。
 
 - **备份与升级(重要)**:`mooncell-etl.key` 是库内全部连接密码与通知凭据的加密密钥,**必须与 `mooncell.db` 成对备份**——只备份数据库、丢失密钥,所有已保存密码无法解密,需逐个连接重输。`install.sh upgrade` 已自动快照二者到 `$PREFIX/backups/pre-upgrade-<时间戳>/`;手工迁移/灾备请用 `./install.sh backup`,并确认备份介质中密钥与库文件同批保管。
 - **迁移**:定义可经「工程列表 → 导出/导入」跨实例迁移,连接引用按名称自动匹配;凭据明文永不导出,导入后需重填。

@@ -166,7 +166,7 @@ func Run(distFS fs.FS, version string, args []string) {
 		etlSvc, err := etl.New(store.db, cfg.Database.Path, etl.Config{
 			Enabled: true, KeyFile: cfg.ETL.KeyFile, MaxConcurrentRuns: cfg.ETL.MaxConcurrentRuns,
 			RunLogLimit: cfg.ETL.RunLogLimit, RetentionDays: cfg.ETL.RetentionDays,
-			KeepPerDefinition: cfg.ETL.KeepPerDefinition, TempDir: cfg.ETL.TempDir,
+			KeepPerDefinition: cfg.ETL.KeepPerDefinition, TempDir: cfg.ETL.TempDir, FileRoot: cfg.ETL.FileRoot,
 		})
 		if err != nil {
 			log.Fatalf("[etl] 初始化失败: %v", err)

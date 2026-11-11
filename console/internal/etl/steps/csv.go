@@ -92,6 +92,8 @@ func init() {
 		Infer: func(ic *core.InferContext, c *CSVInputConfig) error {
 			if strings.TrimSpace(c.Path) == "" {
 				ic.Errorf("path", "path_required", "请填写文件路径")
+			} else {
+				checkFilePath(ic, c.Path, "path")
 			}
 			if _, err := csvDelim(c.Delimiter); err != nil {
 				ic.Errorf("delimiter", "delimiter", "%s", err.Error())
@@ -118,7 +120,11 @@ func init() {
 				opts[i] = core.ConvertOptions{Layout: goLayout(f.Format)}
 			}
 			return core.RunnerFunc(func(ctx context.Context) error {
-				f, err := os.Open(c.Path)
+				p, err := resolveFilePath(rc.Env, c.Path, false)
+				if err != nil {
+					return err
+				}
+				f, err := os.Open(p)
 				if err != nil {
 					return fmt.Errorf("打开文件失败：%w", err)
 				}
@@ -216,6 +222,8 @@ func init() {
 			ic.SetOutput(core.PortMain, ic.Main())
 			if strings.TrimSpace(c.Path) == "" {
 				ic.Errorf("path", "path_required", "请填写文件路径")
+			} else {
+				checkFilePath(ic, c.Path, "path")
 			}
 			if _, err := csvDelim(c.Delimiter); err != nil {
 				ic.Errorf("delimiter", "delimiter", "%s", err.Error())
@@ -228,11 +236,15 @@ func init() {
 				return nil, err
 			}
 			return core.RunnerFunc(func(ctx context.Context) error {
+				p, err := resolveFilePath(rc.Env, c.Path, true)
+				if err != nil {
+					return err
+				}
 				flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 				if c.Append {
 					flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 				}
-				f, err := os.OpenFile(c.Path, flag, 0o644)
+				f, err := os.OpenFile(p, flag, 0o644)
 				if err != nil {
 					return fmt.Errorf("打开文件失败：%w", err)
 				}

@@ -41,6 +41,8 @@ type ETLConfig struct {
 	RetentionDays     int    `toml:"retention_days"`
 	KeepPerDefinition int    `toml:"keep_per_definition"`
 	TempDir           string `toml:"temp_dir"`
+	// FileRoot：csv_input/csv_output 的相对路径根目录（R1-B1），默认 <数据库目录>/etl-files。
+	FileRoot string `toml:"file_root"`
 }
 
 // ServerOperationsConfig 对应 [server_operations]：远程 Linux SSH/SFTP 运维。

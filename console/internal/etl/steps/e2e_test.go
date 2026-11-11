@@ -17,7 +17,7 @@ import (
 	"mooncell/console/internal/etl/conn"
 	"mooncell/console/internal/etl/core"
 	"mooncell/console/internal/etl/pipeline"
-	_ "mooncell/console/internal/etl/steps"
+	"mooncell/console/internal/etl/steps"
 )
 
 // env 为测试搭一个只含 SQLite 连接 "db" 的运行环境。
@@ -38,6 +38,14 @@ func env(t *testing.T) (core.Env, *sql.DB) {
 	}
 	k, v := pool.EnvEntry()
 	return core.MapEnv{k: v}, h.DB
+}
+
+// withFileRoot 在测试环境注入 file_root（csv 等文件步骤的相对路径根）。
+func withFileRoot(e core.Env, dir string) core.Env {
+	m := e.(core.MapEnv)
+	k, v := steps.FileRootEntry(dir)
+	m[k] = v
+	return m
 }
 
 func mustExec(t *testing.T, db *sql.DB, q string) {
@@ -559,15 +567,16 @@ func TestDBLookup(t *testing.T) {
 	}
 }
 
-// CSV 输入/输出：读定界文件（表头、类型转换、错误行）→ 写回文件。
+// CSV 输入/输出：读定界文件（表头、类型转换、错误行）→ 写回文件。路径相对 file_root。
 func TestCSVSteps(t *testing.T) {
 	e, db := env(t)
 	mustExec(t, db, `CREATE TABLE dst (id INTEGER, name TEXT, amount DECIMAL(10,2))`)
 	mustExec(t, db, `CREATE TABLE bad (id INTEGER, name TEXT, amount TEXT, _error_code TEXT, _error_message TEXT, _error_field TEXT, _error_step TEXT)`)
 	dir := t.TempDir()
-	src := dir + "/in.csv"
-	os.WriteFile(src, []byte("id,name,amount\n1,甲,3.40\n2,乙,7\n3,丙,不是数\n4,丁,9.99\n"), 0o644)
-	outPath := dir + "/out.csv"
+	e = withFileRoot(e, dir)
+	src := "in.csv"
+	os.WriteFile(filepath.Join(dir, src), []byte("id,name,amount\n1,甲,3.40\n2,乙,7\n3,丙,不是数\n4,丁,9.99\n"), 0o644)
+	outPath := "out.csv"
 	def := &pipeline.Definition{
 		Nodes: []pipeline.Node{
 			node("csv", "csv_input", map[string]any{
@@ -597,7 +606,7 @@ func TestCSVSteps(t *testing.T) {
 	if n := count(t, db, `SELECT count(*) FROM bad WHERE id = 3`); n != 1 {
 		t.Fatalf("转换失败行应进错误输出，实际 %d", n)
 	}
-	data, err := os.ReadFile(outPath)
+	data, err := os.ReadFile(filepath.Join(dir, outPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,6 +620,128 @@ func TestCSVSteps(t *testing.T) {
 	if m := res.Metrics["csv"]; m.Rejected != 1 {
 		t.Fatalf("度量应为 Rejected=1：%+v", m)
 	}
+}
+
+// 文件根目录边界（R1-B1）：csv_input/csv_output 的 path 只解释为 file_root 下的相对路径；
+// 绝对路径、.. 越界、指向根外的符号链接在编译期拒绝；编译后才出现的逃逸在运行期拦截。
+func TestCSVFileRootGuard(t *testing.T) {
+	e, _ := env(t)
+	root := t.TempDir()
+	e = withFileRoot(e, root)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.csv")
+	os.WriteFile(secret, []byte("v\nTOP-SECRET\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "ok.csv"), []byte("v\n1\n"), 0o644)
+
+	inDef := func(path string) *pipeline.Definition {
+		return &pipeline.Definition{
+			Nodes: []pipeline.Node{
+				node("csv", "csv_input", map[string]any{"path": path, "hasHeader": true,
+					"fields": []map[string]any{{"name": "v", "kind": "string"}}}),
+				node("d", "dummy", map[string]any{}),
+			},
+			Hops: []pipeline.Hop{hop("csv", "main", "d")},
+		}
+	}
+	outDef := func(path string) *pipeline.Definition {
+		return &pipeline.Definition{
+			Nodes: []pipeline.Node{
+				node("g", "generate_rows", map[string]any{"limit": 1, "sequenceField": "n"}),
+				node("o", "csv_output", map[string]any{"path": path}),
+			},
+			Hops: []pipeline.Hop{hop("g", "main", "o")},
+		}
+	}
+	compileErr := func(def *pipeline.Definition) bool {
+		return pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e}).Problems.HasErrors()
+	}
+	runErr := func(def *pipeline.Definition) error {
+		plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+		if plan.Problems.HasErrors() {
+			t.Fatalf("编译失败：%+v", plan.Problems)
+		}
+		return pipeline.Run(context.Background(), plan,
+			pipeline.RunOptions{Env: e, Log: core.NewLogger(&core.MemorySink{}, core.LevelError)}).Err
+	}
+
+	// 编译期拒绝：绝对路径 / .. 越界（输入与输出各自覆盖）
+	for _, p := range []string{secret, filepath.Join(outside, "evil.csv"), "../escape.csv", "../../x.csv", "/abs.csv"} {
+		if !compileErr(inDef(p)) {
+			t.Fatalf("csv_input 路径 %q 应在编译期被拒", p)
+		}
+		if !compileErr(outDef(p)) {
+			t.Fatalf("csv_output 路径 %q 应在编译期被拒", p)
+		}
+	}
+
+	// 根内符号链接指向根外：文件级（输入/输出）与目录级（输入/输出）
+	os.Symlink(secret, filepath.Join(root, "link.csv"))
+	os.Mkdir(filepath.Join(outside, "sub"), 0o755)
+	os.Symlink(outside, filepath.Join(root, "linkdir"))
+	for _, p := range []string{"link.csv", "linkdir/secret.csv"} {
+		if !compileErr(inDef(p)) {
+			t.Fatalf("csv_input 符号链接路径 %q 应在编译期被拒", p)
+		}
+	}
+	for _, p := range []string{"link.csv", "linkdir/new.csv"} {
+		if !compileErr(outDef(p)) {
+			t.Fatalf("csv_output 符号链接路径 %q 应在编译期被拒", p)
+		}
+	}
+
+	// 运行期再校验：编译时路径尚不存在 → 之后出现指向根外的符号链接必须拦下
+	for _, c := range []struct {
+		name string
+		def  *pipeline.Definition
+		link string
+	}{
+		{"输入-运行期符号链接", inDef("late.csv"), filepath.Join(root, "late.csv")},
+		{"输出-运行期符号链接", outDef("late_out.csv"), filepath.Join(root, "late_out.csv")},
+	} {
+		plan := pipeline.Compile(context.Background(), c.def, pipeline.CompileOptions{Env: e})
+		if plan.Problems.HasErrors() {
+			t.Fatalf("%s：路径不存在时编译应通过：%+v", c.name, plan.Problems)
+		}
+		if err := os.Symlink(secret, c.link); err != nil {
+			t.Fatal(err)
+		}
+		res := pipeline.Run(context.Background(), plan,
+			pipeline.RunOptions{Env: e, Log: core.NewLogger(&core.MemorySink{}, core.LevelError)})
+		if res.Err == nil {
+			t.Fatalf("%s：运行期应拒绝指向根外的符号链接", c.name)
+		}
+	}
+
+	// 未配置 file_root 的环境：运行期拒绝（防误配置放开任意路径）
+	noEnv, _ := env(t)
+	if err := runErrNoEnv(noEnv, inDef("ok.csv")); err == nil {
+		t.Fatal("无 file_root 的环境应拒绝运行文件步骤")
+	}
+
+	// 根外文件未被写出/读取
+	if _, err := os.Lstat(filepath.Join(outside, "evil.csv")); !os.IsNotExist(err) {
+		t.Fatal("不应在根外写出文件")
+	}
+	// 根内合法相对路径：输入读取、输出写入正常
+	if err := runErr(inDef("ok.csv")); err != nil {
+		t.Fatalf("根内相对路径读取应成功：%v", err)
+	}
+	if err := runErr(outDef("nodir/ok-out.csv")); err == nil {
+		t.Fatal("父目录不存在时输出应失败（不自动建目录）")
+	}
+	if err := runErr(outDef("ok-out.csv")); err != nil {
+		t.Fatalf("根内相对路径写出应成功：%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ok-out.csv")); err != nil {
+		t.Fatalf("根内输出文件应存在：%v", err)
+	}
+}
+
+func runErrNoEnv(e core.Env, def *pipeline.Definition) error {
+	plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	res := pipeline.Run(context.Background(), plan,
+		pipeline.RunOptions{Env: e, Log: core.NewLogger(&core.MemorySink{}, core.LevelError)})
+	return res.Err
 }
 
 // HTTP 输入：httptest 服务端返回分页 JSON，dataPath 拍平 + 字段点路径取值。

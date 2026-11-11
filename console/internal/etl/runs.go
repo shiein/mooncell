@@ -14,6 +14,7 @@ import (
 	"mooncell/console/internal/etl/actions"
 	"mooncell/console/internal/etl/core"
 	"mooncell/console/internal/etl/pipeline"
+	"mooncell/console/internal/etl/steps"
 	"mooncell/console/internal/etl/store"
 	"mooncell/console/internal/etl/workflow"
 )
@@ -262,6 +263,8 @@ func (s *Service) env(withRunner actions.PipelineRunner) core.Env {
 	e := core.MapEnv{pk: pv}
 	sk, sv := actions.SecretEntry(s.box)
 	e[sk] = sv
+	fk, fv := steps.FileRootEntry(s.cfg.FileRoot)
+	e[fk] = fv
 	if withRunner != nil {
 		rk, rv := actions.RunnerEntry(withRunner)
 		e[rk] = rv
