@@ -213,6 +213,27 @@ registerForm('pipeline', 'unique_hash', ({ cfg, set, ctx }) => {
   );
 });
 
+registerForm('pipeline', 'sort_rows', ({ cfg, set, ctx }) => {
+  const rows = cfg.fields || [];
+  return (
+    <Section title="排序字段" hint="按列表顺序依次比较；NULL 最小">
+      <ListEditor
+        columns={[{ label: '字段' }, { label: '方向', width: '92px' }]}
+        rows={rows} onChange={(fields) => set({ fields })}
+        onAdd={() => set({ fields: [...rows, { name: (ctx.input || [])[0]?.name || '', desc: false }] })}
+        empty="至少一个排序字段"
+        renderRow={(r, up) => (
+          <React.Fragment>
+            <FieldSelect fields={ctx.input} value={r.name} onChange={(name) => up({ name })} />
+            <Select value={r.desc ? 'desc' : 'asc'} onChange={(v) => up({ desc: v === 'desc' })}
+              options={[{ value: 'asc', label: '升序' }, { value: 'desc', label: '降序' }]} />
+          </React.Fragment>
+        )} />
+      <div className="field-hint">超出内存预算（设置 → 内存预算）的部分溢写临时文件做外部归并。</div>
+    </Section>
+  );
+});
+
 registerForm('pipeline', 'value_mapper', ({ cfg, set, ctx }) => {
   const rows = cfg.mappings || [];
   return (

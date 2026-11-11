@@ -232,6 +232,79 @@ func TestValueMapper(t *testing.T) {
 	}
 }
 
+// 排序记录：升序复合键 + NULL 在前；大输入超内存预算时溢写外部归并，顺序与行数不变。
+func TestSortRows(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (a INTEGER, b TEXT)`)
+	mustExec(t, db, `CREATE TABLE dst (a INTEGER, b TEXT)`)
+	mustExec(t, db, `INSERT INTO src VALUES (2,'x'),(NULL,'z'),(1,'b'),(1,'a'),(2,'a')`)
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("in", "table_input", map[string]any{"connection": "db", "sql": "select a, b from src"}),
+			node("sort", "sort_rows", map[string]any{"fields": []map[string]any{{"name": "a"}, {"name": "b", "desc": true}}}),
+			node("out", "table_output", map[string]any{"connection": "db", "table": "dst"}),
+		},
+		Hops: []pipeline.Hop{hop("in", "main", "sort"), hop("sort", "main", "out")},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	var got []string
+	rows, err := db.Query(`SELECT a, b FROM dst`) // 无 ORDER BY：按插入顺序读回即排序输出顺序
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var a sql.NullInt64
+		var b string
+		rows.Scan(&a, &b)
+		if a.Valid {
+			got = append(got, fmt.Sprintf("%d/%s", a.Int64, b))
+		} else {
+			got = append(got, "NULL/"+b)
+		}
+	}
+	rows.Close()
+	want := []string{"NULL/z", "1/b", "1/a", "2/x", "2/a"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("排序结果错误：%v 期望 %v", got, want)
+	}
+
+	// 溢写路径：30000 行 + 1MB 预算 → 至少一次 spill + 归并
+	mustExec(t, db, `CREATE TABLE big (n INTEGER)`)
+	def2 := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("gen", "generate_rows", map[string]any{"limit": 30000, "sequenceField": "n"}),
+			node("sort", "sort_rows", map[string]any{"fields": []map[string]any{{"name": "n", "desc": true}}}),
+			node("out", "table_output", map[string]any{"connection": "db", "table": "big"}),
+		},
+		Hops:     []pipeline.Hop{hop("gen", "main", "sort"), hop("sort", "main", "out")},
+		Settings: pipeline.Settings{MemoryBudgetMB: 1},
+	}
+	res2 := run(t, e, def2, nil)
+	if res2.Err != nil {
+		t.Fatal(res2.Err)
+	}
+	var prev, n int64 = 30001, 0 // sequenceField 生成 1..limit
+	rr, err := db.Query(`SELECT n FROM big`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rr.Next() {
+		var v int64
+		rr.Scan(&v)
+		if v != prev-1 {
+			t.Fatalf("第 %d 行应为 %d，实际 %d", n, prev-1, v)
+		}
+		prev, n = v, n+1
+	}
+	rr.Close()
+	if n != 30000 || prev != 1 {
+		t.Fatalf("应输出 30000 行降序至 1：n=%d prev=%d", n, prev)
+	}
+}
+
 // 表输出连接错误端口：批次内混入唯一约束冲突行 → 批量失败后退化逐行写入，
 // 坏行进错误输出、好行照常提交、步骤成功；未连接错误端口则整步失败。
 func TestTableOutputErrorRowDegrade(t *testing.T) {
