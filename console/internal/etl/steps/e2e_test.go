@@ -332,6 +332,67 @@ func TestUniqueSorted(t *testing.T) {
 	}
 }
 
+// 更新/删除：按键命中写目标表；未命中行进错误输出，未连接时跳过。
+func TestUpdateDeleteSteps(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (id INTEGER, v TEXT)`)
+	mustExec(t, db, `CREATE TABLE tgt (id INTEGER PRIMARY KEY, v TEXT)`)
+	mustExec(t, db, `CREATE TABLE bad (id INTEGER, v TEXT, _error_code TEXT, _error_message TEXT, _error_field TEXT, _error_step TEXT)`)
+	mustExec(t, db, `INSERT INTO src VALUES (1,'x'),(2,'y'),(9,'z')`)
+	mustExec(t, db, `INSERT INTO tgt VALUES (1,'a'),(2,'b')`)
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("in", "table_input", map[string]any{"connection": "db", "sql": "select id, v from src order by id"}),
+			node("u", "update", map[string]any{
+				"connection": "db", "table": "tgt",
+				"keys":   []map[string]any{{"stream": "id", "column": "id"}},
+				"fields": []map[string]any{{"stream": "v", "column": "v"}},
+			}),
+			node("err", "table_output", map[string]any{"connection": "db", "table": "bad"}),
+		},
+		Hops: []pipeline.Hop{
+			hop("in", "main", "u"),
+			{ID: "e", From: "u", FromPort: "error", To: "err", ToPort: "main"},
+		},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	var vx, vy string
+	db.QueryRow(`SELECT v FROM tgt WHERE id=1`).Scan(&vx)
+	db.QueryRow(`SELECT v FROM tgt WHERE id=2`).Scan(&vy)
+	if vx != "x" || vy != "y" {
+		t.Fatalf("命中行应被更新为 x/y：%s/%s", vx, vy)
+	}
+	if n := count(t, db, `SELECT count(*) FROM bad WHERE id = 9`); n != 1 {
+		t.Fatalf("未命中行 id=9 应进错误输出，实际 %d", n)
+	}
+	if res.Metrics["u"].Updated != 2 || res.Metrics["u"].Rejected != 1 {
+		t.Fatalf("度量应为 Updated=2/Rejected=1：%+v", res.Metrics["u"])
+	}
+
+	// 删除：id=1,2 命中删除，id=9 未命中进错误输出
+	mustExec(t, db, `DELETE FROM bad`)
+	def.Nodes[1] = node("u", "delete", map[string]any{
+		"connection": "db", "table": "tgt",
+		"keys": []map[string]any{{"stream": "id", "column": "id"}},
+	})
+	res2 := run(t, e, def, nil)
+	if res2.Err != nil {
+		t.Fatal(res2.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM tgt`); n != 0 {
+		t.Fatalf("id=1,2 应被删除、表空，实际 %d", n)
+	}
+	if n := count(t, db, `SELECT count(*) FROM bad WHERE id = 9`); n != 1 {
+		t.Fatalf("未命中行 id=9 应进错误输出，实际 %d", n)
+	}
+	if res2.Metrics["u"].Updated != 2 || res2.Metrics["u"].Rejected != 1 {
+		t.Fatalf("删除度量应为 Updated=2/Rejected=1：%+v", res2.Metrics["u"])
+	}
+}
+
 // 表输出连接错误端口：批次内混入唯一约束冲突行 → 批量失败后退化逐行写入，
 // 坏行进错误输出、好行照常提交、步骤成功；未连接错误端口则整步失败。
 func TestTableOutputErrorRowDegrade(t *testing.T) {

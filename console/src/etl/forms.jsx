@@ -394,6 +394,60 @@ registerForm('pipeline', 'insert_update', ({ cfg, set, ctx }) => {
   );
 });
 
+function KeyedWriteForm({ cfg, set, ctx, withFields }) {
+  const { cols, indexes, error } = useTargetColumns(cfg);
+  const keys = cfg.keys || [];
+  const keyCols = keys.map((k) => (k.column || '').toLowerCase());
+  const indexed = !keys.length || (indexes || []).some((ix) => keyCols.every((k, i) => (ix.columns[i] || '').toLowerCase() === k));
+  return (
+    <React.Fragment>
+      <Field label="数据库连接"><ConnectionSelect value={cfg.connection} onChange={(connection) => set({ connection })} /></Field>
+      <TablePicker connection={cfg.connection} schema={cfg.schema} table={cfg.table} onChange={(t) => set(t)} />
+      {error ? <div className="field-hint" style={{ color: 'var(--error)' }}>{error}</div> : null}
+      <Section title="查询关键字" hint="命中则处理，未命中的行进错误输出">
+        <ListEditor
+          columns={[{ label: '流字段' }, { label: '表字段' }]}
+          rows={keys} onChange={(k) => set({ keys: k })}
+          onAdd={() => set({ keys: [...keys, { stream: '', column: '' }] })}
+          empty="至少需要一个关键字"
+          extraActions={cols && cols.some((c) => c.primaryKey) ? (
+            <Btn variant="ghost" size="sm" icon="key" onClick={() => set({ keys: cols.filter((c) => c.primaryKey).map((c) => ({ stream: ((ctx.input || []).find((f) => f.name.toLowerCase() === c.name.toLowerCase()) || {}).name || '', column: c.name })) })}>使用主键</Btn>
+          ) : null}
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <FieldSelect fields={ctx.input} value={r.stream} onChange={(stream) => up({ stream })} />
+              <ColumnSelect cols={cols} value={r.column} onChange={(column) => up({ column })} />
+            </React.Fragment>
+          )} />
+        {cols && keys.length && !indexed ? <div className="field-hint" style={{ color: 'var(--warn)' }}>关键字段上没有索引，大表查找会很慢。建议在目标表建立索引。</div> : null}
+      </Section>
+      {withFields ? (
+        <Section title="更新字段">
+          <ListEditor
+            columns={[{ label: '流字段' }, { label: '表字段' }]}
+            rows={cfg.fields || []} onChange={(fields) => set({ fields })}
+            onAdd={() => set({ fields: [...(cfg.fields || []), { stream: '', column: '' }] })}
+            empty="至少需要一个更新字段"
+            extraActions={<Btn variant="ghost" size="sm" disabled={!cols} onClick={() => {
+              const ks = new Set(keys.map((k) => (k.column || '').toLowerCase()));
+              set({ fields: autoMap(ctx.input, cols).filter((m) => !ks.has(m.column.toLowerCase())) });
+            }}>按名称匹配</Btn>}
+            renderRow={(r, up) => (
+              <React.Fragment>
+                <FieldSelect fields={ctx.input} value={r.stream} onChange={(stream) => up({ stream })} />
+                <ColumnSelect cols={cols} value={r.column} onChange={(column) => up({ column })} />
+              </React.Fragment>
+            )} />
+        </Section>
+      ) : null}
+      <Field label="提交记录数"><input className="input" type="number" min="1" value={cfg.commitSize || 1000} onChange={(e) => set({ commitSize: num(e.target.value, 1000) })} /></Field>
+    </React.Fragment>
+  );
+}
+
+registerForm('pipeline', 'update', (p) => <KeyedWriteForm {...p} withFields />);
+registerForm('pipeline', 'delete', (p) => <KeyedWriteForm {...p} />);
+
 // ---------------------------------------------------------------- 作业项
 
 registerForm('workflow', 'start', ({ ctx }) => (

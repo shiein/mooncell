@@ -155,6 +155,13 @@ func LookupSQL(d Dialect, t TableRef, keys, fetch []string, nkeys int) string {
 	b.WriteString(" FROM ")
 	b.WriteString(d.Qualified(t))
 	b.WriteString(" WHERE ")
+	b.WriteString(keyWhere(d, keys, nkeys))
+	return b.String()
+}
+
+// keyWhere 生成 nkeys 组键的等值条件：单键 IN (…)，复合键 (k1=? AND k2=?) OR …。
+func keyWhere(d Dialect, keys []string, nkeys int) string {
+	var b strings.Builder
 	if len(keys) == 1 {
 		b.WriteString(d.Quote(keys[0]))
 		b.WriteString(" IN (")
@@ -179,6 +186,16 @@ func LookupSQL(d Dialect, t TableRef, keys, fetch []string, nkeys int) string {
 		}
 		b.WriteByte(')')
 	}
+	return b.String()
+}
+
+// DeleteSQL 生成按键批量删除的 DELETE（单键 IN / 复合键 OR 合取，同 LookupSQL 的 WHERE）。
+func DeleteSQL(d Dialect, t TableRef, keys []string, nkeys int) string {
+	var b strings.Builder
+	b.WriteString("DELETE FROM ")
+	b.WriteString(d.Qualified(t))
+	b.WriteString(" WHERE ")
+	b.WriteString(keyWhere(d, keys, nkeys))
 	return b.String()
 }
 
