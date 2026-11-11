@@ -6,6 +6,12 @@ const LEGACY_TARGET = ['chrome92', 'edge92', 'firefox91', 'safari15'];
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    // Chrome 92 无 structuredClone（98+），esbuild 只降语法不降 API。
+    // 把依赖（@xyflow/react）里的调用重命名到 __mcStructuredClone，
+    // 由 index.html 注入的同型 polyfill 提供实现。
+    structuredClone: '__mcStructuredClone',
+  },
   build: {
     target: LEGACY_TARGET,
     cssTarget: LEGACY_TARGET,

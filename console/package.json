@@ -8,7 +8,7 @@
     "dev": "concurrently -k -n web,api -c cyan,magenta \"vite\" \"go run .\"",
     "dev:web": "vite",
     "dev:api": "go run .",
-    "build": "vite build",
+    "build": "vite build && sh scripts/check-compat.sh && node scripts/check-icons.mjs",
     "preview": "vite preview",
     "dist": "vite build && go build -o mooncell .",
     "test:e2e": "sh e2e/run-e2e.sh"

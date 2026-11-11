@@ -1,5 +1,9 @@
 /* 数据集成模块样式：只使用全局设计令牌，不引入新色系。前缀 etl- */
 
+/* Chrome 92 不支持 color-mix()：便签边框用预先定义好的半透明变量替代 */
+:root { --etl-note-border: rgba(168, 123, 35, 0.55); }
+html[data-theme="dark"] { --etl-note-border: rgba(204, 164, 90, 0.55); }
+
 /* ---------------- 模块壳 ---------------- */
 .etl-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
 .etl-head h2 { font-size: 20px; letter-spacing: -0.015em; }
@@ -23,7 +27,7 @@
 .etl-sort-th:hover { color: var(--fg); }
 .etl-group td {
   padding: 5px 12px !important; font-size: 12px; font-weight: 600; color: var(--fg);
-  background: var(--panel-alt, rgba(128,128,128,.06)); border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken, rgba(128,128,128,.06)); border-bottom: 1px solid var(--border);
 }
 .etl-group svg { vertical-align: -2px; margin-right: 6px; color: var(--muted-fg); }
 .etl-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -148,7 +152,7 @@ tr:hover .etl-actions { opacity: 1; }
 
 /* 画布注释便签（doc.notes 伪节点） */
 .etl-note {
-  background: var(--warn-soft, rgba(210, 158, 48, 0.14)); border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: var(--warn-soft, rgba(210, 158, 48, 0.14)); border: 1px solid var(--etl-note-border);
   border-radius: 9px; box-shadow: var(--shadow-sm); position: relative; transition: border-color .12s, box-shadow .12s;
 }
 .etl-note:hover { box-shadow: var(--shadow-md); }
