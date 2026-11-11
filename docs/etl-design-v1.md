@@ -547,7 +547,7 @@ src/etl/
 * **设计器**：左组件面板（搜索 + 分类，拖入画布）/ 中画布（网格、吸附、框选、小地图、键盘快捷键）/ 右属性检查器 /
   底部抽屉（校验问题 · 数据预览 · 运行度量 · 日志）。端口有清晰的语义色与标签，连线上显示 schema 字段数与运行时行数。
 * **扩展一个步骤的前端成本**：在 `forms/` 写一个表单组件并 `registerForm('type', Component)`；未注册时退化为 JSON 编辑。
-* 浏览器下限 Chrome 92（与 Console 一致）。`pnpm build` 挂 `scripts/check-compat.mjs` 扫描 `dist/assets`：产物含 `color-mix`、`:has(`、`structuredClone`、`Object.hasOwn(` 即失败（依赖中的 `structuredClone` 经 vite `define` 重写为 `__mcStructuredClone`，由 `index.html` 内联 polyfill 提供）。
+* 浏览器下限 Chrome 92（与 Console 一致，硬性要求）。`pnpm build` 挂 `scripts/check-compat.sh` 扫描 `dist/assets`，产物含 Chrome 92 之后才有的特性即失败——JS：`structuredClone`、`Object.hasOwn`、`findLast`、`toSorted` 等、`Object/Map.groupBy`、`AbortSignal.timeout/any`、`Promise.withResolvers`、`Array.fromAsync`、`checkVisibility`、Popover API；CSS：`color-mix()`、`:has()`、容器查询、`@layer`、`accent-color`、动态视口单位、`text-wrap`、oklch/lab 等新颜色、相对颜色、`scrollbar-gutter`、独立变换属性 `translate/scale/rotate`。esbuild 只按 target 降语法，不降运行时 API 和 CSS 新特性，所以依赖带进来的只能在产物上拦截。依赖中的 `structuredClone` 经 vite `define` 重写为 `__mcStructuredClone`，由 `index.html` 内联 polyfill 提供。唯一豁免是 `@xyflow/react` 的 `.react-flow__resize-control.handle`（NodeResizer 把手，本项目未使用）。模式写错时 grep 报错即判失败，避免检查静默失效（`:has(` 曾因未转义的括号一直不生效）。
 
 ---
 
