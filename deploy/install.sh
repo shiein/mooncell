@@ -165,8 +165,13 @@ etl_key_path() {
 
 # backup_console_data 快照 Console 数据库(WAL/SHM 一并拷)与凭据密钥。
 # mooncell-etl.key 与数据库必须成对保管:密钥丢失后库内已保存的连接密码全部无法解密。
+# 数据库文件缺失时报警并返回非零(调用方据此中止,不把缺库的快照当成功备份)。
 backup_console_data() {
   local dest="$1" db key_file; db="$(console_db_path)"; key_file="$(etl_key_path)"
+  if [ ! -f "$db" ]; then
+    warn "数据库文件不存在:$db —— 备份不完整,已中止"
+    return 1
+  fi
   mkdir -p "$dest"
   local f
   for f in "$db" "$db-wal" "$db-shm"; do
@@ -187,7 +192,7 @@ do_backup() {
   local dest="${1:-$PREFIX/backups/$(date +%Y%m%d-%H%M%S)}"
   log "备份数据库与凭据密钥到 $dest"
   warn "运行中复制为近似快照;要求强一致请先 systemctl stop mooncell-console"
-  backup_console_data "$dest"
+  backup_console_data "$dest" || die "备份失败:数据库文件缺失,未生成快照"
   log "备份完成:$dest —— mooncell-etl.key 丢失则库内连接密码无法解密,请随库一同保管"
 }
 
@@ -198,7 +203,12 @@ do_upgrade() {
   log "升级二进制(保留配置与数据库)"
   systemctl stop mooncell-agent mooncell-console || true
   local snap="$PREFIX/backups/pre-upgrade-$(date +%Y%m%d-%H%M%S)"
-  backup_console_data "$snap"
+  if ! backup_console_data "$snap"; then
+    # 快照失败不继续升级:先恢复已停掉的服务再退出,避免停机离场
+    warn "升级前快照失败,恢复服务后中止升级"
+    systemctl start mooncell-agent mooncell-console || true
+    exit 1
+  fi
   log "升级前快照:$snap"
   install -m 0755 "$SRC_DIR/mooncell-agent"   "$AGENT_DIR/mc-agent"
   install -m 0755 "$SRC_DIR/mooncell-console" "$CONSOLE_DIR/mc-console"
