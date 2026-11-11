@@ -166,6 +166,7 @@ func Define[C any](d Definition[C]) StepType // 在 init() 中调用 Register(De
 * **Infer 与运行共享同一份推导**：设计器的字段下拉、预检、运行前编译，三者用同一段代码，不会出现「界面说能跑、运行时报错」。
 * **端口声明**：`Meta.Inputs` / `Meta.Outputs` 声明命名端口、是否允许多条连线、是否 info 端口（如流查询的 `lookup`）。
 * **错误输出**：`Meta.ErrorPort=true` 的步骤可连 `error` 端口；错误行 = 输入行 + `_error_code/_error_message/_error_field/_error_step` 四个字段。未连接时，错误行使步骤失败。
+* **数据类 vs 基础设施错误**：`conn.IsDataError(dialect, err)` 按方言错误载体判定——PG/Kingbase 取 SQLSTATE 前缀（`22xxx` 数据异常、`23xxx` 完整性约束），MySQL 取错误码白名单（1048/1062/1264/1366/1406/1451/1452 等），DM 取 `DmError.ErrCode` 白名单，SQLite 取基础错误码（18/19/20）；取消、超时、网络、`ErrBadConn` 一律基础设施。`table_output` 批量写入失败时仅数据类错误退化逐行（每行单事务，`flushRows`）；逐行阶段非数据类错误同样拒行但计数，连续 100 行即视为系统性故障整步失败——宁可失败可观测，也不静默把故障伪装成坏行。
 * **辅助器**：`core.RowMapper`（逐批映射，覆盖 80% 的简单步骤）、`core.Sink`、`core.Source`，复杂步骤（排序、合并）直接实现 `Runner`。
 
 ### 3.4 资源上下文 `RunContext`
@@ -340,7 +341,7 @@ type Dialect interface {
 | 流程 | `filter_rows` | 过滤记录（true / false 两路输出） | 已实现 |
 | 转换 | `unique_hash` | 唯一行（哈希，内存预算受控） | 已实现 |
 | 流程 | `dummy` | 空操作 | 已实现 |
-| 输出 | `table_output` | 表输出（裁剪表 / 提交记录数 / 批量；连 error 端口时批失败退化逐行定位坏行） | 已实现 |
+| 输出 | `table_output` | 表输出（裁剪表 / 提交记录数 / 批量；连 error 端口且批失败属数据类错误时退化逐行定位坏行，基础设施错误整步失败） | 已实现 |
 | 输出 | `insert_update` | 插入 / 更新（原生 upsert / 派生行集连接更新） | 已实现 |
 | 输出 | `update` / `delete` | 更新 / 删除（未命中行进错误输出，未连则跳过） | 已实现 |
 | 转换 | `sort_rows` | 排序（外部排序溢写） | 已实现 |

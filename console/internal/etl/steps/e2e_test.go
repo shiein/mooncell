@@ -1447,3 +1447,63 @@ func TestPushdown(t *testing.T) {
 		t.Fatal("源多分支时不应改写源 SQL")
 	}
 }
+
+// R1-M4 表输出退化逐行只对数据类错误：基础设施错误整步失败（错误端口 0 行）；
+// 唯一约束等数据类错误仍退化为逐行、坏行进错误端口。
+func TestTableOutputFallbackKinds(t *testing.T) {
+	e, db := env(t)
+	gen := map[string]any{"limit": 10, "sequenceField": "seq"}
+	outCfg := func(table string) map[string]any {
+		return map[string]any{"connection": "db", "table": table, "commitSize": 4,
+			"fields": []map[string]any{{"stream": "seq", "column": "id"}}}
+	}
+	errOut := func(table string) map[string]any {
+		return map[string]any{"connection": "db", "table": table,
+			"fields": []map[string]any{{"stream": "seq", "column": "id"}, {"stream": "_error_message", "column": "msg"}}}
+	}
+	mkDef := func() *pipeline.Definition {
+		return &pipeline.Definition{
+			Nodes: []pipeline.Node{
+				node("gen", "generate_rows", gen),
+				node("out", "table_output", outCfg("tgt")),
+				node("bad", "table_output", errOut("bad")),
+			},
+			Hops: []pipeline.Hop{
+				hop("gen", "main", "out"),
+				{ID: "e1", From: "out", FromPort: "error", To: "bad", ToPort: "main"},
+			},
+		}
+	}
+
+	// 1) 唯一约束冲突（数据类错误）：仍退化逐行，冲突行进错误端口，步骤成功
+	mustExec(t, db, `CREATE TABLE tgt (id INTEGER PRIMARY KEY)`)
+	mustExec(t, db, `CREATE TABLE bad (id INTEGER, msg TEXT)`)
+	mustExec(t, db, `INSERT INTO tgt VALUES (3), (7)`)
+	res := run(t, e, mkDef(), nil)
+	if res.Err != nil {
+		t.Fatalf("唯一冲突应退化逐行并成功，实得错误 %v", res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM bad`); n != 2 {
+		t.Fatalf("2 行冲突应进错误端口，实际 %d", n)
+	}
+	if m := res.Metrics["out"]; m.Rejected != 2 || m.Output != 8 {
+		t.Fatalf("度量应 Rejected=2/Output=8：%+v", m)
+	}
+
+	// 2) 基础设施错误：编译后 DROP 目标表 → 批量与逐行均报 no such table
+	//    （SQLITE_ERROR=1 非数据类）→ 整步失败、错误端口 0 行
+	mustExec(t, db, `DELETE FROM bad`)
+	def := mkDef()
+	plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	if plan.Problems.HasErrors() {
+		t.Fatalf("编译应通过：%+v", plan.Problems)
+	}
+	mustExec(t, db, `DROP TABLE tgt`)
+	res = pipeline.Run(context.Background(), plan, pipeline.RunOptions{Env: e})
+	if res.Err == nil {
+		t.Fatal("表不存在属基础设施错误，应整步失败而非逐行吞掉")
+	}
+	if n := count(t, db, `SELECT count(*) FROM bad`); n != 0 {
+		t.Fatalf("基础设施错误不应有行进错误端口，实际 %d", n)
+	}
+}

@@ -159,6 +159,10 @@ func (w *tableWriter) flush(ctx context.Context) ([]core.Row, error) {
 		if !w.rc.HasOutput(core.PortError) {
 			return nil, err
 		}
+		if !conn.IsDataError(w.h.Dialect, err) {
+			// 基础设施错误（断连/超时/取消/语法/权限）：坏行定位没有意义，整步失败
+			return nil, err
+		}
 		w.rc.Log.Warn("%s：批量写入失败（%v），退化逐行写入定位坏行", w.table, err)
 		return w.flushRows(ctx, rows, args)
 	}
@@ -188,12 +192,18 @@ func (w *tableWriter) flushBatch(ctx context.Context, rows []core.Row, args []an
 	return nil
 }
 
+// maxNonDataStreak 逐行阶段允许的连续非数据类错误上限；
+// 达到即视为系统性故障（断连/权限/资源），整步失败而非继续吞行。
+const maxNonDataStreak = 100
+
 // flushRows 每行单独事务写入（PG 中失败语句会使整个事务失效，不能复用同一事务）。
-// 失败的行 Reject 到 error 端口；返回成功写入的行。
+// 数据类错误的行 Reject 到 error 端口；非数据类错误同样拒行但计入连续计数，
+// 连续达到 maxNonDataStreak 即整步失败。返回成功写入的行。
 func (w *tableWriter) flushRows(ctx context.Context, rows []core.Row, args []any) ([]core.Row, error) {
 	ncol := len(w.cols)
 	q := conn.InsertSQL(w.h.Dialect, w.table, w.names, 1)
 	written := make([]core.Row, 0, len(rows))
+	nonDataStreak := 0
 	for i, r := range rows {
 		tx, err := w.h.DB.BeginTx(ctx, nil)
 		if err != nil {
@@ -206,11 +216,20 @@ func (w *tableWriter) flushRows(ctx context.Context, rows []core.Row, args []any
 			tx.Rollback()
 		}
 		if err != nil {
+			if !conn.IsDataError(w.h.Dialect, err) {
+				nonDataStreak++
+				if nonDataStreak >= maxNonDataStreak {
+					return written, fmt.Errorf("连续 %d 行非数据类错误（最近：%w），疑似系统性故障，整步失败", nonDataStreak, err)
+				}
+			} else {
+				nonDataStreak = 0
+			}
 			if rerr := w.rc.Reject(ctx, r, fmt.Errorf("写入 %s 失败：%w", w.table, err), ""); rerr != nil {
 				return written, rerr
 			}
 			continue
 		}
+		nonDataStreak = 0
 		written = append(written, r)
 	}
 	w.rc.Metrics.Output.Add(int64(len(written)))
