@@ -123,11 +123,13 @@ Console 内置可视化数据集成:画布拖拽编排**转换**(输入/清洗/�
 enabled = true                # 关闭则整个模块不出现在导航与 API
 key_file = ""                 # 凭据密钥路径,缺省与数据库同目录 mooncell-etl.key
 file_root = ""                # csv_input/csv_output 的相对路径根目录,缺省与数据库同目录 etl-files(0750)
+http_allow_loopback = false   # HTTP 类步骤(http_input/http/notify)可否访问回环/链路本地地址
 max_concurrent_runs = 4       # 同时运行的作业数上限
 retention_days = 30           # 运行记录保留天数
 ```
 
 - **文件边界**:csv_input / csv_output 的 `path` 一律解释为 `file_root` 下的相对路径——绝对路径、`..` 越界、指向根外的符号链接在编译期与运行期都被拒绝,对管理员同样生效。需要读写服务器其它目录时,把 `file_root` 指向该目录,或把数据复制/挂载进 `file_root`。
+- **HTTP 出方向边界**:http_input / http / notify 默认拒绝回环、链路本地与 0.0.0.0 地址(拨号层按解析 IP 校验,防 DNS 重绑定与 302 跳转绕过),私有网段放行;确需访问本机服务时设 `http_allow_loopback = true`。
 - **源端下推**(转换设置 → 源端下推,默认关):开启后「表输入 → 过滤 → 字段选择」折叠为源库 SQL,但只下推能证明与行内求值等价的条件子集(数值/日期/时间戳的比较与 in、`!=`/`not in` 补 NULL 语义、NULL 谓词);字符串比较、函数、`var()`、三值逻辑会改变行集合的结构一律留在行内执行。字面量全部走绑定参数,不内联进 SQL。**预览永不下推**——预览展示的是行内求值结果,与开启与否无关。
 
 - **备份与升级(重要)**:`mooncell-etl.key` 是库内全部连接密码与通知凭据的加密密钥,**必须与 `mooncell.db` 成对备份**——只备份数据库、丢失密钥,所有已保存密码无法解密,需逐个连接重输。`install.sh upgrade` 已自动快照二者到 `$PREFIX/backups/pre-upgrade-<时间戳>/`;手工迁移/灾备请用 `./install.sh backup`,并确认备份介质中密钥与库文件同批保管。

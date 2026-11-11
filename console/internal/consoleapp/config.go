@@ -43,6 +43,8 @@ type ETLConfig struct {
 	TempDir           string `toml:"temp_dir"`
 	// FileRoot：csv_input/csv_output 的相对路径根目录（R1-B1），默认 <数据库目录>/etl-files。
 	FileRoot string `toml:"file_root"`
+	// HTTPAllowLoopback：HTTP 类步骤是否允许访问回环/链路本地地址（R1-m3），默认 false。
+	HTTPAllowLoopback bool `toml:"http_allow_loopback"`
 }
 
 // ServerOperationsConfig 对应 [server_operations]：远程 Linux SSH/SFTP 运维。

@@ -45,7 +45,7 @@ func newHarness(t *testing.T) *harness {
 	if err := Migrate(db); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(db, dbPath, Config{})
+	s, err := New(db, dbPath, Config{HTTPAllowLoopback: true}) // 测试服务器在回环
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -265,6 +265,8 @@ func (s *Service) env(withRunner actions.PipelineRunner) core.MapEnv {
 	e[sk] = sv
 	fk, fv := steps.FileRootEntry(s.cfg.FileRoot)
 	e[fk] = fv
+	hk, hv := core.HTTPAllowLoopbackEntry(s.cfg.HTTPAllowLoopback)
+	e[hk] = hv
 	if withRunner != nil {
 		rk, rv := actions.RunnerEntry(withRunner)
 		e[rk] = rv

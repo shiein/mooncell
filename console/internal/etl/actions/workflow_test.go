@@ -117,7 +117,8 @@ func setup(t *testing.T) (*fakeHost, *sql.DB, *sql.DB) {
 	h := &fakeHost{pipelines: map[string]*pipeline.Definition{}, workflows: map[string]*workflow.Definition{}}
 	pk, pv := pool.EnvEntry()
 	rk, rv := actions.RunnerEntry(h)
-	h.env = core.MapEnv{pk: pv, rk: rv}
+	hk, hv := core.HTTPAllowLoopbackEntry(true) // 测试服务器在回环
+	h.env = core.MapEnv{pk: pv, rk: rv, hk: hv}
 	a, _ := pool.Get(context.Background(), "A")
 	b, _ := pool.Get(context.Background(), "B")
 	return h, a.DB, b.DB

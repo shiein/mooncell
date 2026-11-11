@@ -33,6 +33,9 @@ type Config struct {
 	// FileRoot：csv_input/csv_output 等文件步骤的相对路径根目录（R1-B1），
 	// 默认 <数据库所在目录>/etl-files。文件步骤的 path 只能落在该目录内，对管理员同样生效。
 	FileRoot string
+	// HTTPAllowLoopback：http_input/http/notify 是否允许访问回环地址（R1-m3）。
+	// 默认 false：回环、链路本地、未指定地址在拨号层拒绝，防 SSRF 打本机服务。
+	HTTPAllowLoopback bool
 }
 
 func (c Config) normalized(dbPath string) Config {

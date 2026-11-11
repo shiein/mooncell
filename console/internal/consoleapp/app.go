@@ -167,6 +167,7 @@ func Run(distFS fs.FS, version string, args []string) {
 			Enabled: true, KeyFile: cfg.ETL.KeyFile, MaxConcurrentRuns: cfg.ETL.MaxConcurrentRuns,
 			RunLogLimit: cfg.ETL.RunLogLimit, RetentionDays: cfg.ETL.RetentionDays,
 			KeepPerDefinition: cfg.ETL.KeepPerDefinition, TempDir: cfg.ETL.TempDir, FileRoot: cfg.ETL.FileRoot,
+			HTTPAllowLoopback: cfg.ETL.HTTPAllowLoopback,
 		})
 		if err != nil {
 			log.Fatalf("[etl] 初始化失败: %v", err)

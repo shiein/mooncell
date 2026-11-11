@@ -97,7 +97,7 @@ func init() {
 			if timeout <= 0 {
 				timeout = 60
 			}
-			cli := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+			cli := core.GuardedHTTPClient(rc.Env, time.Duration(timeout)*time.Second)
 			resolve := func(name string) (any, bool) {
 				v, ok := rc.Vars.Get(name)
 				if !ok {
@@ -296,7 +296,9 @@ func jsonScalar(v any) any {
 }
 
 // expandVars 替换 ${name}（未知名保持原样由上层按 VarKinds 校验）。
-func expandVars(s string, resolve func(string) (any, bool)) string { return core.ExpandVars(s, resolve) }
+func expandVars(s string, resolve func(string) (any, bool)) string {
+	return core.ExpandVars(s, resolve)
+}
 
 // httpVars 收集 URL/头/正文里引用的 ${name}。
 func httpVars(c *HTTPInputConfig) []string {

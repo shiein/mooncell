@@ -161,7 +161,7 @@ func init() {
 			if timeout <= 0 {
 				timeout = 30
 			}
-			cli := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+			cli := core.GuardedHTTPClient(ec.Env, time.Duration(timeout)*time.Second)
 			ec.Log.Detail("请求 %s %s", method, u)
 			resp, err := cli.Do(req)
 			if err != nil {
@@ -349,7 +349,7 @@ func init() {
 					req.Header.Set(c.SecretHeader, core.ExpandVars(secret, resolve))
 				}
 			}
-			resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+			resp, err := core.GuardedHTTPClient(ec.Env, 15*time.Second).Do(req)
 			if err != nil {
 				return workflow.Outcome{}, fmt.Errorf("发送失败：%w", err)
 			}

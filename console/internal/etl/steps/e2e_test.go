@@ -38,7 +38,8 @@ func env(t *testing.T) (core.Env, *sql.DB) {
 		t.Fatal(err)
 	}
 	k, v := pool.EnvEntry()
-	return core.MapEnv{k: v}, h.DB
+	hk, hv := core.HTTPAllowLoopbackEntry(true) // httptest 服务器在回环
+	return core.MapEnv{k: v, hk: hv}, h.DB
 }
 
 // withFileRoot 在测试环境注入 file_root（csv 等文件步骤的相对路径根）。
