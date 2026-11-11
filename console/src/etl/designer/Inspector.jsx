@@ -65,6 +65,7 @@ function NodeInspector({ d, node }) {
     inputs: shape.inputs || {},
     vars: d.vars,
     pipelines: d.pipelines,
+    workflows: (d.workflows || []).filter((w) => w.id !== (d.meta && d.meta.id)), // 排除自身，防直接自引用
     schedules: d.scheduleCount,
     pathError: (path) => {
       const p = probs.find((x) => x.path === path && x.severity === 'error') || probs.find((x) => x.path && x.path.startsWith(path) && x.severity === 'error');

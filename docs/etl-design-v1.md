@@ -397,7 +397,13 @@ type Dialect interface {
 | `set_vars` | 设置变量（表达式） | success / failure | 已实现 |
 | `wait` | 等待 | success | 已实现 |
 | `success` / `abort` | 成功 / 中止 | — | 已实现 |
-| `http` / `workflow` / `notify` | HTTP / 子作业 / 通知 | | TODO |
+| `http` | HTTP 请求 | success / failure | 已实现 |
+| `workflow` | 子作业（嵌套 ≤8 层） | success / failure | 已实现 |
+| `notify` | 通知（Webhook） | success / failure | 已实现 |
+
+* `http`：URL/请求头/正文支持 `${var}` 插值；`statusVar` 写状态码、`resultVar`+`dataPath` 写响应 JSON（子树序列化文本）、`extract` 按点路径取值转类型写变量；非 2xx、请求失败、提取路径缺失或类型转换失败均判失败。默认超时 30 秒。
+* `workflow`：经 `PipelineRunner.RunWorkflow` 走运行快照取被引定义（续跑语义与转换一致）；`params` 为对作业变量求值的表达式；子作业各节点状态以 `ParentNode` 挂在本作业项下归入同一运行；嵌套深度按 host 计数，超过 8 层判失败（防循环引用）。
+* `notify`：v1 为 Webhook——POST `template`（`${var}` 插值）到 `url`，可配请求头；`secretHeader`+`secret` 把凭据注入指定请求头，明文 `secret` 仅在提交时出现，保存定义时由服务层 `secret.Box` 以 `etl/notify/<defID>/<nodeID>` 为 AAD 密封为 `secretCipher` 并写回 `aadSuffix`，运行侧经 Env 注入的打开器解密；提交空凭据清除已存密文。邮件通知需要部署级 SMTP 配置，后续补充。
 
 ### 9.3 变量作用域链
 
@@ -551,5 +557,5 @@ src/etl/
 |---|---|
 | P0（本分支骨架） | 内核、编译、运行器、表达式、SQL 参数、凭据、存储、核心步骤 / 作业项、API、全部前端页面 |
 | P1 | 调度器完成、SSE 实时、预览完善、历史版本、真机三库类型映射认证、千万级压测与调优 |
-| P2 | 排序 / 去重(有序) / 合并记录 / 数据同步 / 流查询 / 值映射 / 更新 / 删除 / CSV / HTTP |
-| P3 | 并行副本、原生 upsert 加速、下推优化器、子作业、通知、角色授权 |
+| P2 | 排序 / 去重(有序) / 合并记录 / 数据同步 / 流查询 / 值映射 / 更新 / 删除 / CSV / HTTP / HTTP·子作业·通知作业项 |
+| P3 | 并行副本、原生 upsert 加速、下推优化器、角色授权 |

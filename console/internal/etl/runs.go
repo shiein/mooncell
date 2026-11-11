@@ -258,6 +258,8 @@ func applyParams(vars *core.Vars, decls []core.ParamDecl, overrides map[string]c
 func (s *Service) env(withRunner actions.PipelineRunner) core.Env {
 	pk, pv := s.pool.EnvEntry()
 	e := core.MapEnv{pk: pv}
+	sk, sv := actions.SecretEntry(s.box)
+	e[sk] = sv
 	if withRunner != nil {
 		rk, rv := actions.RunnerEntry(withRunner)
 		e[rk] = rv
@@ -416,9 +418,11 @@ func (s *Service) executeWorkflow(ctx context.Context, a *activeRun, vars *core.
 // pipelineHost 实现 actions.PipelineRunner：作业中运行转换，结果归入同一运行。
 // 被引定义优先取运行快照（defs）；快照没有（旧运行）时回落当前定义。
 type pipelineHost struct {
-	s    *Service
-	a    *activeRun
-	defs map[string]runRef
+	s     *Service
+	a     *activeRun
+	defs  map[string]runRef
+	mu    sync.Mutex
+	depth int // 子作业嵌套深度（并发分支各自计数取最大值）
 }
 
 // refDoc 取引用定义：快照优先，回落当前库（旧运行没有 refs）。
@@ -446,6 +450,89 @@ func (h *pipelineHost) PipelineParams(ctx context.Context, id string) (string, [
 		return "", nil, err
 	}
 	return d.Name, def.Params, nil
+}
+
+// maxSubWorkflowDepth 子作业嵌套上限（防循环引用）。
+const maxSubWorkflowDepth = 8
+
+func (h *pipelineHost) WorkflowParams(ctx context.Context, id string) (string, []core.ParamDecl, error) {
+	d, err := h.refDoc(id)
+	if err != nil {
+		return "", nil, err
+	}
+	if d.Kind != "workflow" {
+		return "", nil, errors.New("目标不是作业")
+	}
+	def, err := workflow.Decode(d.Doc)
+	if err != nil {
+		return "", nil, err
+	}
+	return d.Name, def.Params, nil
+}
+
+func (h *pipelineHost) RunWorkflow(ctx context.Context, ec *workflow.ExecContext, id string, params map[string]core.Value) (actions.WorkflowSummary, error) {
+	h.mu.Lock()
+	h.depth++
+	depth := h.depth
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		h.depth--
+		h.mu.Unlock()
+	}()
+	if depth > maxSubWorkflowDepth {
+		return actions.WorkflowSummary{}, fmt.Errorf("子作业嵌套超过 %d 层（可能存在循环引用）", maxSubWorkflowDepth)
+	}
+	d, err := h.refDoc(id)
+	if err != nil {
+		return actions.WorkflowSummary{}, fmt.Errorf("读取作业失败：%w", err)
+	}
+	if d.Kind != "workflow" {
+		return actions.WorkflowSummary{}, errors.New("目标不是作业")
+	}
+	def, err := workflow.Decode(d.Doc)
+	if err != nil {
+		return actions.WorkflowSummary{}, err
+	}
+	ec.Log.Info("运行子作业「%s」（版本 %d）", d.Name, d.Revision)
+	e := h.s.env(h)
+	plan := workflow.Compile(ctx, def, workflow.CompileOptions{Env: e})
+	if plan.Problems.HasErrors() {
+		return actions.WorkflowSummary{}, fmt.Errorf("子作业编译失败：%v", plan.Problems.First())
+	}
+	vars := core.NewVars(ec.Vars)
+	if err := applyParams(vars, def.Params, params); err != nil {
+		return actions.WorkflowSummary{}, err
+	}
+	parent := ec.NodeID
+	for _, pn := range plan.Nodes {
+		h.a.putNode(h.s, store.RunNode{RunID: h.a.run.ID, NodeID: pn.Node.ID, NodeName: pn.Node.Name, NodeType: pn.Node.Type, ParentNode: parent, Status: workflow.NodePending}, false)
+	}
+	res := workflow.Run(ctx, plan, workflow.RunOptions{
+		RunID: h.a.run.ID, Env: e, Vars: vars, Log: ec.Log.WithPrefix(parent+"/"),
+		OnNode: func(ev workflow.NodeEvent) {
+			h.a.updateNode(h.s, parent, ev.NodeID, func(n *store.RunNode) {
+				n.Status, n.Port, n.Attempt, n.Error = ev.Status, ev.Port, ev.Attempt, ev.Error
+				n.StartedAt, n.FinishedAt = ev.StartedAt, ev.FinishedAt
+				if ev.Vars != nil {
+					n.OutputVars = ev.Vars
+				}
+			})
+		},
+	})
+	h.a.flushNodes(h.s, parent)
+	var sum actions.WorkflowSummary
+	for _, ev := range res.Nodes {
+		switch ev.Status {
+		case workflow.NodeSucceeded, workflow.NodeReused:
+			sum.Succeeded++
+		case workflow.NodeFailed:
+			sum.Failed++
+		case workflow.NodeSkipped, workflow.NodeCanceled, workflow.NodePending:
+			sum.Skipped++
+		}
+	}
+	return sum, res.Err
 }
 
 func (h *pipelineHost) RunPipeline(ctx context.Context, ec *workflow.ExecContext, id string, params map[string]core.Value) (actions.PipelineSummary, error) {

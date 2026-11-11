@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"mooncell/console/internal/etl/actions"
 	"mooncell/console/internal/etl/conn"
 	"mooncell/console/internal/etl/core"
 	"mooncell/console/internal/etl/expr"
@@ -395,6 +396,62 @@ type defInput struct {
 	Revision    int             `json:"revision"`
 }
 
+// sealDocSecrets 把作业文档中 notify 作业项的明文凭据密封为密文再入库。
+// AAD = actions.NotifySecretAADPrefix + defID + "/" + nodeID，并把该后缀写回配置（运行侧开密用）。
+func (h *handlers) sealDocSecrets(defID, kind string, doc json.RawMessage) (json.RawMessage, error) {
+	if kind != "workflow" || h.s.box == nil {
+		return doc, nil
+	}
+	def, err := workflow.Decode(doc)
+	if err != nil {
+		return doc, nil // checkDoc 已校验过格式；这里防御性放行
+	}
+	changed := false
+	for i := range def.Nodes {
+		n := &def.Nodes[i]
+		if n.Type != "notify" {
+			continue
+		}
+		var cfg map[string]json.RawMessage
+		if err := json.Unmarshal(n.Config, &cfg); err != nil {
+			continue
+		}
+		var secret string
+		rawSecret, submitted := cfg["secret"]
+		_ = json.Unmarshal(rawSecret, &secret)
+		delete(cfg, "secret")
+		dirty := false
+		if secret != "" {
+			ct, err := h.s.box.Seal(secret, actions.NotifySecretAADPrefix+defID+"/"+n.ID)
+			if err != nil {
+				return nil, fmt.Errorf("密封通知凭据失败：%w", err)
+			}
+			cfg["secretCipher"], _ = json.Marshal(ct)
+			dirty = true
+		} else if submitted {
+			// 显式提交空凭据 = 清除
+			delete(cfg, "secretCipher")
+			delete(cfg, "aadSuffix")
+			dirty = true
+		}
+		if _, ok := cfg["secretCipher"]; ok {
+			sfx, _ := json.Marshal(defID + "/" + n.ID)
+			if string(cfg["aadSuffix"]) != string(sfx) {
+				cfg["aadSuffix"] = sfx
+				dirty = true
+			}
+		}
+		if dirty {
+			n.Config, _ = json.Marshal(cfg)
+			changed = true
+		}
+	}
+	if !changed {
+		return doc, nil
+	}
+	return json.Marshal(def)
+}
+
 func (h *handlers) listDefinitions(w http.ResponseWriter, r *http.Request) {
 	list, err := h.s.st.ListDefinitions(r.URL.Query().Get("kind"))
 	if err != nil {
@@ -430,7 +487,14 @@ func (h *handlers) createDefinition(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
-	d, err := h.s.st.CreateDefinition(store.Definition{Kind: in.Kind, Name: strings.TrimSpace(in.Name), Folder: in.Folder, Description: in.Description, Doc: in.Doc}, userOf(r))
+	// 预生成 ID：notify 凭据密封的 AAD 依赖 defID
+	newID := store.NewID(map[string]string{"pipeline": "pl_", "workflow": "wf_"}[in.Kind])
+	doc, err := h.sealDocSecrets(newID, in.Kind, in.Doc)
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	d, err := h.s.st.CreateDefinition(store.Definition{ID: newID, Kind: in.Kind, Name: strings.TrimSpace(in.Name), Folder: in.Folder, Description: in.Description, Doc: doc}, userOf(r))
 	if err != nil {
 		failErr(w, err)
 		return
@@ -460,7 +524,12 @@ func (h *handlers) updateDefinition(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
-	d, err := h.s.st.UpdateDefinition(store.Definition{ID: cur.ID, Kind: cur.Kind, Name: strings.TrimSpace(in.Name), Folder: in.Folder, Description: in.Description, Doc: in.Doc}, in.Revision, userOf(r))
+	doc, err := h.sealDocSecrets(cur.ID, cur.Kind, in.Doc)
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	d, err := h.s.st.UpdateDefinition(store.Definition{ID: cur.ID, Kind: cur.Kind, Name: strings.TrimSpace(in.Name), Folder: in.Folder, Description: in.Description, Doc: doc}, in.Revision, userOf(r))
 	if err != nil {
 		failErr(w, err)
 		return

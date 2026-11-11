@@ -295,54 +295,16 @@ func jsonScalar(v any) any {
 	}
 }
 
-// expandVars 替换 ${name}（简单文本替换；未知名保持原样由上层按 VarKinds 校验）。
-func expandVars(s string, resolve func(string) (any, bool)) string {
-	var b strings.Builder
-	for {
-		i := strings.Index(s, "${")
-		if i < 0 {
-			return b.String() + s
-		}
-		j := strings.Index(s[i:], "}")
-		if j < 0 {
-			return b.String() + s
-		}
-		b.WriteString(s[:i])
-		name := s[i+2 : i+j]
-		if v, ok := resolve(name); ok {
-			if sv, ok := v.(string); ok {
-				b.WriteString(sv)
-			} else {
-				b.WriteString(fmt.Sprint(v))
-			}
-		} else {
-			b.WriteString(s[i : i+j+1])
-		}
-		s = s[i+j+1:]
-	}
-}
+// expandVars 替换 ${name}（未知名保持原样由上层按 VarKinds 校验）。
+func expandVars(s string, resolve func(string) (any, bool)) string { return core.ExpandVars(s, resolve) }
 
 // httpVars 收集 URL/头/正文里引用的 ${name}。
 func httpVars(c *HTTPInputConfig) []string {
 	var out []string
-	scan := func(s string) {
-		for {
-			i := strings.Index(s, "${")
-			if i < 0 {
-				return
-			}
-			j := strings.Index(s[i:], "}")
-			if j < 0 {
-				return
-			}
-			out = append(out, s[i+2:i+j])
-			s = s[i+j+1:]
-		}
-	}
-	scan(c.URL)
-	scan(c.Body)
+	out = append(out, core.VarRefs(c.URL)...)
+	out = append(out, core.VarRefs(c.Body)...)
 	for _, v := range c.Headers {
-		scan(v)
+		out = append(out, core.VarRefs(v)...)
 	}
 	return out
 }

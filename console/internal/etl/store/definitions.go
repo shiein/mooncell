@@ -78,8 +78,11 @@ func (s *Store) GetDefinition(id string) (Definition, error) {
 }
 
 // CreateDefinition 新建定义（revision=1）并记录首个版本。
+// d.ID 为空时自动生成（调用方需要先行知道 ID 时可预填，如先密封 doc 内凭据）。
 func (s *Store) CreateDefinition(d Definition, user string) (Definition, error) {
-	d.ID = NewID(map[string]string{"pipeline": "pl_", "workflow": "wf_"}[d.Kind])
+	if d.ID == "" {
+		d.ID = NewID(map[string]string{"pipeline": "pl_", "workflow": "wf_"}[d.Kind])
+	}
 	ts := now()
 	tx, err := s.db.Begin()
 	if err != nil {

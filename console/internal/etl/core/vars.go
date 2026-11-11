@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -154,6 +155,50 @@ func (v *Vars) Flatten() map[string]Value {
 		}
 	}
 	return out
+}
+
+// ExpandVars 替换文本中的 ${name}（未知名保持原样，由上层按 VarKinds 校验）。
+// resolve 返回任意值；字符串直写，其余 fmt.Sprint。
+func ExpandVars(s string, resolve func(string) (any, bool)) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "${")
+		if i < 0 {
+			return b.String() + s
+		}
+		j := strings.Index(s[i:], "}")
+		if j < 0 {
+			return b.String() + s
+		}
+		b.WriteString(s[:i])
+		if v, ok := resolve(s[i+2 : i+j]); ok {
+			if sv, ok := v.(string); ok {
+				b.WriteString(sv)
+			} else {
+				b.WriteString(fmt.Sprint(v))
+			}
+		} else {
+			b.WriteString(s[i : i+j+1])
+		}
+		s = s[i+j+1:]
+	}
+}
+
+// VarRefs 收集文本中引用的 ${name}。
+func VarRefs(s string) []string {
+	var out []string
+	for {
+		i := strings.Index(s, "${")
+		if i < 0 {
+			return out
+		}
+		j := strings.Index(s[i:], "}")
+		if j < 0 {
+			return out
+		}
+		out = append(out, s[i+2:i+j])
+		s = s[i+j+1:]
+	}
 }
 
 // Names 返回可见变量名（排序）。

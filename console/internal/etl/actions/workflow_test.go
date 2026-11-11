@@ -5,7 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,11 +22,14 @@ import (
 	"mooncell/console/internal/etl/workflow"
 )
 
-// fakeHost 同时扮演连接池宿主与转换执行器。
+// fakeHost 同时扮演连接池宿主、转换执行器与子作业执行器。
 type fakeHost struct {
 	env       core.MapEnv
 	pipelines map[string]*pipeline.Definition
+	workflows map[string]*workflow.Definition
 	runs      atomic.Int32
+	wfRuns    atomic.Int32
+	depth     atomic.Int32
 }
 
 func (h *fakeHost) PipelineParams(ctx context.Context, id string) (string, []core.ParamDecl, error) {
@@ -50,6 +57,48 @@ func (h *fakeHost) RunPipeline(ctx context.Context, ec *workflow.ExecContext, id
 	return sum, res.Err
 }
 
+func (h *fakeHost) WorkflowParams(ctx context.Context, id string) (string, []core.ParamDecl, error) {
+	d, ok := h.workflows[id]
+	if !ok {
+		return "", nil, fmt.Errorf("no workflow %s", id)
+	}
+	return id, d.Params, nil
+}
+
+func (h *fakeHost) RunWorkflow(ctx context.Context, ec *workflow.ExecContext, id string, params map[string]core.Value) (actions.WorkflowSummary, error) {
+	if d := h.depth.Add(1); d > 8 {
+		h.depth.Add(-1)
+		return actions.WorkflowSummary{}, fmt.Errorf("子作业嵌套超过 8 层")
+	}
+	defer h.depth.Add(-1)
+	h.wfRuns.Add(1)
+	def, ok := h.workflows[id]
+	if !ok {
+		return actions.WorkflowSummary{}, fmt.Errorf("no workflow %s", id)
+	}
+	vars := core.NewVars(ec.Vars)
+	for k, v := range params {
+		vars.Set(k, v)
+	}
+	plan := workflow.Compile(ctx, def, workflow.CompileOptions{Env: h.env})
+	if plan.Problems.HasErrors() {
+		return actions.WorkflowSummary{}, fmt.Errorf("子作业编译失败：%v", plan.Problems.First())
+	}
+	res := workflow.Run(ctx, plan, workflow.RunOptions{Env: h.env, Vars: vars, Log: ec.Log})
+	var sum actions.WorkflowSummary
+	for _, ev := range res.Nodes {
+		switch ev.Status {
+		case workflow.NodeSucceeded, workflow.NodeReused:
+			sum.Succeeded++
+		case workflow.NodeFailed:
+			sum.Failed++
+		default:
+			sum.Skipped++
+		}
+	}
+	return sum, res.Err
+}
+
 func setup(t *testing.T) (*fakeHost, *sql.DB, *sql.DB) {
 	t.Helper()
 	dir := t.TempDir()
@@ -65,7 +114,7 @@ func setup(t *testing.T) (*fakeHost, *sql.DB, *sql.DB) {
 		return c, "", nil
 	})
 	t.Cleanup(pool.Close)
-	h := &fakeHost{pipelines: map[string]*pipeline.Definition{}}
+	h := &fakeHost{pipelines: map[string]*pipeline.Definition{}, workflows: map[string]*workflow.Definition{}}
 	pk, pv := pool.EnvEntry()
 	rk, rv := actions.RunnerEntry(h)
 	h.env = core.MapEnv{pk: pv, rk: rv}
@@ -268,3 +317,155 @@ func TestWorkflowCompileProblems(t *testing.T) {
 		}
 	}
 }
+
+// HTTP 作业项：提取响应字段写变量，非 2xx 走失败分支。
+func TestHTTPAction(t *testing.T) {
+	h, _, _ := setup(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			w.WriteHeader(503)
+			return
+		}
+		if r.Header.Get("X-Token") != "tk-9" {
+			w.WriteHeader(401)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"total":42,"token":"abc-1"}}`)
+	}))
+	defer srv.Close()
+
+	def := &workflow.Definition{
+		Nodes: []workflow.Node{
+			wnode("start", "start", nil),
+			wnode("call", "http", map[string]any{
+				"url": srv.URL + "/api?tag=${who}", "method": "GET",
+				"headers": map[string]string{"X-Token": "tk-9"}, "statusVar": "code",
+				"extract": []map[string]any{
+					{"path": "data.total", "var": "total", "kind": "integer"},
+					{"path": "data.token", "var": "tok", "kind": "string"},
+				}}),
+			wnode("big", "condition", map[string]any{"expr": "total > 10 && code == 200 && tok == 'abc-1'"}),
+			wnode("ok", "success", nil),
+			wnode("bad", "abort", map[string]any{"message": "提取结果不对"}),
+		},
+		Hops: []workflow.Hop{
+			whop("start", "success", "call"), whop("call", "success", "big"),
+			whop("big", "true", "ok"), whop("big", "false", "bad"),
+		},
+	}
+	def.Params = []core.ParamDecl{{Name: "who", Kind: core.KindString, Default: &core.Value{Kind: core.KindString, V: "etl"}}}
+	res := runWF(t, h, def)
+	if res.Status != workflow.NodeSucceeded || res.Nodes["ok"].Status != workflow.NodeSucceeded {
+		t.Fatalf("HTTP 提取+条件应成功：%v ok=%s", res.Err, res.Nodes["ok"].Status)
+	}
+	if res.Nodes["call"].Vars["total"].V != int64(42) || res.Nodes["call"].Vars["code"].V != int64(200) {
+		t.Fatalf("变量提取错误：%+v", res.Nodes["call"].Vars)
+	}
+
+	// 非 2xx → 失败，失败连线处理则作业成功
+	def2 := &workflow.Definition{
+		Nodes: []workflow.Node{
+			wnode("start", "start", nil),
+			wnode("call", "http", map[string]any{"url": srv.URL + "/fail"}),
+			wnode("onfail", "success", nil),
+		},
+		Hops: []workflow.Hop{whop("start", "success", "call"), whop("call", "failure", "onfail")},
+	}
+	res = runWF(t, h, def2)
+	if res.Status != workflow.NodeSucceeded || res.Nodes["call"].Status != workflow.NodeFailed || res.Nodes["onfail"].Status != workflow.NodeSucceeded {
+		t.Fatalf("503 应失败并被 failure 连线处理：%v call=%s onfail=%s", res.Err, res.Nodes["call"].Status, res.Nodes["onfail"].Status)
+	}
+}
+
+// 子作业：参数表达式求值后传入；嵌套过深报错。
+func TestSubWorkflow(t *testing.T) {
+	h, a, _ := setup(t)
+	exec(t, a, `CREATE TABLE log (msg TEXT)`)
+
+	h.workflows["child"] = &workflow.Definition{
+		Params: []core.ParamDecl{{Name: "n", Kind: core.KindInteger}},
+		Nodes: []workflow.Node{
+			wnode("start", "start", nil),
+			wnode("w", "sql", map[string]any{"connection": "A", "sql": "insert into log values ('child-' || ${n})"}),
+		},
+		Hops: []workflow.Hop{whop("start", "success", "w")},
+	}
+	h.workflows["self"] = &workflow.Definition{
+		Nodes: []workflow.Node{wnode("start", "start", nil), wnode("w", "workflow", map[string]any{"workflow": "self"})},
+		Hops:  []workflow.Hop{whop("start", "success", "w")},
+	}
+
+	parent := &workflow.Definition{
+		Nodes: []workflow.Node{
+			wnode("start", "start", nil),
+			wnode("sv", "set_vars", map[string]any{"assign": []map[string]any{{"var": "base", "kind": "integer", "expr": "5"}}}),
+			wnode("sub", "workflow", map[string]any{"workflow": "child", "params": map[string]string{"n": "base + 2"}}),
+			wnode("end", "success", nil),
+		},
+		Hops: []workflow.Hop{whop("start", "success", "sv"), whop("sv", "success", "sub"), whop("sub", "success", "end")},
+	}
+	res := runWF(t, h, parent)
+	if res.Status != workflow.NodeSucceeded {
+		t.Fatalf("子作业应成功：%v", res.Err)
+	}
+	var msg string
+	if err := a.QueryRow(`SELECT msg FROM log`).Scan(&msg); err != nil || msg != "child-7" {
+		t.Fatalf("子作业参数求值错误：msg=%q err=%v", msg, err)
+	}
+
+	// 自引用 → 嵌套上限失败
+	loop := &workflow.Definition{
+		Nodes: []workflow.Node{wnode("start", "start", nil), wnode("w", "workflow", map[string]any{"workflow": "self"})},
+		Hops:  []workflow.Hop{whop("start", "success", "w")},
+	}
+	res = runWF(t, h, loop)
+	if res.Status != workflow.NodeFailed || !strings.Contains(fmt.Sprint(res.Err), "嵌套") {
+		t.Fatalf("循环子作业应失败并提示嵌套：%v", res.Err)
+	}
+}
+
+// 通知：Webhook 收到模板正文与明文凭据注入的头；密文路径走注入的打开器。
+func TestNotify(t *testing.T) {
+	h, _, _ := setup(t)
+	var gotAuth, gotBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		b, _ := io.ReadAll(r.Body)
+		gotBody.Store(string(b))
+	}))
+	defer srv.Close()
+
+	// 密文路径：注入假打开器
+	sk, sv := actions.SecretEntry(openerFunc(func(sealed, aad string) (string, error) {
+		return "Bearer " + sealed, nil
+	}))
+	h.env[sk] = sv
+
+	def := &workflow.Definition{
+		Nodes: []workflow.Node{
+			wnode("start", "start", nil),
+			wnode("sv", "set_vars", map[string]any{"assign": []map[string]any{{"var": "rid", "kind": "string", "expr": "'r1'"}}}),
+			wnode("n", "notify", map[string]any{
+				"url":          srv.URL + "/hook",
+				"template":     `{"run":"${rid}","ok":true}`,
+				"secretHeader": "Authorization", "secretCipher": "sealed-token",
+			}),
+		},
+		Hops: []workflow.Hop{whop("start", "success", "sv"), whop("sv", "success", "n")},
+	}
+	res := runWF(t, h, def)
+	if res.Status != workflow.NodeSucceeded {
+		t.Fatalf("通知应成功：%v", res.Err)
+	}
+	if gotAuth.Load() != "Bearer sealed-token" {
+		t.Fatalf("凭据头错误：%v", gotAuth.Load())
+	}
+	if body := gotBody.Load().(string); !strings.Contains(body, `"run":"r1"`) {
+		t.Fatalf("正文模板未替换变量：%s", body)
+	}
+}
+
+type openerFunc func(string, string) (string, error)
+
+func (f openerFunc) Open(sealed, aad string) (string, error) { return f(sealed, aad) }

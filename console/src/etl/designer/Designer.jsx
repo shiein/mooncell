@@ -53,6 +53,7 @@ function Designer({ defId, onBack, onOpenRun }) {
   const [previewVals, setPreviewVals] = React.useState({}); // 预览参数输入（文本）；空 → 用声明默认值
   const [live, setLive] = React.useState({ runId: null, run: null, nodes: {}, logs: [] });
   const [pipelines, setPipelines] = React.useState([]);
+  const [workflows, setWorkflows] = React.useState([]);
   const [scheduleCount, setScheduleCount] = React.useState(null);
   const [runDialog, setRunDialog] = React.useState(false);
   const [versionsOpen, setVersionsOpen] = React.useState(false);
@@ -70,7 +71,10 @@ function Designer({ defId, onBack, onOpenRun }) {
       setRfNodes(toFlowNodes(nd, d.kind));
       setDirty(false);
       history.current = { past: [], future: [], last: 0 };
-      if (d.kind === 'workflow') etlApi.definitions('pipeline').then(setPipelines).catch(() => {});
+      if (d.kind === 'workflow') {
+        etlApi.definitions('pipeline').then(setPipelines).catch(() => {});
+        etlApi.definitions('workflow').then(setWorkflows).catch(() => {});
+      }
       etlApi.schedules(d.id).then((l) => setScheduleCount(l.length)).catch(() => {});
     } catch (e) {
       setLoadErr(e.message || '加载失败');
@@ -432,7 +436,7 @@ function Designer({ defId, onBack, onOpenRun }) {
   const d = {
     kind, catalog, doc, meta, setMeta, selection, updateDoc, updateNode, updateHop, removeNodes, removeHops,
     problems, allProblems: validation.problems, nodeSchemas: validation.nodes, hopFields: validation.hops, vars: validation.vars,
-    pipelines, scheduleCount, drawer, setDrawer, preview, previewVals, setPreviewVals, runPreview, live, focusNode, validating, validated,
+    pipelines, workflows, scheduleCount, drawer, setDrawer, preview, previewVals, setPreviewVals, runPreview, live, focusNode, validating, validated,
     openRun: onOpenRun,
   };
   const saveState = saving ? 'saving' : dirty ? 'dirty' : 'saved';

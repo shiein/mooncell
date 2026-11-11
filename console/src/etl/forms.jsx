@@ -699,43 +699,150 @@ registerForm('workflow', 'start', ({ ctx }) => (
   </div>
 ));
 
-registerForm('workflow', 'pipeline', ({ cfg, set, ctx }) => {
+// 请求头编辑器：map ↔ ListEditor 行。
+function HeadersEditor({ map, onChange, title }) {
+  return (
+    <Section title={title || '请求头'}>
+      <ListEditor
+        columns={[{ label: '名称' }, { label: '值' }]}
+        rows={Object.entries(map || {}).map(([k, v]) => ({ k, v }))}
+        onChange={(rs) => onChange(Object.fromEntries(rs.filter((r) => r.k).map((r) => [r.k, r.v])))}
+        onAdd={() => onChange({ ...(map || {}), '': '' })}
+        empty="无请求头"
+        renderRow={(r, up) => (
+          <React.Fragment>
+            <input className="input mono" value={r.k} placeholder="Authorization" onChange={(e) => up({ k: e.target.value })} />
+            <input className="input mono" value={r.v} placeholder="值，可用 ${var}" onChange={(e) => up({ v: e.target.value })} />
+          </React.Fragment>
+        )} />
+    </Section>
+  );
+}
+
+// 引用定义（转换/作业）的参数映射子表单。
+function DefParamsForm({ defId, map, ctx, onChange }) {
   const [params, setParams] = React.useState(null);
   React.useEffect(() => {
     setParams(null);
-    if (!cfg.pipeline) return;
-    etlApi.definition(cfg.pipeline).then((d) => setParams((d.doc && d.doc.params) || [])).catch(() => setParams([]));
-  }, [cfg.pipeline]);
+    if (!defId) return;
+    etlApi.definition(defId).then((d) => setParams((d.doc && d.doc.params) || [])).catch(() => setParams([]));
+  }, [defId]);
+  return (
+    <Section title="参数" hint="值为对作业变量求值的表达式，如 maxTs">
+      {params == null ? <div className="etl-muted">读取参数…</div> : null}
+      {params && !params.length ? <div className="etl-muted">该定义没有声明参数。</div> : null}
+      {(params || []).map((p) => (
+        <div key={p.name}>
+          <label className="field-label">{p.name} <span className="etl-muted">· {KIND_LABEL[p.kind]}{p.required ? ' · 必填' : ''}</span></label>
+          <ExpressionEditor value={map[p.name] || ''} catalog={ctx.catalog} fields={[]} vars={ctx.vars}
+            placeholder={p.default ? `默认 ${p.default.value}` : '如 maxTs 或 addDays(today(), -1)'}
+            error={ctx.pathError(`params.${p.name}`)}
+            onChange={(v) => {
+              const next = { ...map };
+              if (v) next[p.name] = v; else delete next[p.name];
+              onChange(next);
+            }} />
+        </div>
+      ))}
+    </Section>
+  );
+}
+
+registerForm('workflow', 'pipeline', ({ cfg, set, ctx }) => {
   const list = ctx.pipelines || [];
-  const map = cfg.params || {};
   return (
     <React.Fragment>
       <Field label="转换">
         <Select value={cfg.pipeline || ''} onChange={(pipeline) => set({ pipeline, params: {} })}
           options={[{ value: '', label: list.length ? '选择转换…' : '尚无转换' }, ...list.map((p) => ({ value: p.id, label: p.name }))]} />
       </Field>
-      {cfg.pipeline ? (
-        <Section title="参数" hint="值为对作业变量求值的表达式，如 maxTs">
-          {params == null ? <div className="etl-muted">读取参数…</div> : null}
-          {params && !params.length ? <div className="etl-muted">该转换没有声明参数。</div> : null}
-          {(params || []).map((p) => (
-            <div key={p.name}>
-              <label className="field-label">{p.name} <span className="etl-muted">· {KIND_LABEL[p.kind]}{p.required ? ' · 必填' : ''}</span></label>
-              <ExpressionEditor value={map[p.name] || ''} catalog={ctx.catalog} fields={[]} vars={ctx.vars}
-                placeholder={p.default ? `默认 ${p.default.value}` : '如 maxTs 或 addDays(today(), -1)'}
-                error={ctx.pathError(`params.${p.name}`)}
-                onChange={(v) => {
-                  const next = { ...map };
-                  if (v) next[p.name] = v; else delete next[p.name];
-                  set({ params: next });
-                }} />
-            </div>
-          ))}
-        </Section>
-      ) : null}
+      {cfg.pipeline ? <DefParamsForm defId={cfg.pipeline} map={cfg.params || {}} ctx={ctx} onChange={(params) => set({ params })} /> : null}
     </React.Fragment>
   );
 });
+
+registerForm('workflow', 'workflow', ({ cfg, set, ctx }) => {
+  const list = ctx.workflows || [];
+  return (
+    <React.Fragment>
+      <Field label="作业" hint="嵌套上限 8 层；子作业节点状态归入本次运行">
+        <Select value={cfg.workflow || ''} onChange={(workflow) => set({ workflow, params: {} })}
+          options={[{ value: '', label: list.length ? '选择作业…' : '尚无其他作业' }, ...list.map((w) => ({ value: w.id, label: w.name }))]} />
+      </Field>
+      {cfg.workflow ? <DefParamsForm defId={cfg.workflow} map={cfg.params || {}} ctx={ctx} onChange={(params) => set({ params })} /> : null}
+    </React.Fragment>
+  );
+});
+
+registerForm('workflow', 'http', ({ cfg, set, ctx }) => {
+  const heads = cfg.headers || {};
+  const rows = cfg.extract || [];
+  return (
+    <React.Fragment>
+      <div className="etl-row2">
+        <Field label="方法">
+          <Select value={cfg.method || 'GET'} onChange={(method) => set({ method })}
+            options={['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'].map((m) => ({ value: m, label: m }))} />
+        </Field>
+        <Field label="超时（秒）"><input className="input" type="number" min="1" value={cfg.timeout ?? 30} onChange={(e) => set({ timeout: num(e.target.value, 30) })} /></Field>
+      </div>
+      <Field label="URL" hint="可引用变量，如 ${baseUrl}/sync">
+        <input className="input mono" value={cfg.url || ''} placeholder="https://…" onChange={(e) => set({ url: e.target.value })} />
+        {ctx.pathError('url') ? <div className="field-hint" style={{ color: 'var(--error)' }}>{ctx.pathError('url')}</div> : null}
+      </Field>
+      <HeadersEditor map={heads} onChange={(headers) => set({ headers })} />
+      {cfg.method && cfg.method !== 'GET' ? (
+        <Section title="请求正文" hint="可引用变量">
+          <textarea className="input mono" rows={4} value={cfg.body || ''} onChange={(e) => set({ body: e.target.value })} />
+        </Section>
+      ) : null}
+      <div className="etl-row2">
+        <Field label="状态码写入变量"><input className="input" value={cfg.statusVar || ''} placeholder="如 code" onChange={(e) => set({ statusVar: e.target.value })} /></Field>
+        <Field label="响应写入变量" hint="可配 dataPath 取子树">
+          <input className="input" value={cfg.resultVar || ''} placeholder="如 resp" onChange={(e) => set({ resultVar: e.target.value })} />
+        </Field>
+      </div>
+      {cfg.resultVar ? (
+        <Field label="数据路径" hint="响应 JSON 内的点路径，如 data.items；留空取整体">
+          <input className="input" value={cfg.dataPath || ''} onChange={(e) => set({ dataPath: e.target.value })} />
+        </Field>
+      ) : null}
+      <Section title="提取字段 → 变量" hint="按点路径从响应 JSON 取值并转换类型">
+        <ListEditor
+          columns={[{ label: '路径' }, { label: '变量名' }, { label: '类型', width: '104px' }]}
+          rows={rows} onChange={(extract) => set({ extract })}
+          onAdd={() => set({ extract: [...rows, { path: '', var: '', kind: 'string' }] })}
+          empty="无需提取时留空"
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <input className="input" value={r.path} placeholder="如 data.total" onChange={(e) => up({ path: e.target.value })} />
+              <input className="input" value={r.var} placeholder="变量" onChange={(e) => up({ var: e.target.value })} />
+              <KindSelect value={r.kind} onChange={(kind) => up({ kind })} />
+            </React.Fragment>
+          )} />
+      </Section>
+    </React.Fragment>
+  );
+});
+
+registerForm('workflow', 'notify', ({ cfg, set }) => (
+  <React.Fragment>
+    <Field label="Webhook 地址" hint="POST JSON 到此地址，可引用变量">
+      <input className="input mono" value={cfg.url || ''} placeholder="https://…" onChange={(e) => set({ url: e.target.value })} />
+    </Field>
+    <Section title="正文模板" hint="可引用变量，如运行完成：${msg}">
+      <textarea className="input mono" rows={5} value={cfg.template || ''} onChange={(e) => set({ template: e.target.value })} />
+    </Section>
+    <HeadersEditor map={cfg.headers || {}} title="额外请求头" onChange={(headers) => set({ headers })} />
+    <div className="etl-row2">
+      <Field label="凭据请求头" hint="如 Authorization"><input className="input mono" value={cfg.secretHeader || ''} onChange={(e) => set({ secretHeader: e.target.value })} /></Field>
+      <Field label="凭据" hint={cfg.secretCipher ? '已加密保存；重新输入可更换；清空 = 删除' : '保存定义时加密存储'}>
+        <input className="input" type="password" value={cfg.secret || ''} placeholder={cfg.secretCipher ? '••••••（保持不变）' : '如 Bearer xxx'}
+          onChange={(e) => set({ secret: e.target.value })} />
+      </Field>
+    </div>
+  </React.Fragment>
+));
 
 registerForm('workflow', 'sql', ({ cfg, set, ctx }) => (
   <React.Fragment>

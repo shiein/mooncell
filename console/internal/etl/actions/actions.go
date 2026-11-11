@@ -18,15 +18,22 @@ import (
 
 // ---------------------------------------------------------------- 宿主接口
 
-// PipelineRunner 由 service 实现：在作业中运行一个转换（步骤度量与日志归入同一运行记录）。
+// PipelineRunner 由 service 实现：在作业中运行转换/子作业（度量、日志、节点状态归入同一运行记录）。
 type PipelineRunner interface {
 	PipelineParams(ctx context.Context, pipelineID string) (name string, params []core.ParamDecl, err error)
 	RunPipeline(ctx context.Context, ec *workflow.ExecContext, pipelineID string, params map[string]core.Value) (PipelineSummary, error)
+	WorkflowParams(ctx context.Context, workflowID string) (name string, params []core.ParamDecl, err error)
+	RunWorkflow(ctx context.Context, ec *workflow.ExecContext, workflowID string, params map[string]core.Value) (WorkflowSummary, error)
 }
 
 // PipelineSummary 是转换运行摘要。
 type PipelineSummary struct {
 	Read, Written, Rejected int64
+}
+
+// WorkflowSummary 是子作业运行摘要。
+type WorkflowSummary struct {
+	Succeeded, Failed, Skipped int64
 }
 
 type runnerKey struct{}
@@ -484,18 +491,6 @@ func init() {
 		},
 	}))
 
-	// 规划中（面板可见、置灰）
-	for _, m := range []core.Meta{
-		{ID: "http", Label: "HTTP 请求", Icon: "globe", Description: "调用 HTTP 接口，把响应中的值写入变量。"},
-		{ID: "workflow", Label: "子作业", Icon: "workflow", Description: "运行另一个作业。"},
-		{ID: "notify", Label: "通知", Icon: "bell", Description: "发送运行结果通知（邮件 / Webhook）。"},
-	} {
-		m.Maturity = core.MaturityPlanned
-		m.Order = 100
-		m.Inputs = []core.PortDecl{{Name: core.PortMain, Label: "输入"}}
-		m.Outputs = successPort
-		workflow.Actions.Register(workflow.DefineAction(workflow.ActionDefinition[struct{}]{Meta: m}))
-	}
 }
 
 // ---------------------------------------------------------------- 配置结构
