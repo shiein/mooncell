@@ -113,6 +113,10 @@ type AgentConfig struct {
 type ServerConfig struct {
 	Addr string `toml:"addr"`
 	Port int    `toml:"port"`
+	// TrustedProxies 可信反向代理的 IP/CIDR。只有对端命中此列表时才采信 X-Forwarded-For
+	// （取最右侧第一个非可信代理地址，要求代理配置 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for）。
+	// 默认空：一律使用 TCP 对端地址，转发头不可伪造来源。
+	TrustedProxies []string `toml:"trusted_proxies"`
 }
 
 type DatabaseConfig struct {

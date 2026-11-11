@@ -55,22 +55,24 @@ func parseExpiryDays(s string, allowPermanent bool) (int, error) {
 	}
 }
 
-// clientIP 取请求来源 IP:优先反代透传头(X-Forwarded-For 首段 / X-Real-IP),否则 RemoteAddr。
-// 内网工具,IP 仅作上传者标识(审计),不作鉴权依据,故接受反代头即可。
+// clientIP 取请求来源 IP（用于审计与限流）：默认只用 TCP 对端地址；
+// 对端是配置的可信反代时，按 X-Forwarded-For 从右往左取第一个非可信代理地址（客户端只能在左侧伪造）。
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i])
+	remote := remoteIP(r)
+	if !isTrustedProxy(remote) {
+		return remote
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(parts[i])
+		if net.ParseIP(ip) == nil {
+			break // 格式异常：不再向左采信
 		}
-		return strings.TrimSpace(xff)
+		if !isTrustedProxy(ip) {
+			return ip
+		}
 	}
-	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
-		return xr
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
+	return remote
 }
 
 // 文件柜单文件上限由 cabinet.max_upload_mb 配置(a.cabinetMaxBytes,默认 300MB)。ParseMultipartForm
@@ -340,7 +342,9 @@ func urlEscape(s string) string {
 // 未公开与不存在统一回 404，不给穷举者「码存在」的信号。
 func (a *api) lookupPublicCode(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 	now := time.Now()
-	key := remoteIP(r)
+	// 提取码未命中只看来源（无用户名维度），同机未配置反代时回环来源退化为全员共享计数——
+	// 宁可全员暂时被拒，也不能放任穷举；配置 trusted_proxies 后按真实来源计数。
+	key := clientIP(r)
 	if locked, wait := pubCodeLimiter.blocked(key, now); locked {
 		writeTooMany(w, wait, "提取码错误次数过多，请稍后再试")
 		return nil, false

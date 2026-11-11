@@ -144,3 +144,45 @@ func jsonInt(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+// 来源 IP：默认不采信转发头；对端为可信反代时取 XFF 最右侧第一个非可信地址（左侧伪造无效）。
+func TestClientIPTrustedProxies(t *testing.T) {
+	defer SetTrustedProxies(nil)
+	req := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+	SetTrustedProxies(nil)
+	if got := clientIP(req("203.0.113.5:1234", "1.2.3.4")); got != "203.0.113.5" {
+		t.Fatalf("未配置可信反代时不得采信 XFF，得 %s", got)
+	}
+	if got := limiterSourceKey(req("127.0.0.1:1234", "")); got != "" {
+		t.Fatalf("未配置可信反代时回环来源应跳过兜底限流，得 %q", got)
+	}
+	if err := SetTrustedProxies([]string{"127.0.0.1", "10.0.0.0/8"}); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ remote, xff, want string }{
+		{"127.0.0.1:1", "198.51.100.7", "198.51.100.7"},
+		{"127.0.0.1:1", "6.6.6.6, 198.51.100.7", "198.51.100.7"},  // 左侧伪造无效
+		{"127.0.0.1:1", "198.51.100.7, 10.1.2.3", "198.51.100.7"}, // 跳过链上可信代理
+		{"127.0.0.1:1", "", "127.0.0.1"},                          // 无 XFF
+		{"127.0.0.1:1", "garbage", "127.0.0.1"},                   // 非法值不采信
+		{"203.0.113.9:1", "198.51.100.7", "203.0.113.9"},          // 非可信对端：忽略 XFF
+	}
+	for _, c := range cases {
+		if got := clientIP(req(c.remote, c.xff)); got != c.want {
+			t.Errorf("clientIP(%s, %q) = %s, want %s", c.remote, c.xff, got, c.want)
+		}
+	}
+	if got := limiterSourceKey(req("127.0.0.1:1", "198.51.100.7")); got != "198.51.100.7" {
+		t.Fatalf("配置可信反代后兜底限流应按真实来源，得 %q", got)
+	}
+	if err := SetTrustedProxies([]string{"not-an-ip"}); err == nil {
+		t.Fatal("非法配置应报错")
+	}
+}

@@ -1,9 +1,11 @@
 package consoleapp
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -90,7 +92,62 @@ func (l *failLimiter) pruneLocked(now time.Time) {
 	}
 }
 
-// remoteIP 只取 TCP 对端地址（不可伪造）；clientIP 会信任 X-Forwarded-For，仅作标识。
+var (
+	trustedMu   sync.RWMutex
+	trustedNets []*net.IPNet
+)
+
+// SetTrustedProxies 配置可信反代（IP 或 CIDR）；非法项返回错误。
+func SetTrustedProxies(list []string) error {
+	var nets []*net.IPNet
+	for _, item := range list {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if !strings.Contains(item, "/") {
+			if ip := net.ParseIP(item); ip != nil {
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				item = fmt.Sprintf("%s/%d", ip.String(), bits)
+			}
+		}
+		_, n, err := net.ParseCIDR(item)
+		if err != nil {
+			return fmt.Errorf("server.trusted_proxies 非法项 %q", item)
+		}
+		nets = append(nets, n)
+	}
+	trustedMu.Lock()
+	trustedNets = nets
+	trustedMu.Unlock()
+	return nil
+}
+
+func isTrustedProxy(ip string) bool {
+	p := net.ParseIP(ip)
+	if p == nil {
+		return false
+	}
+	trustedMu.RLock()
+	defer trustedMu.RUnlock()
+	for _, n := range trustedNets {
+		if n.Contains(p) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTrustedProxies() bool {
+	trustedMu.RLock()
+	defer trustedMu.RUnlock()
+	return len(trustedNets) > 0
+}
+
+// remoteIP 只取 TCP 对端地址（不可伪造）。
 func remoteIP(r *http.Request) string {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
@@ -120,3 +177,13 @@ var (
 	// 免登录提取码：同一 TCP 来源 10 分钟内 20 次未命中锁 10 分钟。
 	pubCodeLimiter = newFailLimiter(20, 10*time.Minute, 10*time.Minute)
 )
+
+// limiterSourceKey 兜底限流的来源键。未配置可信反代时，回环来源可能是同机反代转发的所有用户，
+// 按它计数会让 100 次恶意失败锁死全员，故返回空（跳过兜底，仅保留「来源+用户名」限流）。
+func limiterSourceKey(r *http.Request) string {
+	ip := clientIP(r)
+	if p := net.ParseIP(ip); p != nil && p.IsLoopback() && !hasTrustedProxies() {
+		return ""
+	}
+	return ip
+}

@@ -72,8 +72,8 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 	// 防爆破：先查锁定再做 bcrypt（锁定期间不消耗 CPU）
 	now := time.Now()
 	pairKey := clientIP(r) + "\x00" + strings.ToLower(username)
-	remoteKey := remoteIP(r)
-	if locked, wait := loginRemoteLimiter.blocked(remoteKey, now); locked {
+	remoteKey := limiterSourceKey(r)
+	if locked, wait := loginRemoteLimiter.blocked(remoteKey, now); remoteKey != "" && locked {
 		writeTooMany(w, wait, "登录失败次数过多，请稍后再试")
 		return
 	}
@@ -83,7 +83,7 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !a.store.verifyUser(username, body.Password) {
 		lockedPair := loginPairLimiter.fail(pairKey, now)
-		lockedRemote := loginRemoteLimiter.fail(remoteKey, now)
+		lockedRemote := remoteKey != "" && loginRemoteLimiter.fail(remoteKey, now)
 		if lockedPair || lockedRemote {
 			a.store.appendAuditIP("system", "登录锁定", username, "连续失败·已锁定 15 分钟", clientIP(r))
 		}
