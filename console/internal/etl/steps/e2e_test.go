@@ -899,3 +899,186 @@ func TestInsertUpdateNoUpdateUpsert(t *testing.T) {
 		t.Fatalf("实际插入应为 2（冲突忽略 1）：%+v", m)
 	}
 }
+
+// P3.18 并行副本：distribute 上游把行轮询分发给各副本；copy 上游则每副本收全量。
+func TestNodeCopies(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE copied (seq INTEGER, w INTEGER)`)
+	gen := map[string]any{"limit": 999, "sequenceField": "seq"}
+	calc := map[string]any{"fields": []map[string]any{{"name": "w", "expr": "seq"}}}
+	out := map[string]any{
+		"connection": "db", "table": "copied", "commitSize": 128,
+		"fields": []map[string]any{{"stream": "seq", "column": "seq"}, {"stream": "w", "column": "w"}},
+	}
+
+	// distribute：行轮流分给 3 个副本，总数守恒
+	calcNode := node("calc", "calculator", calc)
+	calcNode.Copies = 3
+	genNode := node("gen", "generate_rows", gen)
+	genNode.Distribution = map[string]core.Distribution{"main": core.DistDistribute}
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{genNode, calcNode, node("out", "table_output", out)},
+		Hops:  []pipeline.Hop{hop("gen", "main", "calc"), hop("calc", "main", "out")},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM copied`); n != 999 {
+		t.Fatalf("distribute 总行数应守恒，实际 %d", n)
+	}
+	if m := res.Metrics["calc"]; m.Read != 999 {
+		t.Fatalf("calc 汇总读取应为 999，实际 %+v", m)
+	}
+
+	// copy：每个副本收到全量 → 下游 3 倍行数
+	mustExec(t, db, `DELETE FROM copied`)
+	def.Nodes[0].Distribution = nil
+	res = run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM copied`); n != 999*3 {
+		t.Fatalf("copy 模式每副本应收全量（3×999），实际 %d", n)
+	}
+}
+
+// P3.18 副本编译校验：源步骤/越界拒绝，有状态步骤告警。
+func TestNodeCopiesValidation(t *testing.T) {
+	e, _ := env(t)
+	gen := map[string]any{"limit": 10, "sequenceField": "seq"}
+
+	// 源步骤不可副本
+	src := node("gen", "generate_rows", gen)
+	src.Copies = 2
+	def := &pipeline.Definition{Nodes: []pipeline.Node{src}}
+	plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	if !plan.Problems.HasErrors() {
+		t.Fatal("源步骤设 copies>1 应编译报错")
+	}
+
+	// 越界
+	bad := node("calc", "calculator", map[string]any{"fields": []map[string]any{{"name": "w", "expr": "seq"}}})
+	bad.Copies = 99
+	def = &pipeline.Definition{
+		Nodes: []pipeline.Node{node("gen", "generate_rows", gen), bad},
+		Hops:  []pipeline.Hop{hop("gen", "main", "calc")},
+	}
+	plan = pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	if !plan.Problems.HasErrors() {
+		t.Fatal("copies 越界应编译报错")
+	}
+
+	// 有状态步骤副本 → 告警但可运行
+	st := node("uniq", "unique_hash", map[string]any{"keys": []string{"seq"}})
+	st.Copies = 2
+	def = &pipeline.Definition{
+		Nodes: []pipeline.Node{node("gen", "generate_rows", gen), st},
+		Hops:  []pipeline.Hop{hop("gen", "main", "uniq")},
+	}
+	plan = pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	if plan.Problems.HasErrors() {
+		t.Fatalf("有状态副本只应告警：%+v", plan.Problems)
+	}
+	found := false
+	for _, p := range plan.Problems {
+		if p.Code == "copies_stateful" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("应给出 copies_stateful 告警")
+	}
+}
+
+// P3.18 下推优化器：表输入→过滤→字段选择 折叠为源端 SQL。
+func TestPushdown(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (id INTEGER, name TEXT, grp INTEGER)`)
+	mustExec(t, db, `INSERT INTO src VALUES (1,'a',1),(2,'b',1),(3,'c',2),(4,'d',2)`)
+	mustExec(t, db, `CREATE TABLE dst (id INTEGER, label TEXT)`)
+
+	ti := map[string]any{"connection": "db", "sql": "SELECT id, name, grp FROM src"}
+	sel := map[string]any{"fields": []map[string]any{{"source": "id"}, {"source": "name", "name": "label"}}}
+	out := map[string]any{
+		"connection": "db", "table": "dst", "commitSize": 10,
+		"fields": []map[string]any{{"stream": "id", "column": "id"}, {"stream": "label", "column": "label"}},
+	}
+	mk := func(cond string) *pipeline.Definition {
+		return &pipeline.Definition{
+			Nodes: []pipeline.Node{
+				node("ti", "table_input", ti),
+				node("flt", "filter_rows", map[string]any{"condition": cond}),
+				node("sel", "select_fields", sel),
+				node("out", "table_output", out),
+			},
+			Hops: []pipeline.Hop{hop("ti", "main", "flt"), hop("flt", "true", "sel"), hop("sel", "main", "out")},
+		}
+	}
+
+	// 可下推：过滤条件白名单内 + 纯改名字段选择
+	def := mk(`grp == 2 and name != "d"`)
+	plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	if plan.Problems.HasErrors() {
+		t.Fatalf("%+v", plan.Problems)
+	}
+	def2, notes := pipeline.Pushdown(context.Background(), def, plan, e)
+	if len(notes) != 1 {
+		t.Fatalf("应产生 1 处下推，实际 %+v", notes)
+	}
+	var pushedSQL string
+	for _, n := range def2.Nodes {
+		if n.ID == "ti" {
+			var c struct {
+				SQL string `json:"sql"`
+			}
+			_ = json.Unmarshal(n.Config, &c)
+			pushedSQL = c.SQL
+		}
+	}
+	if !strings.Contains(pushedSQL, "WHERE") || !strings.Contains(pushedSQL, `"name" AS "label"`) {
+		t.Fatalf("改写 SQL 不符合预期：\n%s", pushedSQL)
+	}
+	if len(def2.Nodes) != 2 {
+		t.Fatalf("被并入的步骤应消失，剩余 %d 个节点", len(def2.Nodes))
+	}
+	res := run(t, e, def2, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 1 {
+		t.Fatalf("下推结果应只有 id=3 一行，实际 %d 行", n)
+	}
+	var id int
+	if err := db.QueryRow(`SELECT id FROM dst`).Scan(&id); err != nil || id != 3 {
+		t.Fatalf("应为 id=3，实际 %v %d", err, id)
+	}
+
+	// 否端口被使用 → 不下推
+	defNo := mk(`grp == 2`)
+	defNo.Hops[1].To = "sel"
+	defNo.Hops = append(defNo.Hops, pipeline.Hop{ID: "x", From: "flt", FromPort: "false", To: "out", ToPort: "main"})
+	plan = pipeline.Compile(context.Background(), defNo, pipeline.CompileOptions{Env: e})
+	_, notes = pipeline.Pushdown(context.Background(), defNo, plan, e)
+	if len(notes) != 0 {
+		t.Fatal("否端口有连线不应下推")
+	}
+
+	// var() 不可下推 → 保留原链路
+	defV := mk(`grp == var("g")`)
+	defV.Params = append(defV.Params, core.ParamDecl{Name: "g", Kind: core.KindInteger})
+	plan = pipeline.Compile(context.Background(), defV, pipeline.CompileOptions{Env: e})
+	_, notes = pipeline.Pushdown(context.Background(), defV, plan, e)
+	if len(notes) != 0 {
+		t.Fatal("含 var() 的条件不应下推")
+	}
+
+	// 表输入有多条出边 → 不改写
+	defM := mk(`grp == 2`)
+	defM.Hops = append(defM.Hops, pipeline.Hop{ID: "x2", From: "ti", FromPort: "main", To: "out", ToPort: "main"})
+	plan = pipeline.Compile(context.Background(), defM, pipeline.CompileOptions{Env: e})
+	_, notes = pipeline.Pushdown(context.Background(), defM, plan, e)
+	if len(notes) != 0 {
+		t.Fatal("源多分支时不应改写源 SQL")
+	}
+}

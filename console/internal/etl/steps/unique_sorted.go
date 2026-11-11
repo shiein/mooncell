@@ -35,6 +35,7 @@ func init() {
 	core.Steps.Register(core.Define(core.Definition[UniqueSortedConfig]{
 		Meta: core.Meta{
 			ID: "unique_sorted", Order: 35, Label: "去除重复记录", Category: core.CategoryTransform, Icon: "unique",
+			Stateful:    true,
 			Description: "保留每组相邻重复键的首行（输入须已按去重字段排序，一般前置「排序记录」）。流式单遍处理，不占内存。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},

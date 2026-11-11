@@ -98,6 +98,20 @@ function NodeInspector({ d, node }) {
       </div>
       <RoBanner d={d} />
       <div className="etl-insp-tabs"><Tabs tabs={tabs} active={tab} onChange={setTab} /></div>
+      {kind === 'pipeline' ? (
+        <div className="etl-inline" style={{ padding: '7px 14px', borderBottom: '1px solid var(--border)' }}>
+          <div className="etl-inline-label">
+            <span>并行副本</span>
+            <small>跑 {Math.max(1, node.copies || 1)} 份实例；上游「分发」轮询分行，「复制」则每份收全量。源步骤与全量状态步骤不适用</small>
+          </div>
+          <input type="number" className="input" style={{ width: 64 }} min={1} max={8} disabled={d.readOnly}
+            value={node.copies || 1}
+            onChange={(e) => {
+              const v = Math.max(1, Math.min(8, parseInt(e.target.value, 10) || 1));
+              d.updateNode(node.id, (n) => ({ ...n, copies: v > 1 ? v : undefined }));
+            }} />
+        </div>
+      ) : null}
       <div className="etl-insp-body" key={node.id + tab}>
         {tab === 'config' ? <Form cfg={node.config || {}} set={set} ctx={ctx} node={node} /> : null}
         {tab === 'advanced' ? (

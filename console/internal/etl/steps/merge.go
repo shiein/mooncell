@@ -85,6 +85,7 @@ func init() {
 	core.Steps.Register(core.Define(core.Definition[MergeRowsConfig]{
 		Meta: core.Meta{
 			ID: "merge_rows", Order: 60, Label: "合并记录", Category: core.CategoryJoin, Icon: "merge",
+			Stateful:    true,
 			Description: "把按键有序的两条流（参照 main / 对比 info）归并为一条，追加标志字段：identical/changed/new/deleted。常与「数据同步」配合做全量比对同步。",
 			Inputs: []core.PortDecl{
 				{Name: core.PortMain, Label: "参照", Required: true},
@@ -266,8 +267,8 @@ type SyncAfterMergeConfig struct {
 	Schema     string     `json:"schema"`
 	Table      string     `json:"table"`
 	FlagField  string     `json:"flagField"` // 默认 flag
-	Keys       []FieldMap `json:"keys"`    // 查找键（行字段 → 表列）
-	Fields     []FieldMap `json:"fields"`  // 插入/更新字段映射
+	Keys       []FieldMap `json:"keys"`      // 查找键（行字段 → 表列）
+	Fields     []FieldMap `json:"fields"`    // 插入/更新字段映射
 	CommitSize int        `json:"commitSize"`
 }
 
@@ -275,6 +276,7 @@ func init() {
 	core.Steps.Register(core.Define(core.Definition[SyncAfterMergeConfig]{
 		Meta: core.Meta{
 			ID: "sync_after_merge", Order: 50, Label: "数据同步", Category: core.CategoryOutput, Icon: "sync",
+			Stateful:    true,
 			Description: "按标志字段分流写入：new 插入、changed 更新、deleted 删除、identical 不动。用于「合并记录」之后把差异同步到目标表（全量同步，含删除）。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "已处理"}},

@@ -10,6 +10,9 @@ import (
 	"mooncell/console/internal/etl/core"
 )
 
+// MaxCopies 是单个步骤并行副本的上限。
+const MaxCopies = 8
+
 // Plan 是编译结果：拓扑有序的节点、每条连线的 schema 与全部问题。
 type Plan struct {
 	Def      *Definition
@@ -135,6 +138,22 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 			continue
 		}
 		pn.Config = cfg
+		// 并行副本校验
+		if n.Copies < 0 || n.Copies > MaxCopies {
+			errf(n.ID, "", "copies_range", "并行副本数须在 1–%d 之间（当前 %d）", MaxCopies, n.Copies)
+			pn.Blocked = true
+			continue
+		}
+		if n.Copies > 1 {
+			if len(t.Meta().Inputs) == 0 {
+				errf(n.ID, "", "copies_source", "「%s」是输入源步骤，副本会让每份都读全量数据；如需并行拆分请在源 SQL/上游用 distribute 分发", n.Name)
+				pn.Blocked = true
+				continue
+			}
+			if t.Meta().Stateful {
+				p.Problems = append(p.Problems, core.Problem{Severity: core.SeverityWarning, NodeID: n.ID, Code: "copies_stateful", Message: fmt.Sprintf("「%s」依赖全量/有序输入，%d 个副本间不共享状态，结果只是各自分片的局部正确", n.Name, n.Copies)})
+			}
+		}
 	}
 
 	// ---- 连线

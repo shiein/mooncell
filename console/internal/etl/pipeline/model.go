@@ -35,7 +35,10 @@ type Node struct {
 	Config  json.RawMessage `json:"config"`
 	// Distribution 按输出端口指定多连线分发方式；缺省 copy。
 	Distribution map[string]core.Distribution `json:"distribution,omitempty"`
-	UI           json.RawMessage              `json:"ui,omitempty"` // 画布坐标等，引擎不解释
+	// Copies 并行副本数（0/1 = 单实例）。>1 时运行器把该步骤展开为多份：
+	// 上游端口按 copy/distribute 分发到各副本，下游汇入各副本的输出。
+	Copies int             `json:"copies,omitempty"`
+	UI     json.RawMessage `json:"ui,omitempty"` // 画布坐标等，引擎不解释
 }
 
 // Hop 是连线。

@@ -131,11 +131,15 @@ type capPort struct {
 	truncated bool
 }
 
+// attach 在每个副本的输出端口挂收集通道；copies>1 时各副本汇入同一 capPort（行序不保证）。
 func (c *capture) attach(rc *core.RunContext, pn *PlanNode) {
 	for port, schema := range pn.Outputs {
+		cp := c.ports[port]
+		if cp == nil {
+			cp = &capPort{schema: schema}
+			c.ports[port] = cp
+		}
 		ch := make(chan core.Batch, 4)
-		cp := &capPort{schema: schema}
-		c.ports[port] = cp
 		// 子定义中目标节点没有下游：输出只接收集通道
 		targets := []core.Target{{Ch: ch}}
 		rc.Outputs[port] = core.NewOutPort(schema, core.DistCopy, targets, rc.Metrics)

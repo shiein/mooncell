@@ -159,6 +159,7 @@ func init() {
 	core.Steps.Register(core.Define(core.Definition[SortRowsConfig]{
 		Meta: core.Meta{
 			ID: "sort_rows", Order: 30, Label: "排序记录", Category: core.CategoryTransform, Icon: "sort",
+			Stateful:    true,
 			Description: "按指定字段排序整条流。超出内存预算时溢写临时文件做外部归并，行数不受内存限制。键值按类型自然序比较，NULL 最小（升序排前）。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},
@@ -395,9 +396,9 @@ func (h *mergeHeap) Len() int { return len(h.rs) }
 func (h *mergeHeap) Less(i, j int) bool {
 	return h.less(h.rs[i].cur, h.rs[j].cur) < 0
 }
-func (h *mergeHeap) Swap(i, j int)      { h.rs[i], h.rs[j] = h.rs[j], h.rs[i] }
-func (h *mergeHeap) Push(x any)         { h.rs = append(h.rs, x.(*runReader)) }
-func (h *mergeHeap) Pop() (v any)       { v = h.rs[len(h.rs)-1]; h.rs = h.rs[:len(h.rs)-1]; return v }
+func (h *mergeHeap) Swap(i, j int) { h.rs[i], h.rs[j] = h.rs[j], h.rs[i] }
+func (h *mergeHeap) Push(x any)    { h.rs = append(h.rs, x.(*runReader)) }
+func (h *mergeHeap) Pop() (v any)  { v = h.rs[len(h.rs)-1]; h.rs = h.rs[:len(h.rs)-1]; return v }
 
 // ---------------------------------------------------------------- 行编码
 

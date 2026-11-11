@@ -66,10 +66,13 @@ type Meta struct {
 	Inputs      []PortDecl `json:"inputs"`
 	Outputs     []PortDecl `json:"outputs"`
 	ErrorPort   bool       `json:"errorPort,omitempty"` // 支持把出错行转到 error 端口
-	Version     int        `json:"version"`             // 当前配置结构版本
-	Maturity    Maturity   `json:"maturity"`
-	Keywords    []string   `json:"keywords,omitempty"` // 面板搜索同义词（如 Kettle 原名）
-	Order       int        `json:"order"`              // 分类内的展示顺序（小在前），相同则按 ID
+	// Stateful：语义依赖看到全量/有序输入（排序、去重、匹配合并、变量落库等）。
+	// 设 copies>1 时编译给出告警——副本间不共享状态，结果只是各自分片的局部正确。
+	Stateful bool     `json:"stateful,omitempty"`
+	Version  int      `json:"version"` // 当前配置结构版本
+	Maturity Maturity `json:"maturity"`
+	Keywords []string `json:"keywords,omitempty"` // 面板搜索同义词（如 Kettle 原名）
+	Order    int      `json:"order"`              // 分类内的展示顺序（小在前），相同则按 ID
 }
 
 // InputPort 返回指定名称的输入端口声明。
@@ -221,6 +224,11 @@ type RunContext struct {
 	MemoryBudget int64 // 字节；有状态步骤超出须溢写或失败
 	Preview      bool  // 预览模式：输出步骤不写库，只把将写入的行转发到 main 输出
 	TempDir      func() (string, error)
+
+	// Copies/CopyIndex：并行副本总数与本副本序号（0 起）。copies=1 时 Copies=1、CopyIndex=0。
+	// 步骤据此可做基于序号的自分区（如按主键取模拆源）。
+	Copies    int
+	CopyIndex int
 
 	Inputs  map[string]*InPort
 	Outputs map[string]*OutPort

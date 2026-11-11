@@ -328,6 +328,7 @@ func init() {
 	core.Steps.Register(core.Define(core.Definition[UniqueHashConfig]{
 		Meta: core.Meta{
 			ID: "unique_hash", Order: 30, Label: "唯一行（哈希）", Category: core.CategoryTransform, Icon: "fingerprint",
+			Stateful:    true,
 			Description: "按指定字段去重并保留首次出现的行，不要求输入有序。键数量受转换内存预算限制，超大数据量请改用排序后去重。",
 			Inputs:      []core.PortDecl{{Name: core.PortMain, Label: "输入", Required: true}},
 			Outputs:     []core.PortDecl{{Name: core.PortMain, Label: "输出"}},

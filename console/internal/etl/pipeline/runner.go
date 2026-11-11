@@ -46,18 +46,29 @@ var ErrNotRunnable = errors.New("转换存在错误，无法运行")
 // errPreviewDone 是预览收集够行数后的主动取消原因（不算失败）。
 var errPreviewDone = errors.New("preview done")
 
-// node 是运行期的步骤实例。
+// node 是运行期的步骤组：copies=1 时只有一个副本。
 type node struct {
 	pn      *PlanNode
-	rc      *core.RunContext
-	runner  core.Runner
 	metrics *core.Metrics
-	// done 在步骤结束时对每条出边调用一次，最后一个生产者关闭目标通道。
+	reps    []*replica
+
+	started   sync.Once    // 首个副本开始 → 状态 running、metrics.Start
+	remaining atomic.Int32 // 未结束副本数，归零时发终态
+	errOnce   sync.Once
+	firstErr  error
+}
+
+// replica 是步骤的一个并行实例（自己的 RunContext / 端口 / 临时目录）。
+type replica struct {
+	idx    int
+	rc     *core.RunContext
+	runner core.Runner
+	// outEdges 在副本结束时逐条 producerDone，最后一个生产者关闭目标通道。
 	outEdges []*inbox
 	inboxes  []*inbox
 }
 
-// inbox 是某个（节点, 输入端口）的通道与生产者计数。
+// inbox 是某个（节点, 副本, 输入端口）的通道与生产者计数。
 type inbox struct {
 	ch        chan core.Batch
 	producers atomic.Int32
@@ -85,18 +96,35 @@ func Run(ctx context.Context, plan *Plan, opts RunOptions) Result {
 	defer cancel(nil)
 
 	// ---- 通道
-	inboxes := map[string]map[string]*inbox{} // node → port → inbox
+	// inboxes[node][copy][port]：每个副本有独立输入通道；生产者数 = Σ 上游连线 × 上游副本数。
+	inboxes := map[string][]map[string]*inbox{}
+	copiesOf := func(pn *PlanNode) int {
+		if pn.Node.Copies > 1 {
+			return pn.Node.Copies
+		}
+		return 1
+	}
+	for _, pn := range plan.Nodes {
+		nc := copiesOf(pn)
+		rows := make([]map[string]*inbox, nc)
+		for ci := 0; ci < nc; ci++ {
+			rows[ci] = map[string]*inbox{}
+		}
+		inboxes[pn.Node.ID] = rows
+	}
 	for _, pn := range plan.Nodes {
 		for port, hops := range pn.InHops {
-			if len(hops) == 0 {
-				continue
+			for _, h := range hops {
+				srcCopies := int32(copiesOf(plan.ByID[h.From]))
+				for ci := 0; ci < len(inboxes[pn.Node.ID]); ci++ {
+					b := inboxes[pn.Node.ID][ci][port]
+					if b == nil {
+						b = &inbox{ch: make(chan core.Batch, settings.ChannelBatches)}
+						inboxes[pn.Node.ID][ci][port] = b
+					}
+					b.producers.Add(srcCopies)
+				}
 			}
-			b := &inbox{ch: make(chan core.Batch, settings.ChannelBatches)}
-			b.producers.Store(int32(len(hops)))
-			if inboxes[pn.Node.ID] == nil {
-				inboxes[pn.Node.ID] = map[string]*inbox{}
-			}
-			inboxes[pn.Node.ID][port] = b
 		}
 	}
 
@@ -113,57 +141,75 @@ func Run(ctx context.Context, plan *Plan, opts RunOptions) Result {
 		}
 	}()
 
-	// ---- 节点
+	// ---- 节点（copies>1 展开为多个副本，共享节点度量与节点级状态）
 	nodes := make([]*node, 0, len(plan.Nodes))
 	for _, pn := range plan.Nodes {
 		m := &core.Metrics{}
 		n := &node{pn: pn, metrics: m}
-		rc := &core.RunContext{
-			NodeID: pn.Node.ID, NodeName: pn.Node.Name, Vars: opts.Vars, Log: opts.Log.For(pn.Node.ID),
-			Metrics: m, Env: opts.Env, BatchSize: settings.BatchSize,
-			MemoryBudget: int64(settings.MemoryBudgetMB) << 20, Preview: opts.Preview,
-			Inputs: map[string]*core.InPort{}, Outputs: map[string]*core.OutPort{},
-		}
 		nodeID := pn.Node.ID
-		if opts.OnReject != nil {
-			rc.OnReject = func(row core.Row) { opts.OnReject(nodeID, row) }
-		}
-		rc.TempDir = func() (string, error) {
-			tempMu.Lock()
-			defer tempMu.Unlock()
-			d, err := os.MkdirTemp(tempRoot, "mc-etl-"+safeName(nodeID)+"-")
-			if err == nil {
-				tempDirs = append(tempDirs, d)
+		nc := copiesOf(pn)
+		n.remaining.Store(int32(nc))
+		for ci := 0; ci < nc; ci++ {
+			rep := &replica{idx: ci}
+			rc := &core.RunContext{
+				NodeID: nodeID, NodeName: pn.Node.Name, Vars: opts.Vars, Log: opts.Log.For(nodeID),
+				Metrics: m, Env: opts.Env, BatchSize: settings.BatchSize,
+				MemoryBudget: int64(settings.MemoryBudgetMB) << 20, Preview: opts.Preview,
+				Inputs: map[string]*core.InPort{}, Outputs: map[string]*core.OutPort{},
+				Copies: nc, CopyIndex: ci,
 			}
-			return d, err
-		}
-		for port, b := range inboxes[pn.Node.ID] {
-			rc.Inputs[port] = core.NewInPort(pn.Inputs[port], b.ch, m)
-			n.inboxes = append(n.inboxes, b)
-		}
-		for port, hops := range pn.OutHops {
-			var targets []core.Target
-			for _, h := range hops {
-				b := inboxes[h.To][h.ToPort]
-				targets = append(targets, core.Target{Ch: b.ch})
-				n.outEdges = append(n.outEdges, b)
+			if opts.OnReject != nil {
+				rc.OnReject = func(row core.Row) { opts.OnReject(nodeID, row) }
 			}
-			rc.Outputs[port] = core.NewOutPort(pn.Outputs[port], pn.Node.Distribution[port], targets, m)
+			tmpSuffix := "-" + safeName(nodeID) + "-"
+			if nc > 1 {
+				tmpSuffix = "-" + safeName(nodeID) + fmt.Sprintf("-%d-", ci)
+			}
+			rc.TempDir = func() (string, error) {
+				tempMu.Lock()
+				defer tempMu.Unlock()
+				d, err := os.MkdirTemp(tempRoot, "mc-etl"+tmpSuffix)
+				if err == nil {
+					tempDirs = append(tempDirs, d)
+				}
+				return d, err
+			}
+			for port, b := range inboxes[nodeID][ci] {
+				rc.Inputs[port] = core.NewInPort(pn.Inputs[port], b.ch, m)
+				rep.inboxes = append(rep.inboxes, b)
+			}
+			for port, hops := range pn.OutHops {
+				var targets []core.Target
+				for _, h := range hops {
+					for ti := range inboxes[h.To] {
+						b := inboxes[h.To][ti][h.ToPort]
+						if b == nil {
+							continue
+						}
+						targets = append(targets, core.Target{Ch: b.ch})
+						rep.outEdges = append(rep.outEdges, b)
+					}
+				}
+				rc.Outputs[port] = core.NewOutPort(pn.Outputs[port], pn.Node.Distribution[port], targets, m)
+			}
+			if opts.capture != nil && opts.capture.nodeID == nodeID {
+				opts.capture.attach(rc, pn)
+			}
+			rep.rc = rc
+			n.reps = append(n.reps, rep)
 		}
-		if opts.capture != nil && opts.capture.nodeID == pn.Node.ID {
-			opts.capture.attach(rc, pn)
-		}
-		n.rc = rc
 		nodes = append(nodes, n)
 	}
 
-	// ---- 打开（任何一个失败都不启动）
+	// ---- 打开（任何一个副本失败都不启动）
 	for _, n := range nodes {
-		r, err := safeOpen(n)
-		if err != nil {
-			return Result{FailedNode: n.pn.Node.ID, Err: fmt.Errorf("「%s」初始化失败：%w", n.pn.Node.Name, err), Metrics: snapshot(nodes)}
+		for _, rep := range n.reps {
+			r, err := safeOpen(n, rep)
+			if err != nil {
+				return Result{FailedNode: n.pn.Node.ID, Err: fmt.Errorf("「%s」初始化失败：%w", repName(n, rep), err), Metrics: snapshot(nodes)}
+			}
+			rep.runner = r
 		}
-		n.runner = r
 	}
 
 	// ---- 度量快照
@@ -194,57 +240,55 @@ func Run(ctx context.Context, plan *Plan, opts RunOptions) Result {
 		failNode string
 	)
 	start := time.Now()
-	opts.Log.Info("转换开始，共 %d 个步骤", len(nodes))
+	total := 0
 	for _, n := range nodes {
-		wg.Add(1)
-		go func(n *node) {
-			defer wg.Done()
-			name := n.pn.Node.Name
-			log := n.rc.Log
-			n.metrics.Start()
-			if opts.OnNodeState != nil {
-				opts.OnNodeState(n.pn.Node.ID, "running", nil)
-			}
-			err := safeRun(ctx, n)
-			if err == nil {
-				if e := flushErrorPort(ctx, n); e != nil {
-					err = e
-				}
-			}
-			n.metrics.Finish()
-			// 关闭下游：每条出边对应一个生产者
-			for _, b := range n.outEdges {
-				b.producerDone()
-			}
-			if opts.capture != nil && opts.capture.nodeID == n.pn.Node.ID {
-				opts.capture.close()
-			}
-			// 排空输入：步骤提前正常结束时，上游不能因此阻塞
-			for _, b := range n.inboxes {
-				go func(ch <-chan core.Batch) {
-					for range ch {
+		total += len(n.reps)
+	}
+	opts.Log.Info("转换开始，共 %d 个步骤（%d 个副本）", len(nodes), total)
+	for _, n := range nodes {
+		for _, rep := range n.reps {
+			wg.Add(1)
+			go func(n *node, rep *replica) {
+				defer wg.Done()
+				name := repName(n, rep)
+				log := rep.rc.Log
+				n.started.Do(func() {
+					n.metrics.Start()
+					if opts.OnNodeState != nil {
+						opts.OnNodeState(n.pn.Node.ID, "running", nil)
 					}
-				}(b.ch)
-			}
-			state := "succeeded"
-			if err != nil && !isCancel(ctx, err) {
-				state = "failed"
-				n.metrics.Errors.Add(1)
-				log.Error("「%s」失败：%v", name, err)
-				failOnce.Do(func() {
-					failErr, failNode = fmt.Errorf("「%s」失败：%w", name, err), n.pn.Node.ID
-					cancel(failErr)
 				})
-			} else if err != nil {
-				state = "canceled"
-			} else {
-				s := n.metrics.Snapshot()
-				log.Detail("「%s」完成：读 %d / 写 %d / 输入 %d / 输出 %d / 更新 %d / 拒绝 %d", name, s.Read, s.Written, s.Input, s.Output, s.Updated, s.Rejected)
-			}
-			if opts.OnNodeState != nil {
-				opts.OnNodeState(n.pn.Node.ID, state, err)
-			}
-		}(n)
+				err := safeRun(ctx, n, rep)
+				if err == nil {
+					if e := flushErrorPort(ctx, rep); e != nil {
+						err = e
+					}
+				}
+				// 关闭下游：每条出边对应本副本一个生产者
+				for _, b := range rep.outEdges {
+					b.producerDone()
+				}
+				// 排空输入：副本提前正常结束时，上游不能因此阻塞
+				for _, b := range rep.inboxes {
+					go func(ch <-chan core.Batch) {
+						for range ch {
+						}
+					}(b.ch)
+				}
+				if err != nil && !isCancel(ctx, err) {
+					n.metrics.Errors.Add(1)
+					log.Error("「%s」失败：%v", name, err)
+					n.errOnce.Do(func() { n.firstErr = err })
+					failOnce.Do(func() {
+						failErr, failNode = fmt.Errorf("「%s」失败：%w", name, err), n.pn.Node.ID
+						cancel(failErr)
+					})
+				}
+				if n.remaining.Add(-1) == 0 {
+					n.finish(opts, ctx)
+				}
+			}(n, rep)
+		}
 	}
 	wg.Wait()
 	close(stopTick)
@@ -272,28 +316,59 @@ func isCancel(ctx context.Context, err error) bool {
 	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Cause(ctx)))
 }
 
-func safeOpen(n *node) (r core.Runner, err error) {
+// repName 是副本的展示名：多副本加「#序号」后缀（1 起）。
+func repName(n *node, rep *replica) string {
+	if len(n.reps) > 1 {
+		return fmt.Sprintf("%s#%d", n.pn.Node.Name, rep.idx+1)
+	}
+	return n.pn.Node.Name
+}
+
+// finish 在最后结束的副本里聚合节点终态并收尾：任一副本失败 → failed；
+// 否则按运行 ctx 是否被取消区分 canceled / succeeded。
+func (n *node) finish(opts RunOptions, ctx context.Context) {
+	n.metrics.Finish()
+	if opts.capture != nil && opts.capture.nodeID == n.pn.Node.ID {
+		opts.capture.close()
+	}
+	var state string
+	var err error
+	if n.firstErr != nil {
+		state, err = "failed", n.firstErr
+	} else if ctx.Err() != nil {
+		state = "canceled"
+	} else {
+		state = "succeeded"
+		s := n.metrics.Snapshot()
+		n.reps[0].rc.Log.Detail("「%s」完成：读 %d / 写 %d / 输入 %d / 输出 %d / 更新 %d / 拒绝 %d", n.pn.Node.Name, s.Read, s.Written, s.Input, s.Output, s.Updated, s.Rejected)
+	}
+	if opts.OnNodeState != nil {
+		opts.OnNodeState(n.pn.Node.ID, state, err)
+	}
+}
+
+func safeOpen(n *node, rep *replica) (r core.Runner, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("内部错误：%v", p)
-			n.rc.Log.Error("初始化 panic：%v\n%s", p, debug.Stack())
+			rep.rc.Log.Error("初始化 panic：%v\n%s", p, debug.Stack())
 		}
 	}()
-	return n.pn.Type.Open(n.rc, n.pn.Config)
+	return n.pn.Type.Open(rep.rc, n.pn.Config)
 }
 
-func safeRun(ctx context.Context, n *node) (err error) {
+func safeRun(ctx context.Context, n *node, rep *replica) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("内部错误：%v", p)
-			n.rc.Log.Error("运行 panic：%v\n%s", p, debug.Stack())
+			rep.rc.Log.Error("运行 panic：%v\n%s", p, debug.Stack())
 		}
 	}()
-	return n.runner.Run(ctx)
+	return rep.runner.Run(ctx)
 }
 
-func flushErrorPort(ctx context.Context, n *node) error {
-	if p := n.rc.Outputs[core.PortError]; p != nil {
+func flushErrorPort(ctx context.Context, rep *replica) error {
+	if p := rep.rc.Outputs[core.PortError]; p != nil {
 		return p.FlushBuffered(ctx)
 	}
 	return nil

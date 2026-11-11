@@ -55,7 +55,7 @@ export function StepNode({ id, selected }) {
         <span className="etl-chip" style={chipStyle(meta)}><Icon name={meta.icon || 'circle'} size={15} /></span>
         <div className="etl-node-text">
           <div className="etl-node-name" title={n.name}>{n.name}</div>
-          <div className="etl-node-type">{meta.label}</div>
+          <div className="etl-node-type">{meta.label}{(n.copies || 0) > 1 ? ` ×${n.copies}` : ''}</div>
         </div>
         {live ? <StatusIcon status={live.status} /> : null}
       </div>

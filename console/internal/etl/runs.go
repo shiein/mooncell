@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -297,6 +298,15 @@ func (s *Service) runPipeline(ctx context.Context, a *activeRun, parent string, 
 			}
 		}
 		return pipeline.Result{}, fmt.Errorf("转换编译失败：%v", plan.Problems.First())
+	}
+	// 下推优化：「表输入 → 过滤 → 字段选择」折叠为源端 SQL。改写后重编译失败则回退原计划（仅少优化，不改变语义）。
+	if pd, notes := pipeline.Pushdown(ctx, def, plan, e); len(notes) > 0 {
+		if p2 := pipeline.Compile(ctx, pd, pipeline.CompileOptions{Env: e, ExtraVars: kindsOf(vars)}); !p2.Problems.HasErrors() {
+			for _, n := range notes {
+				logger.Detail("下推优化：%s 并入「%s」的源端 SQL", strings.Join(n.From, "、"), n.Into)
+			}
+			plan = p2
+		}
 	}
 	// error 端口连线的步骤：采样其拒绝行供运行详情查看。
 	errFields := map[string][]string{}
