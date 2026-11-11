@@ -57,7 +57,8 @@ ARCH=amd64 deploy/build-release.sh           # 国产化 arm64:ARCH=arm64
 # 2) 目标机(root):拷入整个 bundle 目录后
 ./install.sh install        # 装为 systemd 服务,自动生成共享 Token、打印初始管理员口令
 ./install.sh status         # 查看服务状态与访问地址
-./install.sh upgrade        # 仅换二进制并重启,保留配置与数据库
+./install.sh upgrade        # 停机 → 自动快照数据库+凭据密钥 → 换二进制 → 重启
+./install.sh backup         # 手工快照 mooncell.db + mooncell-etl.key + config 到 backups/<时间戳>/
 ./install.sh uninstall      # 卸载(默认留数据;--purge 连数据一并删)
 ```
 
@@ -108,6 +109,25 @@ backup_dir   = "/opt/deploy-agent/backups"
 
 - **Console 须单实例运行**:健康巡检的「在飞操作引用计数」(busy 集)、分块上传会话、远端 Agent 客户端缓存均为**进程内状态**,SQLite 也以 `MaxOpenConns=1` 单连接串行写入。多实例 Console 并存时这些进程内状态会失效(例如 A 实例正在部署的应用,B 实例的巡检可能误判掉线;两实例并发改同一应用实体存在 read-modify-write 覆盖风险)。当前设计面向单实例交付,如需多实例需引入外部协调(共享 busy 存储 + 行锁),暂不在支持范围。
 - **Agent 可多机、每机单实例**:一台 Console 管多台 Agent 是支持的;但同一目标机的 Agent 应只跑一个实例(共用同一 `config.toml` 与端口)。
+
+## 🔄 数据集成(ETL)
+
+Console 内置可视化数据集成:画布拖拽编排**转换**(输入/清洗/映射/排序/输出)与**作业**(转换+HTTP/子作业/通知),支持定时调度、运行历史与日志、版本快照续跑、定义导入导出。设计细节见 [docs/etl-design-v1.md](docs/etl-design-v1.md)。
+
+- **连接**:支持 PostgreSQL / MySQL / SQLite / 达梦 / 人大金仓;连接密码 AES-GCM 加密落库。
+- **授权**:管理员在「用户」页按定义授 `use`(查看/运行/导出)或 `edit`(可改/调度);零授权用户看不到该模块。连接管理与数据预览仍为管理员/编辑者能力。
+- **配置**(`console/config.toml`):
+
+```toml
+[etl]
+enabled = true                # 关闭则整个模块不出现在导航与 API
+key_file = ""                 # 凭据密钥路径,缺省与数据库同目录 mooncell-etl.key
+max_concurrent_runs = 4       # 同时运行的作业数上限
+retention_days = 30           # 运行记录保留天数
+```
+
+- **备份与升级(重要)**:`mooncell-etl.key` 是库内全部连接密码与通知凭据的加密密钥,**必须与 `mooncell.db` 成对备份**——只备份数据库、丢失密钥,所有已保存密码无法解密,需逐个连接重输。`install.sh upgrade` 已自动快照二者到 `$PREFIX/backups/pre-upgrade-<时间戳>/`;手工迁移/灾备请用 `./install.sh backup`,并确认备份介质中密钥与库文件同批保管。
+- **迁移**:定义可经「工程列表 → 导出/导入」跨实例迁移,连接引用按名称自动匹配;凭据明文永不导出,导入后需重填。
 
 ## � 自更新(Console / Agent)
 

@@ -6,7 +6,8 @@
 #
 # 用法:
 #   ./install.sh install     # 安装(默认);首装生成随机共享 token,写好两端配置并启动
-#   ./install.sh upgrade     # 升级:仅替换二进制并重启,保留配置与数据库
+#   ./install.sh upgrade     # 升级:先自动备份数据库与凭据密钥,再替换二进制并重启
+#   ./install.sh backup      # 手工备份数据库 + mooncell-etl.key + 配置到 $PREFIX/backups/<时间戳>/
 #   ./install.sh status      # 查看服务状态与访问信息
 #   ./install.sh uninstall   # 卸载服务(默认保留数据;加 --purge 连数据一并删除)
 #
@@ -148,12 +149,57 @@ EOF
   _print_summary "${GENERATED_PW:-}"
 }
 
+# console_db_path 从 [database].path 读库文件位置,缺省 $CONSOLE_DIR/mooncell.db。
+console_db_path() {
+  local custom
+  custom="$(grep -oP '^\s*path\s*=\s*"\K[^"]+' "$CONSOLE_DIR/config.toml" 2>/dev/null | head -1)"
+  if [ -n "$custom" ]; then echo "$custom"; else echo "$CONSOLE_DIR/mooncell.db"; fi
+}
+
+# etl_key_path 定位数据集成凭据密钥文件:[etl].key_file 可自定义,缺省与数据库同目录。
+etl_key_path() {
+  local custom
+  custom="$(grep -oP '^\s*key_file\s*=\s*"\K[^"]+' "$CONSOLE_DIR/config.toml" 2>/dev/null | head -1)"
+  if [ -n "$custom" ]; then echo "$custom"; else echo "$(dirname "$(console_db_path)")/mooncell-etl.key"; fi
+}
+
+# backup_console_data 快照 Console 数据库(WAL/SHM 一并拷)与凭据密钥。
+# mooncell-etl.key 与数据库必须成对保管:密钥丢失后库内已保存的连接密码全部无法解密。
+backup_console_data() {
+  local dest="$1" db key_file; db="$(console_db_path)"; key_file="$(etl_key_path)"
+  mkdir -p "$dest"
+  local f
+  for f in "$db" "$db-wal" "$db-shm"; do
+    if [ -f "$f" ]; then cp -p "$f" "$dest/"; fi
+  done
+  cp -p "$CONSOLE_DIR/config.toml" "$dest/" 2>/dev/null || true
+  if [ -f "$key_file" ]; then
+    cp -p "$key_file" "$dest/mooncell-etl.key"
+    chmod 0600 "$dest/mooncell-etl.key" 2>/dev/null || true
+  else
+    warn "未发现凭据密钥 $key_file(数据集成尚未初始化);若已在用,请自行确认密钥随库备份"
+  fi
+}
+
+do_backup() {
+  require_root
+  [ -f "$CONSOLE_DIR/config.toml" ] || die "未发现已安装实例($PREFIX),请先 install"
+  local dest="${1:-$PREFIX/backups/$(date +%Y%m%d-%H%M%S)}"
+  log "备份数据库与凭据密钥到 $dest"
+  warn "运行中复制为近似快照;要求强一致请先 systemctl stop mooncell-console"
+  backup_console_data "$dest"
+  log "备份完成:$dest —— mooncell-etl.key 丢失则库内连接密码无法解密,请随库一同保管"
+}
+
 do_upgrade() {
   require_root; require_systemd
   [ -f "$AGENT_DIR/config.toml" ] || die "未发现已安装实例($PREFIX),请先 install"
   [ -f "$SRC_DIR/mooncell-agent" ] && [ -f "$SRC_DIR/mooncell-console" ] || die "找不到新版二进制"
   log "升级二进制(保留配置与数据库)"
   systemctl stop mooncell-agent mooncell-console || true
+  local snap="$PREFIX/backups/pre-upgrade-$(date +%Y%m%d-%H%M%S)"
+  backup_console_data "$snap"
+  log "升级前快照:$snap"
   install -m 0755 "$SRC_DIR/mooncell-agent"   "$AGENT_DIR/mc-agent"
   install -m 0755 "$SRC_DIR/mooncell-console" "$CONSOLE_DIR/mc-console"
   systemctl start mooncell-agent mooncell-console
@@ -206,13 +252,15 @@ _print_summary() {
   [ -n "$pw" ] && log "初始密码: ${pw}  (请尽快登录修改)"
   log "服务:    systemctl status mooncell-agent | mooncell-console"
   log "日志:    journalctl -u mooncell-agent -f"
+  log "备份:    $0 backup   (数据库+mooncell-etl.key 成对保管,丢密钥则连接密码无法解密)"
   log "========================================"
 }
 
 case "${1:-install}" in
   install)   do_install ;;
   upgrade)   do_upgrade ;;
+  backup)    do_backup "${2:-}" ;;
   uninstall) do_uninstall "${2:-}" ;;
   status)    do_status ;;
-  *) die "未知命令:$1(支持 install|upgrade|uninstall|status)" ;;
+  *) die "未知命令:$1(支持 install|upgrade|backup|uninstall|status)" ;;
 esac

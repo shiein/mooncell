@@ -486,7 +486,7 @@ type Dialect interface {
 * 首次启动自动生成；**丢失即所有已存密码不可解**——连接显示「需重新录入密码」，fail-closed，绝不回退到明文。
 * 密文格式 `v1:` + base64(nonce‖ciphertext)，AAD 绑定连接 ID，防止密文被挪到别的连接复用。
 * 密码永不回显前端；编辑时留空表示不改。
-* `install.sh` / 升级备份须把密钥文件与数据库一起备份（TODO：脚本更新）。
+* `install.sh`：`upgrade` 停机后自动快照 `mooncell.db`(含 WAL/SHM)+`mooncell-etl.key`+`config.toml` 到 `$PREFIX/backups/pre-upgrade-<ts>/`；`backup` 子命令可手工快照（从 `[database].path`/`[etl].key_file` 解析实际路径，自定义路径同样覆盖）。
 
 ---
 
