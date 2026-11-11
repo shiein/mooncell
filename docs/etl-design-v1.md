@@ -339,7 +339,7 @@ type Dialect interface {
 | 转换 | `unique_sorted` | 去除重复记录（要求有序） | 已实现 |
 | 转换 | `value_mapper` | 值映射 | 已实现 |
 | 连接 | `merge_rows` / `sync_after_merge` | 合并记录 / 数据同步（含删除） | 已实现 |
-| 查询 | `stream_lookup` / `db_lookup` | 流查询 / 数据库查询 | TODO |
+| 查询 | `stream_lookup` / `db_lookup` | 流查询 / 数据库查询 | 已实现 |
 | 输入 | `http_input` / `csv_input` | HTTP / CSV | TODO |
 
 **合并/同步语义**（与 Kettle Merge rows (diff) + Synchronize after merge 对齐）：
@@ -352,6 +352,14 @@ type Dialect interface {
   `identical`→原样透传不写库；一批一事务；标志缺失/未知、键为 NULL 的行进错误输出；
   写库失败整批回滚、步骤失败（与 `update`/`delete` 一致）。
   字段映射留空时自动映射除键与标志字段外的全部字段。
+
+**查询步骤语义**：
+
+* `stream_lookup`：`info`=参照流整体装哈希表（受内存预算限制，超限报错），
+  主流按键等值匹配追加返回字段；参照流重复键保留首行；未命中填默认值（默认 NULL）。
+* `db_lookup`：主流逐行 `SELECT … WHERE k=? AND …` 等值查目标表；结果按查询键缓存
+  （`noCache` 关闭），多行命中默认取第一行（`orderBy` 排序，`failOnMulti` 则进错误输出）；
+  键为 NULL 直接判未命中（`= NULL` 恒不成立）。
 
 ---
 

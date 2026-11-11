@@ -497,6 +497,100 @@ registerForm('pipeline', 'sync_after_merge', ({ cfg, set, ctx }) => (
   </React.Fragment>
 ));
 
+// ---------------------------------------------------------------- 查询
+
+registerForm('pipeline', 'stream_lookup', ({ cfg, set, ctx }) => {
+  const keys = cfg.keys || [];
+  const rets = cfg.returns || [];
+  const ref = (ctx.inputs && ctx.inputs.info) || [];
+  return (
+    <React.Fragment>
+      <Section title="查询键" hint="主流字段 ↔ 参照流字段（等值）">
+        <ListEditor
+          columns={[{ label: '流字段' }, { label: '参照字段' }]}
+          rows={keys} onChange={(keys) => set({ keys })}
+          onAdd={() => set({ keys: [...keys, { stream: '', column: '' }] })}
+          empty="至少一个查询键"
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <FieldSelect fields={ctx.input} value={r.stream} onChange={(stream) => up({ stream })} />
+              <FieldSelect fields={ref} value={r.column} onChange={(column) => up({ column })} />
+            </React.Fragment>
+          )} />
+      </Section>
+      <Section title="返回字段" hint="参照流字段追加到输出；重复键保留首行">
+        <ListEditor
+          columns={[{ label: '参照字段' }, { label: '输出名', width: '110px' }, { label: '默认值', width: '90px' }]}
+          rows={rets} onChange={(returns) => set({ returns })}
+          onAdd={() => set({ returns: [...rets, { column: '', name: '', default: '' }] })}
+          empty="至少一个返回字段"
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <FieldSelect fields={ref} value={r.column} onChange={(column) => up({ column })} />
+              <input className="input" value={r.name || ''} placeholder={r.column || '同名列'} onChange={(e) => up({ name: e.target.value })} />
+              <input className="input" value={r.default || ''} placeholder="NULL" onChange={(e) => up({ default: e.target.value })} />
+            </React.Fragment>
+          )} />
+      </Section>
+      <div className="field-hint">参照流整体装入内存（受内存预算限制），大数据量请改用「数据库查询」。</div>
+    </React.Fragment>
+  );
+});
+
+registerForm('pipeline', 'db_lookup', ({ cfg, set, ctx }) => {
+  const { cols, indexes, error } = useTargetColumns(cfg);
+  const keys = cfg.keys || [];
+  const rets = cfg.returns || [];
+  const keyCols = keys.map((k) => (k.column || '').toLowerCase());
+  const indexed = !keys.length || (indexes || []).some((ix) => keyCols.every((k, i) => (ix.columns[i] || '').toLowerCase() === k));
+  return (
+    <React.Fragment>
+      <Field label="数据库连接"><ConnectionSelect value={cfg.connection} onChange={(connection) => set({ connection })} /></Field>
+      <TablePicker connection={cfg.connection} schema={cfg.schema} table={cfg.table} onChange={(t) => set(t)} />
+      {error ? <div className="field-hint" style={{ color: 'var(--error)' }}>{error}</div> : null}
+      <Section title="查询键" hint="流字段 = 表字段（等值）">
+        <ListEditor
+          columns={[{ label: '流字段' }, { label: '表字段' }]}
+          rows={keys} onChange={(k) => set({ keys: k })}
+          onAdd={() => set({ keys: [...keys, { stream: '', column: '' }] })}
+          empty="至少一个查询键"
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <FieldSelect fields={ctx.input} value={r.stream} onChange={(stream) => up({ stream })} />
+              <ColumnSelect cols={cols} value={r.column} onChange={(column) => up({ column })} />
+            </React.Fragment>
+          )} />
+        {cols && keys.length && !indexed ? <div className="field-hint" style={{ color: 'var(--warn)' }}>关键字段上没有索引，逐行查询会很慢。</div> : null}
+      </Section>
+      <Section title="返回字段" hint="查到的列追加到输出；未命中填默认值">
+        <ListEditor
+          columns={[{ label: '表字段' }, { label: '输出名', width: '110px' }, { label: '默认值', width: '90px' }]}
+          rows={rets} onChange={(returns) => set({ returns })}
+          onAdd={() => set({ returns: [...rets, { column: '', name: '', default: '' }] })}
+          empty="至少一个返回字段"
+          extraActions={<Btn variant="ghost" size="sm" disabled={!cols} onClick={() => {
+            const used = new Set((ctx.input || []).map((f) => f.name.toLowerCase()));
+            set({ returns: (cols || []).filter((c) => !used.has(c.name.toLowerCase())).map((c) => ({ column: c.name, name: '', default: '' })) });
+          }}>按名称匹配</Btn>}
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <ColumnSelect cols={cols} value={r.column} onChange={(column) => up({ column })} />
+              <input className="input" value={r.name || ''} placeholder={r.column || '同名列'} onChange={(e) => up({ name: e.target.value })} />
+              <input className="input" value={r.default || ''} placeholder="NULL" onChange={(e) => up({ default: e.target.value })} />
+            </React.Fragment>
+          )} />
+      </Section>
+      <div className="etl-row2">
+        <Field label="多行命中排序" hint="留空 = 任意第一行"><input className="input" value={cfg.orderBy || ''} onChange={(e) => set({ orderBy: e.target.value })} /></Field>
+        <Field label="选项">
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13 }}><input type="checkbox" checked={!!cfg.failOnMulti} onChange={(e) => set({ failOnMulti: e.target.checked })} />多行命中报错</label>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13 }}><input type="checkbox" checked={!!cfg.noCache} onChange={(e) => set({ noCache: e.target.checked })} />关闭缓存（默认按键缓存结果）</label>
+        </Field>
+      </div>
+    </React.Fragment>
+  );
+});
+
 // ---------------------------------------------------------------- 作业项
 
 registerForm('workflow', 'start', ({ ctx }) => (

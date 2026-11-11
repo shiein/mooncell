@@ -449,6 +449,113 @@ func TestMergeRowsSyncAfterMerge(t *testing.T) {
 	}
 }
 
+// 流查询：参照流装哈希表，主流行按键查表追加字段，未命中填默认值。
+func TestStreamLookup(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (id INTEGER, code TEXT)`)
+	mustExec(t, db, `CREATE TABLE ref (code TEXT, label TEXT)`)
+	mustExec(t, db, `CREATE TABLE dst (id INTEGER, code TEXT, "名" TEXT)`)
+	mustExec(t, db, `INSERT INTO src VALUES (1,'a'),(2,'b'),(3,'z')`)
+	mustExec(t, db, `INSERT INTO ref VALUES ('a','甲'),('b','乙'),('b','乙二')`) // 重复键保留首行
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("s", "table_input", map[string]any{"connection": "db", "sql": "select id, code from src order by id"}),
+			node("r", "table_input", map[string]any{"connection": "db", "sql": "select code, label from ref"}),
+			node("lk", "stream_lookup", map[string]any{
+				"keys":    []map[string]any{{"stream": "code", "column": "code"}},
+				"returns": []map[string]any{{"column": "label", "name": "名", "default": "?"}},
+			}),
+			node("o", "table_output", map[string]any{"connection": "db", "table": "dst", "truncate": true}),
+		},
+		Hops: []pipeline.Hop{
+			hop("s", "main", "lk"),
+			{ID: "ri", From: "r", FromPort: "main", To: "lk", ToPort: "info"},
+			hop("lk", "main", "o"),
+		},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	checks := []struct {
+		q    string
+		want int64
+	}{
+		{`SELECT count(*) FROM dst WHERE "名" = '甲'`, 1},
+		{`SELECT count(*) FROM dst WHERE "名" = '乙'`, 1},
+		{`SELECT count(*) FROM dst WHERE "名" = '?'`, 1},
+		{`SELECT count(*) FROM dst`, 3},
+	}
+	for _, c := range checks {
+		if n := count(t, db, c.q); n != c.want {
+			t.Fatalf("校验失败 %s：实际 %d 期望 %d", c.q, n, c.want)
+		}
+	}
+}
+
+// 数据库查询：逐行等值查表追加列；未命中默认值；多行命中报错时进错误输出。
+func TestDBLookup(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (id INTEGER, code TEXT)`)
+	mustExec(t, db, `CREATE TABLE dim (code TEXT, label TEXT)`)
+	mustExec(t, db, `CREATE TABLE dst (id INTEGER, code TEXT, "label" TEXT, "hit" TEXT)`)
+	mustExec(t, db, `CREATE TABLE dst_err (id INTEGER, code TEXT, _error_code TEXT, _error_message TEXT, _error_field TEXT, _error_step TEXT)`)
+	mustExec(t, db, `INSERT INTO src VALUES (1,'a'),(2,'b'),(3,'z')`)
+	mustExec(t, db, `INSERT INTO dim VALUES ('a','甲'),('b','乙'),('b','乙二')`)
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("s", "table_input", map[string]any{"connection": "db", "sql": "select id, code from src order by id"}),
+			node("lk", "db_lookup", map[string]any{
+				"connection": "db", "table": "dim",
+				"keys":    []map[string]any{{"stream": "code", "column": "code"}},
+				"returns": []map[string]any{{"column": "label", "default": "?"}, {"column": "code", "name": "hit"}},
+			}),
+			node("o", "table_output", map[string]any{"connection": "db", "table": "dst", "truncate": true}),
+			node("oe", "table_output", map[string]any{"connection": "db", "table": "dst_err", "truncate": true}),
+		},
+		Hops: []pipeline.Hop{
+			hop("s", "main", "lk"),
+			hop("lk", "main", "o"),
+			{ID: "ke", From: "lk", FromPort: "error", To: "oe", ToPort: "main"},
+		},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	// b 多行命中：默认取第一行（order by 未配置，取任意——只断言 hit=code 命中且非空）
+	checks := []struct {
+		q    string
+		want int64
+	}{
+		{`SELECT count(*) FROM dst`, 3},
+		{`SELECT count(*) FROM dst WHERE "hit" IS NULL AND "label" = '?'`, 1}, // z 未命中
+		{`SELECT count(*) FROM dst WHERE "hit" = 'a' AND "label" = '甲'`, 1},
+	}
+	for _, c := range checks {
+		if n := count(t, db, c.q); n != c.want {
+			t.Fatalf("校验失败 %s：实际 %d 期望 %d", c.q, n, c.want)
+		}
+	}
+	// 开启 failOnMulti 重跑：b 行进错误输出
+	cfg, _ := json.Marshal(map[string]any{
+		"connection": "db", "table": "dim", "failOnMulti": true,
+		"keys":    []map[string]any{{"stream": "code", "column": "code"}},
+		"returns": []map[string]any{{"column": "label", "default": "?"}, {"column": "code", "name": "hit"}},
+	})
+	def.Nodes[1].Config = cfg
+	res = run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst_err`); n != 1 {
+		t.Fatalf("多行命中应有 1 条错误行，实际 %d", n)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 2 {
+		t.Fatalf("主输出应为 2 行，实际 %d", n)
+	}
+}
+
 // 表输出连接错误端口：批次内混入唯一约束冲突行 → 批量失败后退化逐行写入，
 // 坏行进错误输出、好行照常提交、步骤成功；未连接错误端口则整步失败。
 func TestTableOutputErrorRowDegrade(t *testing.T) {
