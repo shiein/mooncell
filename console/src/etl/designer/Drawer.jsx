@@ -112,14 +112,14 @@ function PreviewTab({ d }) {
             <thead>
               <tr>
                 <th style={{ width: 44 }}>#</th>
-                {data.fields.map((f) => <th key={f.name} title={KIND_LABEL[f.kind]}>{f.name} <span className="etl-kind-tag">{f.kind}</span></th>)}
+                {(data.fields || []).map((f) => <th key={f.name} title={KIND_LABEL[f.kind]}>{f.name} <span className="etl-kind-tag">{f.kind}</span></th>)}
               </tr>
             </thead>
             <tbody>
               {(data.rows || []).map((r, i) => (
                 <tr key={i}>
                   <td className="etl-muted">{i + 1}</td>
-                  {r.map((v, j) => <td key={j} title={v}>{data.nulls[i][j] ? <span className="etl-null">null</span> : v}</td>)}
+                  {(r || []).map((v, j) => <td key={j} title={v}>{(data.nulls[i] || [])[j] ? <span className="etl-null">null</span> : v}</td>)}
                 </tr>
               ))}
             </tbody>
