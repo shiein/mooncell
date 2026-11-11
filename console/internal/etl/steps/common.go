@@ -10,6 +10,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -56,15 +57,37 @@ func render(d conn.Dialect, sql string, resolve sqltext.Resolver) (string, []any
 
 // bindExtra 把下推优化写入配置的追加参数接到 ${} 参数之后
 // （其占位符编号已在改写时按序生成，故此序不可颠倒）。
-func bindExtra(d conn.Dialect, args, extra []any) ([]any, error) {
-	for _, a := range extra {
-		b, err := d.Bind(a, core.Field{Kind: core.KindOf(a)})
+func bindExtra(d conn.Dialect, args []any, extra []json.Number) ([]any, error) {
+	for _, n := range extra {
+		v, err := pushArgValue(n)
+		if err != nil {
+			return nil, err
+		}
+		b, err := d.Bind(v, core.Field{Kind: core.KindOf(v)})
 		if err != nil {
 			return nil, err
 		}
 		args = append(args, b)
 	}
 	return args, nil
+}
+
+// pushArgValue 把下推参数还原为 ToSQL 产出时的类型：整数字面量 → int64（精确），
+// 其余（含小数点/指数）→ float64（与表达式里的浮点字面量同语义）。
+func pushArgValue(n json.Number) (any, error) {
+	s := n.String()
+	if !strings.ContainsAny(s, ".eE") {
+		i, err := n.Int64()
+		if err != nil {
+			return nil, fmt.Errorf("下推参数 %s 超出整数范围：%w", s, err)
+		}
+		return i, nil
+	}
+	f, err := n.Float64()
+	if err != nil {
+		return nil, fmt.Errorf("下推参数 %s 不是合法数值：%w", s, err)
+	}
+	return f, nil
 }
 
 // handleFor 在 Infer 中取连接（失败即报告问题并返回 nil）。

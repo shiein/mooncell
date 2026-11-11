@@ -260,7 +260,7 @@ function DefinitionInspector({ d }) {
               <div className="etl-inline">
                 <div className="etl-inline-label">
                   <span>源端下推</span>
-                  <small>把「表输入 → 过滤/字段选择」折叠为源库 SQL，默认关闭。预览不下推；开启后只有能证明与行内求值等价的条件才会下推，运行结果以源库语义为准的部分已被排除</small>
+                  <small>把「表输入 → 过滤/字段选择」折叠为源库 SQL，默认关闭。预览不下推；开启后只有能证明与行内求值等价的条件才会下推（字符串比较、函数等一律不下推）；可空字段上的大小比较只在源端预筛，过滤步骤保留在行内复核，NULL 行仍按原样报错</small>
                 </div>
                 <Switch on={!!s.pushdown} disabled={d.readOnly} onChange={(v) => setSettings({ pushdown: v || undefined })} />
               </div>

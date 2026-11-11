@@ -66,9 +66,13 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 			continue // 连接不可用：保留原定义，由编译器报告真实错误
 		}
 		fields := map[string]core.Kind{}
+		notNull := map[string]bool{} // 驱动/元数据明确声明不可空的字段；未知一律按可空
 		if s := pn.Outputs[core.PortMain]; s != nil {
 			for _, f := range s.Fields() {
 				fields[f.Name] = f.Kind
+				if !f.Nullable {
+					notNull[f.Name] = true
+				}
 			}
 		}
 		// 原 SQL 的 ${} 参数已占 1..bindN 号占位符；下推字面量参数从 bindN+1 续接，
@@ -88,13 +92,16 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 			bindN++
 			return h.Dialect.Placeholder(bindN)
 		}
-		toSQL := func(cond string) (string, error) {
-			s, args, err := expr.ToSQL(cond, h.Dialect.Quote, fields, emit)
+		// toSQL 失败时回滚占位符序号与参数，保证 SQL 占位符与 pushArgs 一一对应。
+		toSQL := func(cond string) (expr.SQLCond, error) {
+			saveN, saveA := bindN, len(pushArgs)
+			c, err := expr.ToSQL(cond, h.Dialect.Quote, fields, notNull, emit)
 			if err != nil {
-				return "", err
+				bindN, pushArgs = saveN, pushArgs[:saveA]
+				return expr.SQLCond{}, err
 			}
-			pushArgs = append(pushArgs, args...)
-			return s, nil
+			pushArgs = append(pushArgs, c.Args...)
+			return c, nil
 		}
 
 		// 沿唯一出边链收集可下推步骤
@@ -117,16 +124,24 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 				if json.Unmarshal(next.Node.Config, &fc) != nil {
 					goto chainEnd
 				}
-				w, err := toSQL(fc.Condition)
-				if err != nil {
-					goto chainEnd
-				}
-				// 只允许「是」端口单出边；否/错误端口被使用则不可下推
+				// 只允许「是」端口单出边；否/错误端口被使用则不可下推。
+				// 必须先于翻译检查：翻译会登记绑定参数，放弃时不能留下孤儿参数。
 				th := next.OutHops[core.PortTrue]
 				if len(th) != 1 || len(next.OutHops[core.PortFalse]) > 0 || len(next.OutHops[core.PortError]) > 0 {
 					goto chainEnd
 				}
-				conds = append(conds, w)
+				c, err := toSQL(fc.Condition)
+				if err != nil {
+					goto chainEnd
+				}
+				conds = append(conds, c.SQL)
+				if c.Residual {
+					// 超集条件：源端先筛，过滤步骤保留在行内复核（NULL 行照常让过滤报错）。
+					// 链在此结束：上游并入的节点删去后，原本进入该过滤的连线改接源。
+					names = append(names, next.Node.Name+"（保留行内复核）")
+					endHops = []Hop{cur}
+					goto chainEnd
+				}
 				chain = append(chain, next.Node.ID)
 				names = append(names, next.Node.Name)
 				cur = th[0]
@@ -147,7 +162,7 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 			}
 		}
 	chainEnd:
-		if len(chain) == 0 {
+		if len(chain) == 0 && len(conds) == 0 {
 			continue
 		}
 		if len(endHops) == 0 {
@@ -186,6 +201,10 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 				out.Nodes[i].Config = b
 			}
 		}
+		notes = append(notes, PushdownNote{Into: pn.Node.Name, From: names})
+		if len(chain) == 0 {
+			continue // 仅首个过滤以超集下推：不删节点、连线不变
+		}
 		for _, id := range chain {
 			removed[id] = true
 		}
@@ -214,7 +233,6 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 			hops = append(hops, eh)
 		}
 		out.Hops = hops
-		notes = append(notes, PushdownNote{Into: pn.Node.Name, From: names})
 	}
 	if len(notes) == 0 {
 		return def, nil

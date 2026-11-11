@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -17,7 +18,9 @@ type TableInputConfig struct {
 	MaxRows    int64  `json:"maxRows"` // 0 = 不限
 	// PushArgs 是源端下推（settings.pushdown）写入的追加绑定参数：
 	// 占位符编号续接 ${} 参数之后，故在 render 之后追加。人工勿填。
-	PushArgs []any `json:"pushArgs,omitempty"`
+	// 用 json.Number 保留字面量原文：[]any 经 JSON 往返会把整数解成 float64，
+	// 超过 2^53 的 bigint（如雪花 ID）会丢精度、匹配到错误的行。
+	PushArgs []json.Number `json:"pushArgs,omitempty"`
 }
 
 func init() {

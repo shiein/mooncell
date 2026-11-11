@@ -15,11 +15,22 @@ import (
 // 调用方应放弃下推，退回行内求值（不是错误，只是不能优化）。
 var ErrNotPushable = errors.New("表达式含不可下推的结构")
 
-// ToSQL 把过滤条件翻译为可证等价的 SQL 片段，返回 (sql, args)。
+// SQLCond 是 ToSQL 的翻译结果。
+type SQLCond struct {
+	SQL  string
+	Args []any
+	// Residual 为 true 表示 SQL 是行内条件的「超集」：NULL 敏感叶引用了可空字段，
+	// 已改写为 (叶 OR 字段 IS NULL …)。调用方必须保留原过滤步骤在行内复核——
+	// 否则 NULL 行在引擎里会让过滤报错（运行失败），而源端 SQL 会把它静默滤掉。
+	Residual bool
+}
+
+// ToSQL 把过滤条件翻译为可证等价（或带行内复核的超集）的 SQL 片段。
 //
 // 所有值字面量一律生成绑定参数：emit 按序返回下一个占位符（nil → "?"），
-// 对应值记入返回的 args——SQL 文本中不允许出现任何值字面量。
-// fields 是编译期字段表（字段名 → Kind）；quote 为方言标识符引用。
+// 对应值记入 Args——SQL 文本中不允许出现任何值字面量。
+// fields 是编译期字段表（字段名 → Kind）；notNull 列出已知不可空的字段
+// （缺省或未列出一律按可空处理）；quote 为方言标识符引用。
 //
 // 可下推子集（NULL 语义已按引擎折算）：
 //
@@ -27,23 +38,23 @@ var ErrNotPushable = errors.New("表达式含不可下推的结构")
 //     a == b → (a = b OR (a IS NULL AND b IS NULL)) —— 字段-字面量简化为 (a = ?)
 //     a != b → (a <> b OR (a IS NULL AND b IS NOT NULL) OR (a IS NOT NULL AND b IS NULL))
 //     字段-字面量 a != v → ((a <> ?) OR (a IS NULL))（引擎里 nil != 1 为真）
-//     a < <= > >= b → (a op b)：NULL 时引擎求值报错拒行、SQL 的 NULL 比较不投递，
-//     投递结果一致——但正因如此次序比较不允许出现在 || / not 内
-//     （NULL OR true → true、NOT(NULL AND false) → true 会把拒行的行改判通过）
+//   - 次序比较 a < <= > >= b（含数值 +/- 操作数）与裸布尔字段是「NULL 敏感叶」：
+//     NULL 时引擎求值报错（无错误端口即运行失败），SQL 却只是不投递。
+//     叶内字段全部不可空 → 原样 (a op b)；
+//     否则 → ((a op b) OR (a IS NULL) …) 并置 Residual，由行内过滤复核（NULL 行照常报错）。
+//     这类叶只允许出现在顶层 / && 内（超集在合取下保持超集），不允许进 || / not 复合。
 //   - f in [数值字面量…]；f not in […] → ((f NOT IN (…)) OR (f IS NULL))
 //   - f == nil / f != nil / isNull(f)（任意已声明字段）→ IS NULL / IS NOT NULL
-//   - && / ||：|| 的操作数必须全部是 NULL 安全结构（上三条及其组合、not 改写、
+//   - && / ||：|| 的操作数必须全部是 NULL 安全结构（上述等值/in/nil 及其组合、not 改写、
 //     布尔字面量）；&& 不做此限制
 //   - not X：X 是 NULL 安全结构时按德摩根律递归改写（not(a==v) → (a<>? OR a IS NULL)）；
-//     X 是单个次序比较或裸布尔字段时生成 (NOT …)，同样只允许在非 NULL 敏感位置
-//   - 数值 +/-（两侧均须数值）：只允许作为次序比较的操作数
-//   - 布尔 kind 字段单独作条件 → (f)，视为 NULL 敏感叶（位置限制同次序比较）
+//     X 是单个 NULL 敏感叶时生成 (NOT 叶)（可空则同样补 IS NULL 超集），位置限制同上
 //   - true / false 常量 → (TRUE) / (FALSE)（关键字，不是值字面量）
 //
 // 其余一律 ErrNotPushable：字符串比较与 in、一切函数调用（field() 引用除外）、
 // var()、now()/today()、三元、??、/ % * ** ..、matches/contains/startsWith/endsWith、
 // 成员访问、非字面量 in 列表。
-func ToSQL(src string, quote func(string) string, fields map[string]core.Kind, emit func() string) (string, []any, error) {
+func ToSQL(src string, quote func(string) string, fields map[string]core.Kind, notNull map[string]bool, emit func() string) (SQLCond, error) {
 	if quote == nil {
 		quote = func(s string) string { return s }
 	}
@@ -52,21 +63,24 @@ func ToSQL(src string, quote func(string) string, fields map[string]core.Kind, e
 	}
 	tr, err := parser.Parse(src)
 	if err != nil {
-		return "", nil, toCompileError(err)
+		return SQLCond{}, toCompileError(err)
 	}
-	w := &sqlWriter{quote: quote, fields: fields, emit: emit}
+	w := &sqlWriter{quote: quote, fields: fields, notNull: notNull, emit: emit}
 	sql, err := w.cond(tr.Node, false)
 	if err != nil {
-		return "", nil, err
+		return SQLCond{}, err
 	}
-	return sql, w.args, nil
+	return SQLCond{SQL: sql, Args: w.args, Residual: w.residual}, nil
 }
 
 type sqlWriter struct {
-	quote  func(string) string
-	fields map[string]core.Kind
-	emit   func() string
-	args   []any
+	quote    func(string) string
+	fields   map[string]core.Kind
+	notNull  map[string]bool
+	emit     func() string
+	args     []any
+	residual bool
+	collect  *[]string // 非 nil 时 ref() 记录引用到的字段名（NULL 敏感叶守卫用）
 }
 
 // ph 记录一个绑定参数并返回其占位符文本。
@@ -105,6 +119,9 @@ func (w *sqlWriter) ref(n ast.Node) (string, core.Kind, error) {
 	k, ok := w.fields[name]
 	if !ok {
 		return "", "", fmt.Errorf("%w：字段 %q 不在上游字段中", ErrNotPushable, name)
+	}
+	if w.collect != nil {
+		*w.collect = append(*w.collect, name)
 	}
 	return w.quote(name), k, nil
 }
@@ -205,9 +222,13 @@ func (w *sqlWriter) cond(n ast.Node, safeOnly bool) (string, error) {
 				return w.fail("运算符 %q 不可下推", t.Operator)
 			}
 			if safeOnly {
-				return w.fail("次序比较不能在 || / not 内下推（NULL 时引擎拒行而 SQL 会并入另一侧结果）")
+				return w.fail("次序比较不能在 || / not 内下推（NULL 时引擎报错而 SQL 会并入另一侧结果）")
 			}
-			return w.ordering(t)
+			raw, names, err := w.leaf(t)
+			if err != nil {
+				return "", err
+			}
+			return w.guard(raw, names), nil
 		}
 	case *ast.UnaryNode:
 		if t.Operator != "not" && t.Operator != "!" {
@@ -246,6 +267,21 @@ func (w *sqlWriter) cond(n ast.Node, safeOnly bool) (string, error) {
 
 // boolField 是裸字段作条件：须布尔 kind，且属 NULL 敏感叶。
 func (w *sqlWriter) boolField(n ast.Node, safeOnly bool) (string, error) {
+	if safeOnly {
+		if _, err := w.boolFieldRaw(n); err != nil {
+			return "", err
+		}
+		return w.fail("裸布尔字段不能在 || / not 内下推（NULL 时引擎报错而 SQL 并入另一侧）")
+	}
+	raw, names, err := w.leaf(n)
+	if err != nil {
+		return "", err
+	}
+	return w.guard(raw, names), nil
+}
+
+// boolFieldRaw 翻译裸布尔字段（不加 NULL 守卫），并把字段名记入 collect。
+func (w *sqlWriter) boolFieldRaw(n ast.Node) (string, error) {
 	name, err := w.refName(n)
 	if err != nil {
 		return "", err
@@ -257,10 +293,46 @@ func (w *sqlWriter) boolField(n ast.Node, safeOnly bool) (string, error) {
 	if k != core.KindBoolean {
 		return w.fail("字段 %q 不是布尔类型，不能单独作条件", name)
 	}
-	if safeOnly {
-		return w.fail("裸布尔字段不能在 || / not 内下推（NULL 时引擎报错而 SQL 并入另一侧）")
+	if w.collect != nil {
+		*w.collect = append(*w.collect, name)
 	}
 	return "(" + w.quote(name) + ")", nil
+}
+
+// leaf 翻译单个 NULL 敏感叶（次序比较或裸布尔字段），不加守卫；返回叶内引用的字段名。
+func (w *sqlWriter) leaf(n ast.Node) (string, []string, error) {
+	var names []string
+	prev := w.collect
+	w.collect = &names
+	defer func() { w.collect = prev }()
+	var s string
+	var err error
+	if b, ok := n.(*ast.BinaryNode); ok && orderingOp[b.Operator] {
+		s, err = w.ordering(b)
+	} else {
+		s, err = w.boolFieldRaw(n)
+	}
+	return s, names, err
+}
+
+// guard 给 NULL 敏感叶补可空字段的 IS NULL 分支，使 SQL 成为行内条件的超集：
+// 引擎对这些行求值会报错（运行失败），源端不能把它们静默滤掉，须留给行内过滤复核。
+// 叶内字段全部声明不可空时原样返回（与行内求值严格等价，无需复核）。
+func (w *sqlWriter) guard(raw string, names []string) string {
+	var g []string
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] || w.notNull[n] {
+			continue
+		}
+		seen[n] = true
+		g = append(g, "("+w.quote(n)+" IS NULL)")
+	}
+	if len(g) == 0 {
+		return raw
+	}
+	w.residual = true
+	return "(" + raw + " OR " + strings.Join(g, " OR ") + ")"
 }
 
 // unsafeLeaf 报告节点是否为 NULL 敏感叶：次序比较或裸布尔字段。
@@ -285,17 +357,17 @@ func (w *sqlWriter) unsafeLeaf(n ast.Node) bool {
 // not 翻译 not/!。
 func (w *sqlWriter) not(t *ast.UnaryNode, safeOnly bool) (string, error) {
 	inner := t.Node
-	// 单个 NULL 敏感叶：NOT NULL → NULL 被排除，与引擎报错拒行的投递结果一致；
-	// 在 || / not 内则会把 NULL 并入另一侧 → 只允许非 NULL 敏感位置。
+	// 单个 NULL 敏感叶：NOT 作用在未守卫的叶上，再整体补可空字段的 IS NULL 超集分支
+	// （先守卫再取反会变成子集）。在 || / not 内则会把 NULL 并入另一侧 → 只允许非 NULL 敏感位置。
 	if w.unsafeLeaf(inner) {
 		if safeOnly {
 			return w.fail("not 不能包裹次序比较或裸布尔字段（NULL 时引擎报错而 SQL 并入另一侧）")
 		}
-		s, err := w.cond(inner, false)
+		raw, names, err := w.leaf(inner)
 		if err != nil {
 			return "", err
 		}
-		return "(NOT " + s + ")", nil
+		return w.guard("(NOT "+raw+")", names), nil
 	}
 	return w.neg(inner)
 }

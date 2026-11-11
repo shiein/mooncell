@@ -137,7 +137,10 @@ func livePushdownDiff(t *testing.T, dialect string) {
 			t.Fatalf("编译失败：%+v", plan.Problems)
 		}
 		if res := pipeline.Run(ctx, plan, pipeline.RunOptions{Env: e}); res.Err != nil {
-			t.Fatalf("运行失败：%v", res.Err)
+			// 运行失败本身是可比对的结果：NULL 遇到次序比较时行内过滤报错，
+			// 下推后必须同样失败，而不是静默滤掉 NULL 行。
+			t.Logf("运行失败：%v", res.Err)
+			return []int64{-1}
 		}
 		rs, err := h.DB.QueryContext(ctx, "SELECT id FROM "+d.Qualified(dstRef))
 		if err != nil {
@@ -200,6 +203,12 @@ func livePushdownDiff(t *testing.T, dialect string) {
 		{`name == "a\\b"`, false, false},
 		{`trim(name) == "x"`, false, false},
 		{`name + "x" == "abcx"`, false, false},
+		// —— NULL 敏感叶引用可空字段（grp 含 NULL）：下推超集 + 行内复核，
+		//     不下推与下推都必须「运行失败」（行内过滤对 NULL 求值报错）——
+		{`grp > 1`, true, true},
+		{`grp + 1 > 2`, true, true},
+		{`not (grp > 1)`, true, true},
+		{`grp >= 1 && id > 0`, true, true},
 		// —— NULL 语义陷阱：次序比较出现在 || / not 复合内 ——
 		{`id > 1 || grp == 2`, false, false},
 		{`not (id < 3 && grp == 1)`, false, false},

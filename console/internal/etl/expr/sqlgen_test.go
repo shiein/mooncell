@@ -89,8 +89,17 @@ func TestToSQL(t *testing.T) {
 		{`field("weird name") == 3`, `("weird name" = ?)`, []any{int64(3)}},
 		{`field("weird name") > 1 && a == nil`, `(("weird name" > ?) AND ("a" IS NULL))`, []any{int64(1)}},
 	}
+	// 既有用例按「全部字段不可空」断言原样翻译（无守卫、无行内复核）。
+	allNotNull := map[string]bool{}
+	for k := range fields {
+		allNotNull[k] = true
+	}
 	for _, c := range oks {
-		got, args, err := ToSQL(c.src, q, fields, nil)
+		res, err := ToSQL(c.src, q, fields, allNotNull, nil)
+		got, args := res.SQL, res.Args
+		if err == nil && res.Residual {
+			t.Errorf("%s → 字段全部不可空时不应要求行内复核", c.src)
+		}
 		if err != nil {
 			t.Errorf("%s → 意外失败: %v", c.src, err)
 			continue
@@ -143,8 +152,8 @@ func TestToSQL(t *testing.T) {
 		`a ? b : c == 1`,
 	}
 	for _, src := range bad {
-		if sql, args, err := ToSQL(src, q, fields, nil); err == nil {
-			t.Errorf("%s → 应拒绝下推，得到 %s args=%v", src, sql, args)
+		if res, err := ToSQL(src, q, fields, nil, nil); err == nil {
+			t.Errorf("%s → 应拒绝下推，得到 %s args=%v", src, res.SQL, res.Args)
 		} else if !errors.Is(err, ErrNotPushable) && !errors.As(err, new(*CompileError)) {
 			t.Errorf("%s → 错误类型应为 ErrNotPushable/CompileError，实际 %v", src, err)
 		}
@@ -159,15 +168,61 @@ func TestToSQLPlaceholders(t *testing.T) {
 		n++
 		return "$" + strconv.Itoa(n)
 	}
-	got, args, err := ToSQL(`a == 5 && b in [7, 9]`, q, fields, emit)
+	res, err := ToSQL(`a == 5 && b in [7, 9]`, q, fields, nil, emit)
 	if err != nil {
 		t.Fatal(err)
 	}
+	got, args := res.SQL, res.Args
 	want := `(("a" = $3) AND ("b" IN ($4, $5)))`
 	if got != want {
 		t.Fatalf("got %s want %s", got, want)
 	}
 	if !reflect.DeepEqual(args, []any{int64(5), int64(7), int64(9)}) {
 		t.Fatalf("args %#v", args)
+	}
+}
+
+// TestToSQLNullableResidual 校验 NULL 敏感叶（次序比较 / 裸布尔字段 / 其 not）引用可空字段时：
+// SQL 补 IS NULL 超集分支并置 Residual（行内过滤复核，NULL 行照常让引擎报错）；
+// NULL 安全结构（等值/in/nil）不受影响；超集只出现在合取位置。
+func TestToSQLNullableResidual(t *testing.T) {
+	fields := map[string]core.Kind{"a": core.KindInteger, "b": core.KindInteger, "flag": core.KindBoolean, "d": core.KindDate}
+	notNull := map[string]bool{"b": true} // a / flag / d 可空
+	cases := []struct {
+		src      string
+		sql      string
+		residual bool
+	}{
+		{`a > 1`, `(("a" > ?) OR ("a" IS NULL))`, true},
+		{`b > 1`, `("b" > ?)`, false},
+		{`a + b > 1`, `((("a" + "b") > ?) OR ("a" IS NULL))`, true},
+		{`a - a >= 0`, `((("a" - "a") >= ?) OR ("a" IS NULL))`, true},
+		{`not (a > 1)`, `((NOT ("a" > ?)) OR ("a" IS NULL))`, true},
+		{`not (b > 1)`, `(NOT ("b" > ?))`, false},
+		{`flag`, `(("flag") OR ("flag" IS NULL))`, true},
+		{`not flag`, `((NOT ("flag")) OR ("flag" IS NULL))`, true},
+		{`a > 1 && b == 2`, `((("a" > ?) OR ("a" IS NULL)) AND ("b" = ?))`, true},
+		{`d >= d`, `(("d" >= "d") OR ("d" IS NULL))`, true},
+		// NULL 安全结构：可空也无需复核
+		{`a == 1`, `("a" = ?)`, false},
+		{`a != 1`, `(("a" <> ?) OR ("a" IS NULL))`, false},
+		{`a in [1]`, `("a" IN (?))`, false},
+		{`a == nil || b == 1`, `(("a" IS NULL) OR ("b" = ?))`, false},
+	}
+	for _, c := range cases {
+		res, err := ToSQL(c.src, q, fields, notNull, nil)
+		if err != nil {
+			t.Errorf("%s → 意外失败：%v", c.src, err)
+			continue
+		}
+		if res.SQL != c.sql || res.Residual != c.residual {
+			t.Errorf("%s →\n got: %s residual=%v\nwant: %s residual=%v", c.src, res.SQL, res.Residual, c.sql, c.residual)
+		}
+	}
+	// 位置限制不变：|| / not 复合内的 NULL 敏感叶仍拒推（超集在析取/取反下不保持）
+	for _, src := range []string{`a > 1 || b == 1`, `not (a > 1 && b == 1)`, `flag || b == 1`} {
+		if res, err := ToSQL(src, q, fields, notNull, nil); err == nil {
+			t.Errorf("%s → 应拒绝下推，得到 %s", src, res.SQL)
+		}
 	}
 }
