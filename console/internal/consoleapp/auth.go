@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -68,10 +69,28 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "用户名或密码不能为空"})
 		return
 	}
+	// 防爆破：先查锁定再做 bcrypt（锁定期间不消耗 CPU）
+	now := time.Now()
+	pairKey := clientIP(r) + "\x00" + strings.ToLower(username)
+	remoteKey := remoteIP(r)
+	if locked, wait := loginRemoteLimiter.blocked(remoteKey, now); locked {
+		writeTooMany(w, wait, "登录失败次数过多，请稍后再试")
+		return
+	}
+	if locked, wait := loginPairLimiter.blocked(pairKey, now); locked {
+		writeTooMany(w, wait, fmt.Sprintf("该账号在此来源登录失败次数过多，请 %d 分钟后再试", int(wait.Minutes())+1))
+		return
+	}
 	if !a.store.verifyUser(username, body.Password) {
+		lockedPair := loginPairLimiter.fail(pairKey, now)
+		lockedRemote := loginRemoteLimiter.fail(remoteKey, now)
+		if lockedPair || lockedRemote {
+			a.store.appendAuditIP("system", "登录锁定", username, "连续失败·已锁定 15 分钟", clientIP(r))
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "用户名或密码错误"})
 		return
 	}
+	loginPairLimiter.reset(pairKey)
 
 	token, _, err := a.store.createSession(username)
 	if err != nil {

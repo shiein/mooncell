@@ -164,7 +164,7 @@ func (a *api) storeCabinetFile(w http.ResponseWriter, r *http.Request, uploader 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写元数据失败"})
 		return
 	}
-	a.store.appendAudit(uploader, "上传文件", "文件柜 · "+hdr.Filename, "成功")
+	a.store.appendAuditIP(uploader, "上传文件", "文件柜 · "+hdr.Filename, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, meta)
 }
 
@@ -272,14 +272,8 @@ func cabinetExpired(meta map[string]any, nowMs int64) bool {
 
 // downloadByCode 处理 GET /api/pubfile/{code}(免登录):仅当文件标记为公开时可凭码下载。
 func (a *api) downloadByCode(w http.ResponseWriter, r *http.Request) {
-	code := r.PathValue("code")
-	meta, ok := a.store.cabinetByCode(code)
+	meta, ok := a.lookupPublicCode(w, r)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "提取码无效"})
-		return
-	}
-	if pub, _ := meta["public"].(bool); !pub {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "该文件未公开,请登录后下载"})
 		return
 	}
 	a.serveFile(w, meta)
@@ -288,14 +282,8 @@ func (a *api) downloadByCode(w http.ResponseWriter, r *http.Request) {
 // pubfileMeta 处理 GET /api/pubfile/{code}/meta(免登录):仅回元数据(名/大小/过期),不回文件体、不计下载数。
 // 供 /drop 页凭码校验并展示文件信息后再触发下载,避免「为校验而整文件下载一遍」。
 func (a *api) pubfileMeta(w http.ResponseWriter, r *http.Request) {
-	code := r.PathValue("code")
-	meta, ok := a.store.cabinetByCode(code)
+	meta, ok := a.lookupPublicCode(w, r)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "提取码无效"})
-		return
-	}
-	if pub, _ := meta["public"].(bool); !pub {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "该文件未公开,请登录后下载"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -308,7 +296,7 @@ func (a *api) deleteCabinet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.store.deleteEntity("cabinet", id)
 	os.Remove(a.storedPath(id))
-	a.store.appendAudit(a.sessionUser(r), "删除文件", "文件柜 · "+id, "成功")
+	a.store.appendAuditIP(a.sessionUser(r), "删除文件", "文件柜 · "+id, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -346,4 +334,24 @@ func (a *api) setCabinetPublic(w http.ResponseWriter, r *http.Request) {
 func urlEscape(s string) string {
 	s = strings.NewReplacer("\n", "", "\r", "").Replace(s)
 	return url.PathEscape(s)
+}
+
+// lookupPublicCode 免登录凭码查找公开文件，并对未命中（含未公开）按 TCP 来源限流，防穷举提取码。
+// 未公开与不存在统一回 404，不给穷举者「码存在」的信号。
+func (a *api) lookupPublicCode(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
+	now := time.Now()
+	key := remoteIP(r)
+	if locked, wait := pubCodeLimiter.blocked(key, now); locked {
+		writeTooMany(w, wait, "提取码错误次数过多，请稍后再试")
+		return nil, false
+	}
+	meta, ok := a.store.cabinetByCode(r.PathValue("code"))
+	if ok {
+		if pub, _ := meta["public"].(bool); pub {
+			return meta, true
+		}
+	}
+	pubCodeLimiter.fail(key, now)
+	writeJSON(w, http.StatusNotFound, map[string]string{"error": "提取码无效或文件未公开"})
+	return nil, false
 }

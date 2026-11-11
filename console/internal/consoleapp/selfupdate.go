@@ -160,7 +160,7 @@ func (a *api) selfUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.store.appendAudit(a.sessionUser(r), "Console 自更新", consoleVersion+" → "+version, "成功")
+	a.store.appendAuditIP(a.sessionUser(r), "Console 自更新", consoleVersion+" → "+version, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version, "restart": "self-exec", "old": consoleVersion})
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
