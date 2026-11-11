@@ -105,11 +105,16 @@ func livePushdownDiff(t *testing.T, dialect string) {
 
 	mk := func(cond string) *pipeline.Definition {
 		marshal := func(m map[string]any) json.RawMessage { b, _ := json.Marshal(m); return b }
+		// DM/Kingbase 会把未加引号的结果列折叠成大写——显式加引号别名，四库列名统一
+		sel := make([]string, len(colOrder))
+		for i, c := range colOrder {
+			sel[i] = c + " AS " + d.Quote(c)
+		}
 		return &pipeline.Definition{
 			Nodes: []pipeline.Node{
 				{ID: "ti", Type: "table_input", Name: "输入", Config: marshal(map[string]any{
 					"connection": livetest.ConnID(dialect),
-					"sql":        fmt.Sprintf("SELECT id, grp, name, price, d1, d2, t1, t2 FROM %s", d.Qualified(srcRef)),
+					"sql":        fmt.Sprintf("SELECT %s FROM %s", strings.Join(sel, ", "), d.Qualified(srcRef)),
 				})},
 				{ID: "flt", Type: "filter_rows", Name: "过滤", Config: marshal(map[string]any{"condition": cond})},
 				{ID: "out", Type: "table_output", Name: "写出", Config: marshal(map[string]any{
