@@ -547,6 +547,67 @@ func (h *handlers) sealDocSecrets(defID, kind string, doc json.RawMessage) (json
 	return json.Marshal(def)
 }
 
+// rekeyDocSecrets 复制场景：把 doc 中按源定义 ID 密封的 notify 凭据解密后
+// 按新定义 ID 重密封，aadSuffix 同步指向新 ID。无密钥箱（box 为空）时剥离
+// 凭据字段——与导出包行为一致，由用户在新定义里重新录入。
+func (h *handlers) rekeyDocSecrets(oldDefID, newDefID, kind string, doc json.RawMessage) (json.RawMessage, error) {
+	if kind != "workflow" {
+		return doc, nil
+	}
+	def, err := workflow.Decode(doc)
+	if err != nil {
+		return doc, nil
+	}
+	changed := false
+	for i := range def.Nodes {
+		n := &def.Nodes[i]
+		if n.Type != "notify" {
+			continue
+		}
+		var cfg map[string]json.RawMessage
+		if err := json.Unmarshal(n.Config, &cfg); err != nil {
+			continue
+		}
+		ct, ok := cfg["secretCipher"]
+		if !ok {
+			continue
+		}
+		if h.s.box == nil {
+			delete(cfg, "secretCipher")
+			delete(cfg, "aadSuffix")
+			n.Config, _ = json.Marshal(cfg)
+			changed = true
+			continue
+		}
+		var sealed string
+		if err := json.Unmarshal(ct, &sealed); err != nil || sealed == "" {
+			continue
+		}
+		// 开密 AAD 优先取文档记录的 aadSuffix（sealDocSecrets 写入），缺省按源定义推导
+		var suffix string
+		_ = json.Unmarshal(cfg["aadSuffix"], &suffix)
+		if suffix == "" {
+			suffix = oldDefID + "/" + n.ID
+		}
+		plain, err := h.s.box.Open(sealed, actions.NotifySecretAADPrefix+suffix)
+		if err != nil {
+			return nil, fmt.Errorf("复制通知凭据失败：%w", err)
+		}
+		newCT, err := h.s.box.Seal(plain, actions.NotifySecretAADPrefix+newDefID+"/"+n.ID)
+		if err != nil {
+			return nil, fmt.Errorf("重密封通知凭据失败：%w", err)
+		}
+		cfg["secretCipher"], _ = json.Marshal(newCT)
+		cfg["aadSuffix"], _ = json.Marshal(newDefID + "/" + n.ID)
+		n.Config, _ = json.Marshal(cfg)
+		changed = true
+	}
+	if !changed {
+		return doc, nil
+	}
+	return json.Marshal(def)
+}
+
 func (h *handlers) listDefinitions(w http.ResponseWriter, r *http.Request) {
 	list, err := h.s.st.ListDefinitions(r.URL.Query().Get("kind"))
 	if err != nil {
@@ -688,13 +749,20 @@ func (h *handlers) duplicateDefinition(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	// 先分配副本 ID：notify 凭据密文须按新 ID 重加密（AAD 绑定定义 ID）
+	newID := store.NewID(map[string]string{"pipeline": "pl_", "workflow": "wf_"}[d.Kind])
+	doc, err := h.rekeyDocSecrets(d.ID, newID, d.Kind, d.Doc)
+	if err != nil {
+		failErr(w, err)
+		return
+	}
 	var cp store.Definition
 	for i := 1; i <= 50; i++ {
 		name := fmt.Sprintf("%s 副本", d.Name)
 		if i > 1 {
 			name = fmt.Sprintf("%s 副本 %d", d.Name, i)
 		}
-		cp, err = h.s.st.CreateDefinition(store.Definition{Kind: d.Kind, Name: name, Folder: d.Folder, Description: d.Description, Doc: d.Doc}, userOf(r))
+		cp, err = h.s.st.CreateDefinition(store.Definition{ID: newID, Kind: d.Kind, Name: name, Folder: d.Folder, Description: d.Description, Doc: doc}, userOf(r))
 		if err == nil || !strings.Contains(err.Error(), "同名") {
 			break
 		}

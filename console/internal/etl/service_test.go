@@ -11,11 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
 
+	"mooncell/console/internal/etl/actions"
 	"mooncell/console/internal/etl/conn"
 	"mooncell/console/internal/etl/core"
 	"mooncell/console/internal/etl/store"
@@ -1092,5 +1094,101 @@ func TestPushdownRuntimeGate(t *testing.T) {
 	var n int
 	if err := hd.DB.QueryRow(`SELECT id FROM dst WHERE id = 3`).Scan(&n); err != nil || n != 3 {
 		t.Fatalf("下推运行应写入 id=3：%v %d", err, n)
+	}
+}
+
+// R1-M5：复制作业必须把 notify 凭据按副本 ID 重加密；运行时 AAD 由运行中的
+// 定义 ID 推导，与文档 aadSuffix 不一致即拒绝开密。
+func TestDuplicateNotifySecretRekey(t *testing.T) {
+	h := newHarness(t)
+	var gotAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+
+	mkDoc := func() map[string]any {
+		return map[string]any{
+			"kind": "workflow", "params": []any{},
+			"nodes": []map[string]any{
+				{"id": "start", "type": "start", "name": "开始", "config": map[string]any{}},
+				{"id": "n", "type": "notify", "name": "通知", "config": map[string]any{
+					"url": srv.URL, "template": `{"ok":true}`,
+					"secretHeader": "Authorization", "secret": "topsecret"}},
+			},
+			"hops": []map[string]any{{"id": "h", "from": "start", "fromPort": "success", "to": "n", "toPort": "main"}},
+		}
+	}
+	waitRun := func(defID string) store.Run {
+		t.Helper()
+		var run store.Run
+		if code := h.call("POST", "/api/etl/definitions/"+defID+"/run", map[string]any{}, &run); code != 200 {
+			t.Fatalf("触发运行失败：%d", code)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		var r store.Run
+		for time.Now().Before(deadline) {
+			r, _ = h.s.st.GetRun(run.ID)
+			if r.Status != store.RunQueued && r.Status != store.RunRunning {
+				break
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		return r
+	}
+
+	var def store.Definition
+	if code := h.call("POST", "/api/etl/definitions", map[string]any{"kind": "workflow", "name": "通知作业", "doc": mkDoc()}, &def); code != 200 {
+		t.Fatalf("创建失败：%d", code)
+	}
+	// 原件运行：凭据正确送达
+	if r := waitRun(def.ID); r.Status != store.RunSucceeded {
+		t.Fatalf("原件运行应成功：%s %s", r.Status, r.Error)
+	}
+	if gotAuth.Load() != "topsecret" {
+		t.Fatalf("原件凭据头错误：%v", gotAuth.Load())
+	}
+
+	// 复制 → 保存副本（模拟前端改名字后的整档保存）→ 运行副本
+	var cp store.Definition
+	if code := h.call("POST", "/api/etl/definitions/"+def.ID+"/duplicate", nil, &cp); code != 200 || cp.ID == "" {
+		t.Fatalf("复制失败：%d", code)
+	}
+	var cdoc map[string]any
+	if code := h.call("GET", "/api/etl/definitions/"+cp.ID, nil, &cdoc); code != 200 {
+		t.Fatalf("读取副本失败：%d", code)
+	}
+	cfg := cdoc["doc"].(map[string]any)["nodes"].([]any)[1].(map[string]any)["config"].(map[string]any)
+	if cfg["secretCipher"] == nil || cfg["secretCipher"] == "" {
+		t.Fatal("副本应保留凭据密文")
+	}
+	if sfx := cfg["aadSuffix"]; sfx != cp.ID+"/n" {
+		t.Fatalf("副本 aadSuffix 应为 %s/n，实得 %v", cp.ID, sfx)
+	}
+	if code := h.call("PUT", "/api/etl/definitions/"+cp.ID, map[string]any{"doc": cdoc["doc"], "revision": cp.Revision}, &cp); code != 200 {
+		t.Fatalf("保存副本失败：%d", code)
+	}
+	gotAuth.Store("")
+	if r := waitRun(cp.ID); r.Status != store.RunSucceeded {
+		t.Fatalf("副本运行应成功（凭据按副本 ID 重加密）：%s %s", r.Status, r.Error)
+	}
+	if gotAuth.Load() != "topsecret" {
+		t.Fatalf("副本凭据头错误：%v", gotAuth.Load())
+	}
+
+	// 篡改 aadSuffix：密文属实但后缀指向别的定义 → 运行必须失败
+	evilDoc := mkDoc()
+	ncfg := evilDoc["nodes"].([]map[string]any)[1]["config"].(map[string]any)
+	delete(ncfg, "secret")
+	ct, _ := h.s.box.Seal("topsecret", actions.NotifySecretAADPrefix+def.ID+"/n")
+	ncfg["secretCipher"] = ct
+	ncfg["aadSuffix"] = "wf_deadbeef/n" // 与本定义 ID 不符
+	evilBytes, _ := json.Marshal(evilDoc)
+	evil, err := h.s.st.CreateDefinition(store.Definition{Kind: "workflow", Name: "篡改后缀", Doc: evilBytes}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := waitRun(evil.ID); r.Status == store.RunSucceeded {
+		t.Fatal("aadSuffix 与运行中定义不符应拒绝开密")
 	}
 }

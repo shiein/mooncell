@@ -258,7 +258,7 @@ func applyParams(vars *core.Vars, decls []core.ParamDecl, overrides map[string]c
 	return nil
 }
 
-func (s *Service) env(withRunner actions.PipelineRunner) core.Env {
+func (s *Service) env(withRunner actions.PipelineRunner) core.MapEnv {
 	pk, pv := s.pool.EnvEntry()
 	e := core.MapEnv{pk: pv}
 	sk, sv := actions.SecretEntry(s.box)
@@ -410,6 +410,8 @@ func (s *Service) executeWorkflow(ctx context.Context, a *activeRun, vars *core.
 	host := &pipelineHost{s: s, a: a, defs: map[string]runRef{}}
 	_ = json.Unmarshal(a.run.Refs, &host.defs)
 	e := s.env(host)
+	dk, dv := actions.DefIDEntry(a.run.DefinitionID)
+	e[dk] = dv
 	plan := workflow.Compile(ctx, def, workflow.CompileOptions{Env: e})
 	if plan.Problems.HasErrors() {
 		return fmt.Errorf("作业编译失败：%v", plan.Problems.First())
@@ -527,6 +529,8 @@ func (h *pipelineHost) RunWorkflow(ctx context.Context, ec *workflow.ExecContext
 	}
 	ec.Log.Info("运行子作业「%s」（版本 %d）", d.Name, d.Revision)
 	e := h.s.env(h)
+	dk, dv := actions.DefIDEntry(id) // 子作业内 notify 的 AAD 绑子作业自身 ID
+	e[dk] = dv
 	plan := workflow.Compile(ctx, def, workflow.CompileOptions{Env: e})
 	if plan.Problems.HasErrors() {
 		return actions.WorkflowSummary{}, fmt.Errorf("子作业编译失败：%v", plan.Problems.First())

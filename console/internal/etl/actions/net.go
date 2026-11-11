@@ -29,6 +29,23 @@ type secretKey struct{}
 // SecretEntry 返回注入 Env 的键值。
 func SecretEntry(o SecretOpener) (any, any) { return secretKey{}, o }
 
+// defIDKey 是 Env 中「当前运行定义 ID」的键。
+type defIDKey struct{}
+
+// DefIDEntry 返回注入 Env 的键值：notify 开密的 AAD 必须由运行中的定义
+// ID 推导，不信任文档里的 aadSuffix（复制/篡改场景会不一致）。
+func DefIDEntry(defID string) (any, any) { return defIDKey{}, defID }
+
+func defIDFrom(env core.Env) string {
+	if env == nil {
+		return ""
+	}
+	if s, ok := env.Lookup(defIDKey{}).(string); ok {
+		return s
+	}
+	return ""
+}
+
 func openerFrom(env core.Env) SecretOpener {
 	if env != nil {
 		if o, ok := env.Lookup(secretKey{}).(SecretOpener); ok {
@@ -48,15 +65,15 @@ const (
 
 // HTTPConfig 是「HTTP 请求」作业项：调接口，把状态码/响应字段写入变量。
 type HTTPConfig struct {
-	URL      string            `json:"url"`    // 支持 ${var}
-	Method   string            `json:"method"` // GET/POST/PUT/DELETE，默认 GET
-	Headers  map[string]string `json:"headers"`
-	Body     string            `json:"body"`
-	Timeout  int               `json:"timeout"`  // 秒，默认 30
-	StatusVar string           `json:"statusVar"` // HTTP 状态码写变量
-	DataPath string            `json:"dataPath"`  // 响应 JSON 数组/对象路径 → 写入 ResultVar 的原始 JSON 文本
-	ResultVar string           `json:"resultVar"` // 响应正文（或 DataPath 命中的子树）写变量
-	Extract  []VarExtract      `json:"extract"`   // 从响应 JSON 按点路径取值写变量
+	URL       string            `json:"url"`    // 支持 ${var}
+	Method    string            `json:"method"` // GET/POST/PUT/DELETE，默认 GET
+	Headers   map[string]string `json:"headers"`
+	Body      string            `json:"body"`
+	Timeout   int               `json:"timeout"`   // 秒，默认 30
+	StatusVar string            `json:"statusVar"` // HTTP 状态码写变量
+	DataPath  string            `json:"dataPath"`  // 响应 JSON 数组/对象路径 → 写入 ResultVar 的原始 JSON 文本
+	ResultVar string            `json:"resultVar"` // 响应正文（或 DataPath 命中的子树）写变量
+	Extract   []VarExtract      `json:"extract"`   // 从响应 JSON 按点路径取值写变量
 }
 
 // VarExtract：响应 JSON 点路径 → 变量。
@@ -205,7 +222,9 @@ func init() {
 		Meta: core.Meta{ID: "workflow", Order: 35, Label: "子作业", Icon: "workflow", Description: "运行另一个作业（嵌套上限 8 层），作业项状态归入本次运行；参数以表达式映射作业变量。",
 			Inputs: []core.PortDecl{{Name: core.PortMain, Label: "输入"}}, Outputs: successPort, Keywords: []string{"Job", "子作业", "嵌套"}},
 		Defaults: func() WorkflowConfig { return WorkflowConfig{Params: map[string]string{}} },
-		Refs:     func(c *WorkflowConfig) []workflow.DefRef { return []workflow.DefRef{{ID: c.Workflow, Kind: "workflow"}} },
+		Refs: func(c *WorkflowConfig) []workflow.DefRef {
+			return []workflow.DefRef{{ID: c.Workflow, Kind: "workflow"}}
+		},
 		Validate: func(vc *workflow.ValidateContext, c *WorkflowConfig) error {
 			if c.Workflow == "" {
 				vc.Errorf("workflow", "workflow_required", "请选择要运行的作业")
@@ -310,7 +329,15 @@ func init() {
 					if op == nil {
 						return workflow.Outcome{}, errors.New("运行环境未注入凭据打开器")
 					}
-					pw, err := op.Open(c.SecretCipher, NotifySecretAADPrefix+c.AADSuffix)
+					suffix := c.AADSuffix
+					if id := defIDFrom(ec.Env); id != "" {
+						derived := id + "/" + ec.NodeID
+						if suffix != "" && suffix != derived {
+							return workflow.Outcome{}, fmt.Errorf("凭据 AAD 后缀 %q 与运行中的定义不符", suffix)
+						}
+						suffix = derived
+					}
+					pw, err := op.Open(c.SecretCipher, NotifySecretAADPrefix+suffix)
 					if err != nil {
 						return workflow.Outcome{}, fmt.Errorf("解密凭据失败：%w", err)
 					}
