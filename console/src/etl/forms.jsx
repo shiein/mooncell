@@ -591,6 +591,106 @@ registerForm('pipeline', 'db_lookup', ({ cfg, set, ctx }) => {
   );
 });
 
+// ---------------------------------------------------------------- 文件 / 接口
+
+const KIND_OPTIONS = ['string', 'integer', 'number', 'decimal', 'boolean', 'date', 'timestamp', 'binary'].map((k) => ({ value: k, label: k }));
+
+function DeclaredFieldsEditor({ rows, onChange, withPath }) {
+  const cols = withPath
+    ? [{ label: '名称' }, { label: '路径', width: '120px' }, { label: '类型', width: '100px' }, { label: '格式', width: '90px' }]
+    : [{ label: '名称' }, { label: '类型', width: '110px' }, { label: '格式', width: '110px' }];
+  return (
+    <ListEditor
+      columns={cols}
+      rows={rows} onChange={onChange}
+      onAdd={() => onChange([...rows, { name: '', path: '', kind: 'string', format: '' }])}
+      empty="声明文件的列（按位置对应）"
+      renderRow={(r, up) => (
+        <React.Fragment>
+          <input className="input" value={r.name || ''} onChange={(e) => up({ name: e.target.value })} />
+          {withPath ? <input className="input mono" value={r.path || ''} placeholder="a.b" onChange={(e) => up({ path: e.target.value })} /> : null}
+          <Select options={KIND_OPTIONS} value={r.kind || 'string'} onChange={(kind) => up({ kind })} />
+          <input className="input" value={r.format || ''} placeholder="yyyy-MM-dd" onChange={(e) => up({ format: e.target.value })} />
+        </React.Fragment>
+      )} />
+  );
+}
+
+registerForm('pipeline', 'csv_input', ({ cfg, set }) => {
+  const rows = cfg.fields || [];
+  return (
+    <React.Fragment>
+      <Field label="文件路径" hint="服务器上的绝对路径"><input className="input mono" value={cfg.path || ''} onChange={(e) => set({ path: e.target.value })} /></Field>
+      <div className="etl-row2">
+        <Field label="分隔符"><input className="input" value={cfg.delimiter || ','} onChange={(e) => set({ delimiter: e.target.value })} /></Field>
+        <Field label="编码"><Select options={[{ value: 'utf-8', label: 'UTF-8' }, { value: 'gbk', label: 'GBK' }]} value={cfg.encoding || 'utf-8'} onChange={(encoding) => set({ encoding })} /></Field>
+      </div>
+      <Field label="首行为表头"><input type="checkbox" checked={cfg.hasHeader !== false} onChange={(e) => set({ hasHeader: e.target.checked })} /></Field>
+      <Section title="字段声明" hint="按位置对应文件列；转换失败的行进入错误输出">
+        <DeclaredFieldsEditor rows={rows} onChange={(fields) => set({ fields })} />
+      </Section>
+    </React.Fragment>
+  );
+});
+
+registerForm('pipeline', 'csv_output', ({ cfg, set }) => (
+  <React.Fragment>
+    <Field label="文件路径" hint="服务器上的绝对路径"><input className="input mono" value={cfg.path || ''} onChange={(e) => set({ path: e.target.value })} /></Field>
+    <div className="etl-row2">
+      <Field label="分隔符"><input className="input" value={cfg.delimiter || ','} onChange={(e) => set({ delimiter: e.target.value })} /></Field>
+      <Field label="编码"><Select options={[{ value: 'utf-8', label: 'UTF-8' }, { value: 'gbk', label: 'GBK' }]} value={cfg.encoding || 'utf-8'} onChange={(encoding) => set({ encoding })} /></Field>
+    </div>
+    <Field label="选项">
+      <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13 }}><input type="checkbox" checked={cfg.header !== false} onChange={(e) => set({ header: e.target.checked })} />写入表头</label>
+      <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13 }}><input type="checkbox" checked={!!cfg.append} onChange={(e) => set({ append: e.target.checked })} />追加（不覆盖已有文件）</label>
+    </Field>
+  </React.Fragment>
+));
+
+registerForm('pipeline', 'http_input', ({ cfg, set, ctx }) => {
+  const rows = cfg.fields || [];
+  const pg = cfg.page || {};
+  const setPg = (p) => set({ page: { ...pg, ...p } });
+  return (
+    <React.Fragment>
+      <div className="etl-row2">
+        <Field label="方法"><Select options={[{ value: 'GET', label: 'GET' }, { value: 'POST', label: 'POST' }]} value={cfg.method || 'GET'} onChange={(method) => set({ method })} /></Field>
+        <Field label="超时（秒）"><input className="input" type="number" min="1" value={cfg.timeout || 60} onChange={(e) => set({ timeout: num(e.target.value, 60) })} /></Field>
+      </div>
+      <Field label="URL" hint="可用 ${变量}"><input className="input mono" value={cfg.url || ''} placeholder="https://…" onChange={(e) => set({ url: e.target.value })} /></Field>
+      <Section title="请求头">
+        <ListEditor
+          columns={[{ label: '名称' }, { label: '值' }]}
+          rows={Object.entries(cfg.headers || {}).map(([k, v]) => ({ k, v }))}
+          onChange={(rs) => set({ headers: Object.fromEntries(rs.filter((r) => r.k).map((r) => [r.k, r.v])) })}
+          onAdd={() => set({ headers: { ...(cfg.headers || {}), '': '' } })}
+          empty="无请求头"
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <input className="input mono" value={r.k} placeholder="Authorization" onChange={(e) => up({ k: e.target.value })} />
+              <input className="input mono" value={r.v} placeholder="Bearer ${token}" onChange={(e) => up({ v: e.target.value })} />
+            </React.Fragment>
+          )} />
+      </Section>
+      {cfg.method === 'POST' ? <Field label="正文（JSON）"><textarea className="input mono" rows={3} value={cfg.body || ''} onChange={(e) => set({ body: e.target.value })} /></Field> : null}
+      <Field label="数据路径" hint="响应 JSON 中数组的点路径，如 data.rows；留空 = 根"><input className="input mono" value={cfg.dataPath || ''} onChange={(e) => set({ dataPath: e.target.value })} /></Field>
+      <Section title="分页" hint="页码参数按页递增，返回不足页大小时停止；留空参数名 = 不分页">
+        <div className="etl-row2">
+          <Field label="页码参数"><input className="input mono" value={pg.param || ''} onChange={(e) => setPg({ param: e.target.value })} /></Field>
+          <Field label="页大小参数"><input className="input mono" value={pg.sizeParam || ''} onChange={(e) => setPg({ sizeParam: e.target.value })} /></Field>
+        </div>
+        <div className="etl-row2">
+          <Field label="页大小"><input className="input" type="number" min="1" value={pg.size || ''} onChange={(e) => setPg({ size: num(e.target.value, 0) })} /></Field>
+          <Field label="最大页数"><input className="input" type="number" min="1" value={pg.maxPages || 1000} onChange={(e) => setPg({ maxPages: num(e.target.value, 1000) })} /></Field>
+        </div>
+      </Section>
+      <Section title="字段" hint="点路径相对每个数组元素取值；失败的行进入错误输出">
+        <DeclaredFieldsEditor rows={rows} onChange={(fields) => set({ fields })} withPath />
+      </Section>
+    </React.Fragment>
+  );
+});
+
 // ---------------------------------------------------------------- 作业项
 
 registerForm('workflow', 'start', ({ ctx }) => (

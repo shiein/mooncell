@@ -340,7 +340,8 @@ type Dialect interface {
 | 转换 | `value_mapper` | 值映射 | 已实现 |
 | 连接 | `merge_rows` / `sync_after_merge` | 合并记录 / 数据同步（含删除） | 已实现 |
 | 查询 | `stream_lookup` / `db_lookup` | 流查询 / 数据库查询 | 已实现 |
-| 输入 | `http_input` / `csv_input` | HTTP / CSV | TODO |
+| 输入 | `csv_input` / `csv_output` | CSV 读 / 写（声明类型、UTF-8/GBK） | 已实现 |
+| 输入 | `http_input` | HTTP GET/POST（${变量}、页码分页、JSON 点路径拍平） | 已实现 |
 
 **合并/同步语义**（与 Kettle Merge rows (diff) + Synchronize after merge 对齐）：
 
@@ -360,6 +361,16 @@ type Dialect interface {
 * `db_lookup`：主流逐行 `SELECT … WHERE k=? AND …` 等值查目标表；结果按查询键缓存
   （`noCache` 关闭），多行命中默认取第一行（`orderBy` 排序，`failOnMulti` 则进错误输出）；
   键为 NULL 直接判未命中（`= NULL` 恒不成立）。
+
+**文件 / 接口步骤语义**：
+
+* `csv_input`：服务器本地文件，按**声明字段**（位置对应列）逐行类型转换，
+  空串→NULL、首行表头跳过；编码 utf-8/gbk；转换失败/列数超出的行进错误输出。
+* `csv_output`：写服务器本地文件（可追加），`FormatFieldValue` 按字段 scale 输出。
+* `http_input`：`${变量}` 文本替换 URL/头/正文（变量须在转换参数中声明）；
+  `dataPath` 指向响应 JSON 中的数组（对象→单行），字段按相对点路径取值；
+  分页为页码参数递增（GET 加 query、POST 注入 JSON body），返回不足 `size` 即末页，
+  `maxPages` 为安全上限；非 2xx、非 JSON、dataPath 不存在均为步骤级失败。
 
 ---
 

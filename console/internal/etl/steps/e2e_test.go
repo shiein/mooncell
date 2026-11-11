@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -553,6 +556,106 @@ func TestDBLookup(t *testing.T) {
 	}
 	if n := count(t, db, `SELECT count(*) FROM dst`); n != 2 {
 		t.Fatalf("主输出应为 2 行，实际 %d", n)
+	}
+}
+
+// CSV 输入/输出：读定界文件（表头、类型转换、错误行）→ 写回文件。
+func TestCSVSteps(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE dst (id INTEGER, name TEXT, amount DECIMAL(10,2))`)
+	mustExec(t, db, `CREATE TABLE bad (id INTEGER, name TEXT, amount TEXT, _error_code TEXT, _error_message TEXT, _error_field TEXT, _error_step TEXT)`)
+	dir := t.TempDir()
+	src := dir + "/in.csv"
+	os.WriteFile(src, []byte("id,name,amount\n1,甲,3.40\n2,乙,7\n3,丙,不是数\n4,丁,9.99\n"), 0o644)
+	outPath := dir + "/out.csv"
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("csv", "csv_input", map[string]any{
+				"path": src, "hasHeader": true,
+				"fields": []map[string]any{
+					{"name": "id", "kind": "integer"},
+					{"name": "name", "kind": "string"},
+					{"name": "amount", "kind": "decimal"},
+				},
+			}),
+			node("o", "table_output", map[string]any{"connection": "db", "table": "dst"}),
+			node("oe", "table_output", map[string]any{"connection": "db", "table": "bad"}),
+			node("co", "csv_output", map[string]any{"path": outPath, "header": true}),
+		},
+		Hops: []pipeline.Hop{
+			hop("csv", "main", "o"), hop("o", "main", "co"),
+			{ID: "e", From: "csv", FromPort: "error", To: "oe", ToPort: "main"},
+		},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 3 {
+		t.Fatalf("dst 应为 3 行，实际 %d", n)
+	}
+	if n := count(t, db, `SELECT count(*) FROM bad WHERE id = 3`); n != 1 {
+		t.Fatalf("转换失败行应进错误输出，实际 %d", n)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "id,name,amount") || !strings.Contains(text, "3.4") {
+		t.Fatalf("CSV 输出内容不符：%q", text)
+	}
+	if lines := strings.Count(strings.TrimSpace(text), "\n"); lines != 3 {
+		t.Fatalf("CSV 输出应 3 行数据，实际 %d：%q", lines, text)
+	}
+	if m := res.Metrics["csv"]; m.Rejected != 1 {
+		t.Fatalf("度量应为 Rejected=1：%+v", m)
+	}
+}
+
+// HTTP 输入：httptest 服务端返回分页 JSON，dataPath 拍平 + 字段点路径取值。
+func TestHTTPInput(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE dst (id INTEGER, name TEXT)`)
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.RawQuery)
+		var items string
+		switch r.URL.Query().Get("p") {
+		case "1":
+			items = `[{"id":1,"n":"a"},{"id":2,"n":"b"}]`
+		case "2":
+			items = `[{"id":3,"n":"c"}]` // 不足 size=2 → 末页
+		default:
+			items = `[]`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":{"rows":%s}}`, items)
+	}))
+	defer srv.Close()
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("h", "http_input", map[string]any{
+				"url": srv.URL + "/list", "dataPath": "data.rows",
+				"page": map[string]any{"param": "p", "size": 2},
+				"fields": []map[string]any{
+					{"name": "id", "path": "id", "kind": "integer"},
+					{"name": "name", "path": "n", "kind": "string"},
+				},
+			}),
+			node("o", "table_output", map[string]any{"connection": "db", "table": "dst"}),
+		},
+		Hops: []pipeline.Hop{hop("h", "main", "o")},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 3 {
+		t.Fatalf("dst 应为 3 行（2 页），实际 %d", n)
+	}
+	if len(got) != 2 {
+		t.Fatalf("应翻 2 页，实际请求 %d 次：%v", len(got), got)
 	}
 }
 
