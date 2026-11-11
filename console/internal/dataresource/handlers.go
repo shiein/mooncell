@@ -164,7 +164,7 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "创建资源失败")
 		return
 	}
-	s.auditLog(user, "创建数据资源", res.Name, "成功")
+	s.auditLog(r, user, "创建数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
 
@@ -253,7 +253,7 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新后读取资源失败")
 		return
 	}
-	s.auditLog(user, "更新数据资源", res.Name, "成功")
+	s.auditLog(r, user, "更新数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
 
@@ -305,7 +305,7 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 	// 失效工作台并关闭连接池
 	s.InvalidateResource(id)
 	s.pools.CloseDB(id)
-	s.auditLog(user, "删除数据资源", res.Name, "成功")
+	s.auditLog(r, user, "删除数据资源", res.Name, "成功")
 	writeOK(w, map[string]bool{"ok": true})
 }
 
@@ -433,7 +433,7 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 		s.InvalidateUserResource(username, id)
 	}
 	user, _, _ := userFromCtx(r)
-	s.auditLog(user, "测试连接", res.Name, status)
+	s.auditLog(r, user, "测试连接", res.Name, status)
 	writeOK(w, testResultResponse(result))
 }
 

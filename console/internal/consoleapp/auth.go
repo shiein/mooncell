@@ -275,7 +275,7 @@ func (a *api) requireAuthDR(next func(http.ResponseWriter, *http.Request)) http.
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "未登录"})
 			return
 		}
-		next(w, dataresource.WithSession(r, sess.Username, role, sess.LeaseID))
+		next(w, dataresource.WithClientIP(dataresource.WithSession(r, sess.Username, role, sess.LeaseID), clientIP(r)))
 	}
 }
 

@@ -257,14 +257,14 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 	// 无写权限（只读或其它非 write）一律拒绝写操作；mode=="" 已在 resolve 拦截。
 	// 白名单 SET 只改本工作台会话的展示/解析参数，只读用户可用。
 	if !canWriteAccess(mode) && !stmtType.IsReadOnly() && stmtType != StmtSession && an.Reject == "" && stmtType != StmtUnknown {
-		s.auditSQL(user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
+		s.auditSQL(r, user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
 		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许执行写操作")
 		return
 	}
 
 	// 危险 SQL 二次确认：TRUNCATE/DROP/无 WHERE 的 DELETE/UPDATE（方言感知，MySQL # 注释与反斜杠转义不再绕过）
 	if isDangerousWriteFor(stmtType, body.SQL, d) && !body.Confirmed {
-		s.auditSQL(user, "危险SQL被拒绝", id, stmtType, body.SQL, "拒绝·DANGEROUS", 0)
+		s.auditSQL(r, user, "危险SQL被拒绝", id, stmtType, body.SQL, "拒绝·DANGEROUS", 0)
 		writeErr(w, http.StatusForbidden, "DANGEROUS_SQL", "危险操作需二次确认：TRUNCATE/DROP/无 WHERE 的 DELETE 或 UPDATE")
 		return
 	}
@@ -281,7 +281,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 				txState = apiErr.TxState
 			}
 			if apiErr.Code == "DATA_RESOURCE_READ_ONLY" {
-				s.auditSQL(user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
+				s.auditSQL(r, user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
 				writeErrTx(w, http.StatusForbidden, apiErr.Code, apiErr.Message, txState)
 				return
 			}
@@ -303,7 +303,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		}
 		var de DatabaseError
 		if errors.As(err, &de) && de.Code != "" {
-			s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败·"+de.Code, 0)
+			s.auditSQL(r, user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败·"+de.Code, 0)
 			status := http.StatusBadRequest
 			switch de.Code {
 			case "DATA_RESOURCE_READ_ONLY":
@@ -315,7 +315,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, status, APIError{Message: de.Message, Code: de.Code, TxState: txState, Position: de.Position})
 			return
 		}
-		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败", 0)
+		s.auditSQL(r, user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败", 0)
 		writeErrTx(w, http.StatusBadRequest, "EXEC_ERROR", err.Error(), txState)
 		return
 	}
@@ -329,7 +329,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		if result.AffectedRows >= 0 {
 			auditResult = fmt.Sprintf("成功·%d行", result.AffectedRows)
 		}
-		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, auditResult, result.DurationMs)
+		s.auditSQL(r, user, "执行"+string(stmtType), id, stmtType, body.SQL, auditResult, result.DurationMs)
 	}
 	writeOK(w, result)
 }
@@ -466,11 +466,11 @@ func (s *Service) ApplyRowEditsHandler(w http.ResponseWriter, r *http.Request) {
 	result, err := applyRowEditsGuarded(ectx, ws.Adapter, body.Schema, body.Table, pks, body, ws.ensureOpenLocked)
 	if err != nil {
 		// 审计不落库原始错误文本
-		s.auditLog(user, "就地编辑", body.Schema+"."+body.Table, "失败")
+		s.auditLog(r, user, "就地编辑", body.Schema+"."+body.Table, "失败")
 		writeErr(w, http.StatusBadRequest, "ROW_EDIT_ERROR", err.Error())
 		return
 	}
-	s.auditLog(user, "就地编辑", body.Schema+"."+body.Table,
+	s.auditLog(r, user, "就地编辑", body.Schema+"."+body.Table,
 		fmt.Sprintf("成功·更新%d·删除%d", result.Updated, result.Deleted))
 	writeOK(w, result)
 }
@@ -488,7 +488,7 @@ func (s *Service) CommitWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 		writeErrTx(w, http.StatusConflict, "COMMIT_FAILED", err.Error(), string(snap.TxState))
 		return
 	}
-	s.auditLog(user, "提交事务", ws.ResourceID, "成功")
+	s.auditLog(r, user, "提交事务", s.resourceLabel(ws.ResourceID), "成功")
 	writeOK(w, map[string]any{
 		"txState":    string(snap.TxState),
 		"autoCommit": snap.AutoCommit,
@@ -508,7 +508,7 @@ func (s *Service) RollbackWorkspaceHandler(w http.ResponseWriter, r *http.Reques
 		writeErrTx(w, http.StatusInternalServerError, "ROLLBACK_FAILED", err.Error(), string(snap.TxState))
 		return
 	}
-	s.auditLog(user, "回滚事务", ws.ResourceID, "成功")
+	s.auditLog(r, user, "回滚事务", s.resourceLabel(ws.ResourceID), "成功")
 	writeOK(w, map[string]any{
 		"txState":    string(snap.TxState),
 		"autoCommit": snap.AutoCommit,

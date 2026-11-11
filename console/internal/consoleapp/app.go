@@ -84,8 +84,8 @@ func Run(distFS fs.FS, version string, args []string) {
 	})
 	dataResSvc.CleanupOrphanImportsOnStart()
 	// 注入审计回调：复用现有审计系统，数据资源操作也写入审计日志。
-	dataResSvc.SetAuditFunc(func(user, action, target, result string) {
-		a.store.appendAudit(user, action, "数据资源·"+target, result)
+	dataResSvc.SetAuditFunc(func(user, action, target, result, ip string) {
+		a.store.appendAuditIP(user, action, "数据资源·"+target, result, ip)
 	})
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。

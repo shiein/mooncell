@@ -656,12 +656,12 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		body.ColumnMapping, s.excelOpenOptions(), commitGuard)
 	// commitGuard 已确定提交与失效的先后；仅未成功提交时按“已失效”返回。
 	if session.invalidated.Load() && (err != nil || result == nil || result.Error != "") {
-		s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, "失败·失效")
+		s.auditLog(r, user, "导入数据", session.FileName+" → "+body.TableName, "失败·失效")
 		writeErr(w, http.StatusConflict, "IMPORT_INVALIDATED", errImportInvalidated.Error())
 		return
 	}
 	if err != nil {
-		s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, "失败")
+		s.auditLog(r, user, "导入数据", session.FileName+" → "+body.TableName, "失败")
 		writeErr(w, http.StatusInternalServerError, "IMPORT_ERROR", err.Error())
 		return
 	}
@@ -671,12 +671,12 @@ func (s *Service) ImportExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		if result.ErrorRow > 0 {
 			audit = fmt.Sprintf("失败·行%d", result.ErrorRow)
 		}
-		s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, audit)
+		s.auditLog(r, user, "导入数据", session.FileName+" → "+body.TableName, audit)
 		writeOK(w, result)
 		return
 	}
 
-	s.auditLog(user, "导入数据", session.FileName+" → "+body.TableName, fmt.Sprintf("成功·%d行", result.ImportedRows))
+	s.auditLog(r, user, "导入数据", session.FileName+" → "+body.TableName, fmt.Sprintf("成功·%d行", result.ImportedRows))
 	removeOnReturn = true
 	writeOK(w, result)
 }
