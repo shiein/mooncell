@@ -73,7 +73,7 @@ func liveSync(t *testing.T, dialect string) {
 		return cfg, pw, nil
 	})
 	defer pool.Close()
-	host := &liveHost{pipelines: map[string]*pipeline.Definition{}}
+	host := &liveHost{pipelines: map[string]*pipeline.Definition{}, workflows: map[string]*workflow.Definition{}}
 	pk, pv := pool.EnvEntry()
 	rk, rv := actions.RunnerEntry(host)
 	env := core.MapEnv{pk: pv, rk: rv}
@@ -212,9 +212,10 @@ func mustQuery(t *testing.T, h *conn.Handle, q string, out ...any) {
 
 func cfgJSON(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
 
-// liveHost 实现 actions.PipelineRunner：直接编译并运行内存中的转换定义。
+// liveHost 实现 actions.PipelineRunner：直接编译并运行内存中的转换/作业定义。
 type liveHost struct {
 	pipelines map[string]*pipeline.Definition
+	workflows map[string]*workflow.Definition
 	env       core.Env
 }
 
@@ -238,6 +239,42 @@ func (h *liveHost) RunPipeline(ctx context.Context, ec *workflow.ExecContext, id
 	for _, m := range res.Metrics {
 		sum.Read += m.Input
 		sum.Written += m.Output + m.Updated
+	}
+	return sum, res.Err
+}
+
+func (h *liveHost) WorkflowParams(ctx context.Context, id string) (string, []core.ParamDecl, error) {
+	d, ok := h.workflows[id]
+	if !ok {
+		return "", nil, fmt.Errorf("no workflow %s", id)
+	}
+	return id, d.Params, nil
+}
+
+func (h *liveHost) RunWorkflow(ctx context.Context, ec *workflow.ExecContext, id string, params map[string]core.Value) (actions.WorkflowSummary, error) {
+	def, ok := h.workflows[id]
+	if !ok {
+		return actions.WorkflowSummary{}, fmt.Errorf("no workflow %s", id)
+	}
+	vars := core.NewVars(ec.Vars)
+	for k, v := range params {
+		vars.Set(k, v)
+	}
+	plan := workflow.Compile(ctx, def, workflow.CompileOptions{Env: h.env})
+	if plan.Problems.HasErrors() {
+		return actions.WorkflowSummary{}, fmt.Errorf("子作业编译失败：%v", plan.Problems.First())
+	}
+	res := workflow.Run(ctx, plan, workflow.RunOptions{Env: h.env, Vars: vars, Log: ec.Log})
+	var sum actions.WorkflowSummary
+	for _, ev := range res.Nodes {
+		switch ev.Status {
+		case workflow.NodeSucceeded, workflow.NodeReused:
+			sum.Succeeded++
+		case workflow.NodeFailed:
+			sum.Failed++
+		default:
+			sum.Skipped++
+		}
 	}
 	return sum, res.Err
 }
