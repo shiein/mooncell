@@ -13,6 +13,13 @@ import (
 // MaxCopies 是单个步骤并行副本的上限。
 const MaxCopies = 8
 
+// copiesWriteRace 是按键读/写库的步骤（R1-B3）：多副本并发时，目标表键上
+// 缺少唯一约束会产生竞态与重复行 → 编译期告警。
+var copiesWriteRace = map[string]bool{
+	"insert_update": true, "update": true, "delete": true,
+	"sync_after_merge": true, "db_lookup": true,
+}
+
 // Plan 是编译结果：拓扑有序的节点、每条连线的 schema 与全部问题。
 type Plan struct {
 	Def      *Definition
@@ -144,6 +151,11 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 			pn.Blocked = true
 			continue
 		}
+		if n.CopiesDistribution != "" && n.CopiesDistribution != core.DistCopy && n.CopiesDistribution != core.DistDistribute {
+			errf(n.ID, "", "copies_dist", "copiesDistribution 只能是 copy 或 distribute（当前 %q）", n.CopiesDistribution)
+			pn.Blocked = true
+			continue
+		}
 		if n.Copies > 1 {
 			if len(t.Meta().Inputs) == 0 {
 				errf(n.ID, "", "copies_source", "「%s」是输入源步骤，副本会让每份都读全量数据；如需并行拆分请在源 SQL/上游用 distribute 分发", n.Name)
@@ -152,6 +164,9 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 			}
 			if t.Meta().Stateful {
 				p.Problems = append(p.Problems, core.Problem{Severity: core.SeverityWarning, NodeID: n.ID, Code: "copies_stateful", Message: fmt.Sprintf("「%s」依赖全量/有序输入，%d 个副本间不共享状态，结果只是各自分片的局部正确", n.Name, n.Copies)})
+			}
+			if copiesWriteRace[n.Type] {
+				p.Problems = append(p.Problems, core.Problem{Severity: core.SeverityWarning, NodeID: n.ID, Code: "copies_write_race", Message: fmt.Sprintf("「%s」的 %d 个副本会并发按键读/写同一张表，键上缺少唯一约束时会产生竞态和重复行", n.Name, n.Copies)})
 			}
 		}
 	}
@@ -210,6 +225,43 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 			}
 			if port.Required && len(hops) == 0 {
 				errf(pn.Node.ID, "", "port_required", "「%s」缺少输入「%s」", pn.Node.Name, port.Label)
+			}
+		}
+	}
+
+	// R1-B3：多副本节点的下游若存在要求有序输入的步骤（unique_sorted、merge_rows 等），
+	// 各副本分片汇流后行序被打乱 → 告警。sort_rows 重建全序，不再向下游传播。
+	for _, pn := range p.ByID {
+		if pn.Node.Copies <= 1 {
+			continue
+		}
+		seen, warned := map[string]bool{}, map[string]bool{}
+		var dfs func(id string)
+		dfs = func(id string) {
+			if seen[id] {
+				return
+			}
+			seen[id] = true
+			cur := p.ByID[id]
+			if cur == nil || cur.Type == nil {
+				return
+			}
+			if cur.Type.Meta().OrderedInput && !warned[id] {
+				warned[id] = true
+				p.Problems = append(p.Problems, core.Problem{Severity: core.SeverityWarning, NodeID: id, Code: "copies_order", Message: fmt.Sprintf("「%s」要求有序输入，但上游「%s」的 %d 个副本会打乱行序；如需有序请先加「排序记录」", cur.Node.Name, pn.Node.Name, pn.Node.Copies)})
+			}
+			if cur.Node.Type == "sort_rows" { // 重建全序
+				return
+			}
+			for _, hops := range cur.OutHops {
+				for _, h := range hops {
+					dfs(h.To)
+				}
+			}
+		}
+		for _, hops := range pn.OutHops {
+			for _, h := range hops {
+				dfs(h.To)
 			}
 		}
 	}

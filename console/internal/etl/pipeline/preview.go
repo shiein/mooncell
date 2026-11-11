@@ -141,7 +141,7 @@ func (c *capture) attach(rc *core.RunContext, pn *PlanNode) {
 		}
 		ch := make(chan core.Batch, 4)
 		// 子定义中目标节点没有下游：输出只接收集通道
-		targets := []core.Target{{Ch: ch}}
+		targets := []core.Target{{Chans: []chan<- core.Batch{ch}}}
 		rc.Outputs[port] = core.NewOutPort(schema, core.DistCopy, targets, rc.Metrics)
 		c.chans = append(c.chans, ch)
 		c.wg.Add(1)

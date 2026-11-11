@@ -55,7 +55,7 @@ func render(d conn.Dialect, sql string, resolve sqltext.Resolver) (string, []any
 }
 
 // bindExtra 把下推优化写入配置的追加参数接到 ${} 参数之后
-//（其占位符编号已在改写时按序生成，故此序不可颠倒）。
+// （其占位符编号已在改写时按序生成，故此序不可颠倒）。
 func bindExtra(d conn.Dialect, args, extra []any) ([]any, error) {
 	for _, a := range extra {
 		b, err := d.Bind(a, core.Field{Kind: core.KindOf(a)})

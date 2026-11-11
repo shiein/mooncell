@@ -181,14 +181,18 @@ func Run(ctx context.Context, plan *Plan, opts RunOptions) Result {
 			for port, hops := range pn.OutHops {
 				var targets []core.Target
 				for _, h := range hops {
+					// 一条连线一个 Target：其 Chans 覆盖目标节点全部副本；
+					// 副本间分发方式取目标节点的 copiesDistribution（缺省轮询）。
+					tg := core.Target{Mode: plan.ByID[h.To].Node.CopiesDistribution}
 					for ti := range inboxes[h.To] {
 						b := inboxes[h.To][ti][h.ToPort]
 						if b == nil {
 							continue
 						}
-						targets = append(targets, core.Target{Ch: b.ch})
+						tg.Chans = append(tg.Chans, b.ch)
 						rep.outEdges = append(rep.outEdges, b)
 					}
+					targets = append(targets, tg)
 				}
 				rc.Outputs[port] = core.NewOutPort(pn.Outputs[port], pn.Node.Distribution[port], targets, m)
 			}

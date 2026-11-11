@@ -109,11 +109,11 @@ func TestToSQL(t *testing.T) {
 
 	bad := []string{
 		// 验收六个反例中属字符串语义的五条：必须拒推
-		`name == "abc"`,         // 字符串比较（MySQL 排序规则下语义漂移）
-		`length(name) == 4`,     // 字符串函数（LENGTH 按字节/字符漂移）
-		`name == "a\\b"`,        // 字符串字面量（MySQL 反斜杠转义漂移）
-		`trim(name) == "x"`,     // 字符串函数（TRIM 空白集漂移）
-		`name + "x" == "abcx"`,  // 字符串 +（MySQL 数值化强转）
+		`name == "abc"`,        // 字符串比较（MySQL 排序规则下语义漂移）
+		`length(name) == 4`,    // 字符串函数（LENGTH 按字节/字符漂移）
+		`name == "a\\b"`,       // 字符串字面量（MySQL 反斜杠转义漂移）
+		`trim(name) == "x"`,    // 字符串函数（TRIM 空白集漂移）
+		`name + "x" == "abcx"`, // 字符串 +（MySQL 数值化强转）
 		// 变量 / 运行期值
 		`var("v") > 1`,
 		// 字符串/日期/哈希等函数全部拒推

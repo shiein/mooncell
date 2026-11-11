@@ -68,11 +68,14 @@ type Meta struct {
 	ErrorPort   bool       `json:"errorPort,omitempty"` // 支持把出错行转到 error 端口
 	// Stateful：语义依赖看到全量/有序输入（排序、去重、匹配合并、变量落库等）。
 	// 设 copies>1 时编译给出告警——副本间不共享状态，结果只是各自分片的局部正确。
-	Stateful bool     `json:"stateful,omitempty"`
-	Version  int      `json:"version"` // 当前配置结构版本
-	Maturity Maturity `json:"maturity"`
-	Keywords []string `json:"keywords,omitempty"` // 面板搜索同义词（如 Kettle 原名）
-	Order    int      `json:"order"`              // 分类内的展示顺序（小在前），相同则按 ID
+	Stateful bool `json:"stateful,omitempty"`
+	// OrderedInput：输入必须按键有序（unique_sorted、merge_rows）。
+	// 上游存在 copies>1 节点时，各副本分片汇流后顺序被打乱，编译给出告警。
+	OrderedInput bool     `json:"orderedInput,omitempty"`
+	Version      int      `json:"version"` // 当前配置结构版本
+	Maturity     Maturity `json:"maturity"`
+	Keywords     []string `json:"keywords,omitempty"` // 面板搜索同义词（如 Kettle 原名）
+	Order        int      `json:"order"`              // 分类内的展示顺序（小在前），相同则按 ID
 }
 
 // InputPort 返回指定名称的输入端口声明。
@@ -382,8 +385,30 @@ const (
 )
 
 // Target 是输出端口的一条下游连线，由运行器构造。
+// 一条连线可到达目标节点的多个副本：Chans 逐副本一个通道，
+// Mode 决定组内副本间怎么分（缺省 distribute 轮询；copy 每副本收全量）。
 type Target struct {
-	Ch chan<- Batch
+	Mode  Distribution
+	Chans []chan<- Batch
+	next  int
+}
+
+// send 按组内分发模式投递一个批次。
+func (t *Target) send(ctx context.Context, b Batch) error {
+	if len(t.Chans) == 0 {
+		return nil
+	}
+	if t.Mode == DistCopy {
+		for _, ch := range t.Chans {
+			if err := sendOne(ctx, ch, b); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	ch := t.Chans[t.next%len(t.Chans)]
+	t.next++
+	return sendOne(ctx, ch, b)
 }
 
 // OutPort 是输出端口。
@@ -416,14 +441,14 @@ func (p *OutPort) Send(ctx context.Context, b Batch) error {
 	}
 	switch p.mode {
 	case DistDistribute:
-		t := p.targets[p.next%len(p.targets)]
+		t := &p.targets[p.next%len(p.targets)]
 		p.next++
-		if err := sendOne(ctx, t.Ch, b); err != nil {
+		if err := t.send(ctx, b); err != nil {
 			return err
 		}
 	default:
-		for _, t := range p.targets {
-			if err := sendOne(ctx, t.Ch, b); err != nil {
+		for i := range p.targets {
+			if err := p.targets[i].send(ctx, b); err != nil {
 				return err
 			}
 		}

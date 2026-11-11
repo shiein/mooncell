@@ -85,8 +85,9 @@ func init() {
 	core.Steps.Register(core.Define(core.Definition[MergeRowsConfig]{
 		Meta: core.Meta{
 			ID: "merge_rows", Order: 60, Label: "合并记录", Category: core.CategoryJoin, Icon: "merge",
-			Stateful:    true,
-			Description: "把按键有序的两条流（参照 main / 对比 info）归并为一条，追加标志字段：identical/changed/new/deleted。常与「数据同步」配合做全量比对同步。",
+			Stateful:     true,
+			OrderedInput: true,
+			Description:  "把按键有序的两条流（参照 main / 对比 info）归并为一条，追加标志字段：identical/changed/new/deleted。常与「数据同步」配合做全量比对同步。",
 			Inputs: []core.PortDecl{
 				{Name: core.PortMain, Label: "参照", Required: true},
 				{Name: PortInfo, Label: "对比", Required: true},

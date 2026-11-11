@@ -1032,7 +1032,8 @@ func TestInsertUpdateNoUpdateUpsert(t *testing.T) {
 	}
 }
 
-// P3.18 并行副本：distribute 上游把行轮询分发给各副本；copy 上游则每副本收全量。
+// P3.18 / R1-B3：copiesDistribution 独立语义——单连线到多副本节点缺省轮询分发（N 行进 N 行出），
+// 显式 copy 才每副本收全量；与上游端口「多连线分发方式」互不影响。
 func TestNodeCopies(t *testing.T) {
 	e, db := env(t)
 	mustExec(t, db, `CREATE TABLE copied (seq INTEGER, w INTEGER)`)
@@ -1043,13 +1044,11 @@ func TestNodeCopies(t *testing.T) {
 		"fields": []map[string]any{{"stream": "seq", "column": "seq"}, {"stream": "w", "column": "w"}},
 	}
 
-	// distribute：行轮流分给 3 个副本，总数守恒
+	// 缺省 distribute：行轮流分给 3 个副本，写库 999 行且 seq 无重复
 	calcNode := node("calc", "calculator", calc)
 	calcNode.Copies = 3
-	genNode := node("gen", "generate_rows", gen)
-	genNode.Distribution = map[string]core.Distribution{"main": core.DistDistribute}
 	def := &pipeline.Definition{
-		Nodes: []pipeline.Node{genNode, calcNode, node("out", "table_output", out)},
+		Nodes: []pipeline.Node{node("gen", "generate_rows", gen), calcNode, node("out", "table_output", out)},
 		Hops:  []pipeline.Hop{hop("gen", "main", "calc"), hop("calc", "main", "out")},
 	}
 	res := run(t, e, def, nil)
@@ -1057,21 +1056,42 @@ func TestNodeCopies(t *testing.T) {
 		t.Fatal(res.Err)
 	}
 	if n := count(t, db, `SELECT count(*) FROM copied`); n != 999 {
-		t.Fatalf("distribute 总行数应守恒，实际 %d", n)
+		t.Fatalf("缺省应为轮询分发、写库 999 行，实际 %d", n)
+	}
+	if n := count(t, db, `SELECT count(DISTINCT seq) FROM copied`); n != 999 {
+		t.Fatalf("seq 不应重复，实际 %d 个不同值", n)
 	}
 	if m := res.Metrics["calc"]; m.Read != 999 {
 		t.Fatalf("calc 汇总读取应为 999，实际 %+v", m)
 	}
 
-	// copy：每个副本收到全量 → 下游 3 倍行数
+	// 显式 copy：每个副本收全量 → 写库 3×999
 	mustExec(t, db, `DELETE FROM copied`)
-	def.Nodes[0].Distribution = nil
+	def.Nodes[1].CopiesDistribution = core.DistCopy
 	res = run(t, e, def, nil)
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
 	if n := count(t, db, `SELECT count(*) FROM copied`); n != 999*3 {
 		t.Fatalf("copy 模式每副本应收全量（3×999），实际 %d", n)
+	}
+
+	// 上游端口多连线时的 copy/distribute 语义独立于副本分发：
+	// gen 复制发给 calc(3副本,缺省轮询) 与另一个 dummy 分支，calc 一侧仍按行切分。
+	mustExec(t, db, `DELETE FROM copied`)
+	calcNode.CopiesDistribution = ""
+	genNode := node("gen", "generate_rows", gen)
+	genNode.Distribution = map[string]core.Distribution{"main": core.DistCopy}
+	def = &pipeline.Definition{
+		Nodes: []pipeline.Node{genNode, calcNode, node("out", "table_output", out), node("sink", "dummy", map[string]any{})},
+		Hops:  []pipeline.Hop{hop("gen", "main", "calc"), hop("gen", "main", "sink"), hop("calc", "main", "out")},
+	}
+	res = run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM copied`); n != 999 {
+		t.Fatalf("多连线 copy 下 calc 各副本仍应合计只写 999 行，实际 %d", n)
 	}
 }
 
@@ -1120,6 +1140,83 @@ func TestNodeCopiesValidation(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("应给出 copies_stateful 告警")
+	}
+}
+
+// R1-B3 副本编译告警：按键写步骤多副本竞态、多副本上游打乱有序输入。
+func TestNodeCopiesWarnings(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE wtbl (id INTEGER, v INTEGER)`)
+
+	warnCodes := func(def *pipeline.Definition) map[string]bool {
+		plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+		if plan.Problems.HasErrors() {
+			t.Fatalf("告警用例不应产生 error：%+v", plan.Problems)
+		}
+		codes := map[string]bool{}
+		for _, p := range plan.Problems {
+			if p.Severity == core.SeverityWarning {
+				codes[p.Code] = true
+			}
+		}
+		return codes
+	}
+	gen := map[string]any{"limit": 10, "sequenceField": "seq"}
+
+	// 1) copies>1 的按键写步骤 → copies_write_race
+	for _, typ := range []struct {
+		id  string
+		cfg map[string]any
+	}{
+		{"insert_update", map[string]any{"connection": "db", "table": "wtbl", "keys": []map[string]any{{"stream": "seq", "column": "id"}}, "fields": []map[string]any{{"stream": "seq", "column": "v"}}}},
+		{"update", map[string]any{"connection": "db", "table": "wtbl", "keys": []map[string]any{{"stream": "seq", "column": "id"}}, "fields": []map[string]any{{"stream": "seq", "column": "v"}}}},
+		{"delete", map[string]any{"connection": "db", "table": "wtbl", "keys": []map[string]any{{"stream": "seq", "column": "id"}}}},
+		{"db_lookup", map[string]any{"connection": "db", "table": "wtbl", "keys": []map[string]any{{"stream": "seq", "column": "id"}}, "returns": []map[string]any{{"column": "v", "name": "v"}}}},
+	} {
+		n := node("w", typ.id, typ.cfg)
+		n.Copies = 2
+		def := &pipeline.Definition{
+			Nodes: []pipeline.Node{node("gen", "generate_rows", gen), n},
+			Hops:  []pipeline.Hop{hop("gen", "main", "w")},
+		}
+		if codes := warnCodes(def); !codes["copies_write_race"] {
+			t.Fatalf("%s 设 2 副本应给 copies_write_race 告警，实际 %+v", typ.id, codes)
+		}
+	}
+
+	// 2) copies>1 下游存在要求有序输入的步骤 → copies_order
+	calc := node("calc", "calculator", map[string]any{"fields": []map[string]any{{"name": "w", "expr": "seq"}}})
+	calc.Copies = 2
+	for _, ordered := range []struct {
+		id  string
+		cfg map[string]any
+	}{
+		{"unique_sorted", map[string]any{"keys": []string{"seq"}}},
+		{"merge_rows", nil}, // merge_rows 需要两个输入，跳过直连用例
+	} {
+		if ordered.cfg == nil {
+			continue
+		}
+		def := &pipeline.Definition{
+			Nodes: []pipeline.Node{node("gen", "generate_rows", gen), calc, node("o", ordered.id, ordered.cfg)},
+			Hops:  []pipeline.Hop{hop("gen", "main", "calc"), hop("calc", "main", "o")},
+		}
+		if codes := warnCodes(def); !codes["copies_order"] {
+			t.Fatalf("多副本上游→%s 应给 copies_order 告警，实际 %+v", ordered.id, codes)
+		}
+	}
+
+	// 中间隔 sort_rows 后告警解除（排序重建全序）
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("gen", "generate_rows", gen), calc,
+			node("srt", "sort_rows", map[string]any{"fields": []map[string]any{{"name": "seq"}}}),
+			node("o", "unique_sorted", map[string]any{"keys": []string{"seq"}}),
+		},
+		Hops: []pipeline.Hop{hop("gen", "main", "calc"), hop("calc", "main", "srt"), hop("srt", "main", "o")},
+	}
+	if codes := warnCodes(def); codes["copies_order"] {
+		t.Fatalf("sort_rows 重建全序后不应再有 copies_order 告警，实际 %+v", codes)
 	}
 }
 

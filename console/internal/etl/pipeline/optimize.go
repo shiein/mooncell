@@ -22,7 +22,7 @@ type PushdownNote struct {
 // 仅 settings.pushdown 显式开启时生效（默认关闭，旧定义行为不变）。
 // 条件经 expr.ToSQL 白名单翻译——字面量全部生成绑定参数，按 ${} 参数之后的
 // 占位符序号续接，值写入源配置的 pushArgs；任一环节不可安全下推即放弃该分支
-//（返回原定义）。前置要求：plan 由 def 编译得到且无 error。
+// （返回原定义）。前置要求：plan 由 def 编译得到且无 error。
 // 返回的总是新对象，def 不被修改。
 func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*Definition, []PushdownNote) {
 	if !plan.Settings.Pushdown {

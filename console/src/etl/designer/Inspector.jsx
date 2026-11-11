@@ -102,7 +102,7 @@ function NodeInspector({ d, node }) {
         <div className="etl-inline" style={{ padding: '7px 14px', borderBottom: '1px solid var(--border)' }}>
           <div className="etl-inline-label">
             <span>并行副本</span>
-            <small>跑 {Math.max(1, node.copies || 1)} 份实例；上游「分发」轮询分行，「复制」则每份收全量。源步骤与全量状态步骤不适用</small>
+            <small>跑 {Math.max(1, node.copies || 1)} 份实例；默认轮询分行、合计只收一份输入，「复制」则每份收全量（下游会写多倍行数）。源步骤与全量状态步骤不适用</small>
           </div>
           <input type="number" className="input" style={{ width: 64 }} min={1} max={8} disabled={d.readOnly}
             value={node.copies || 1}
@@ -110,6 +110,11 @@ function NodeInspector({ d, node }) {
               const v = Math.max(1, Math.min(8, parseInt(e.target.value, 10) || 1));
               d.updateNode(node.id, (n) => ({ ...n, copies: v > 1 ? v : undefined }));
             }} />
+          {(node.copies || 1) > 1 ? (
+            <Seg value={node.copiesDistribution || 'distribute'} disabled={d.readOnly}
+              onChange={(v) => d.updateNode(node.id, (n) => ({ ...n, copiesDistribution: v === 'distribute' ? undefined : v }))}
+              options={[{ value: 'distribute', label: '分发' }, { value: 'copy', label: '复制' }]} />
+          ) : null}
         </div>
       ) : null}
       <div className="etl-insp-body" key={node.id + tab}>
