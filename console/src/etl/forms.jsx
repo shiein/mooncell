@@ -213,6 +213,28 @@ registerForm('pipeline', 'unique_hash', ({ cfg, set, ctx }) => {
   );
 });
 
+registerForm('pipeline', 'unique_sorted', ({ cfg, set, ctx }) => {
+  const keys = cfg.keys || [];
+  const input = ctx.input || [];
+  return (
+    <Section title="去重字段" hint="不选 = 整行去重">
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {input.map((f) => {
+          const on = keys.includes(f.name);
+          return (
+            <button key={f.name} type="button" onClick={() => set({ keys: on ? keys.filter((k) => k !== f.name) : [...keys, f.name] })}
+              className="etl-field-chip" style={{ cursor: 'pointer', border: `1px solid ${on ? 'var(--primary)' : 'transparent'}`, background: on ? 'var(--primary-soft)' : 'var(--muted)', color: on ? 'var(--primary)' : undefined }}>
+              {on ? <Icon name="check" size={11} /> : null}{f.name}
+            </button>
+          );
+        })}
+        {!input.length ? <span className="etl-muted">连接上游后可选择字段</span> : null}
+      </div>
+      <div className="field-hint">输入须已按去重字段排序（一般前置「排序记录」），只比较相邻行、保留每组首行。</div>
+    </Section>
+  );
+});
+
 registerForm('pipeline', 'sort_rows', ({ cfg, set, ctx }) => {
   const rows = cfg.fields || [];
   return (

@@ -305,6 +305,33 @@ func TestSortRows(t *testing.T) {
 	}
 }
 
+// 去除重复记录：排序流上按键/整行去重，每组保留首行。
+func TestUniqueSorted(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (a INTEGER, b TEXT)`)
+	mustExec(t, db, `CREATE TABLE dst (a INTEGER, b TEXT)`)
+	mustExec(t, db, `INSERT INTO src VALUES (2,'x'),(1,'b'),(1,'a'),(2,'a'),(1,'a'),(NULL,'z'),(NULL,'z')`)
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("in", "table_input", map[string]any{"connection": "db", "sql": "select a, b from src"}),
+			node("sort", "sort_rows", map[string]any{"fields": []map[string]any{{"name": "a"}, {"name": "b"}}}),
+			node("u", "unique_sorted", map[string]any{"keys": []string{"a", "b"}}),
+			node("out", "table_output", map[string]any{"connection": "db", "table": "dst"}),
+		},
+		Hops: []pipeline.Hop{hop("in", "main", "sort"), hop("sort", "main", "u"), hop("u", "main", "out")},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 5 { // (NULL,z)(1,a)(1,b)(2,a)(2,x) → 5 组
+		t.Fatalf("去重后应为 5 行，实际 %d", n)
+	}
+	if res.Metrics["u"].Written != 5 {
+		t.Fatalf("unique_sorted 写出应为 5：%+v", res.Metrics["u"])
+	}
+}
+
 // 表输出连接错误端口：批次内混入唯一约束冲突行 → 批量失败后退化逐行写入，
 // 坏行进错误输出、好行照常提交、步骤成功；未连接错误端口则整步失败。
 func TestTableOutputErrorRowDegrade(t *testing.T) {
