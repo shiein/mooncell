@@ -15,6 +15,9 @@ type TableInputConfig struct {
 	Connection string `json:"connection"`
 	SQL        string `json:"sql"`
 	MaxRows    int64  `json:"maxRows"` // 0 = 不限
+	// PushArgs 是源端下推（settings.pushdown）写入的追加绑定参数：
+	// 占位符编号续接 ${} 参数之后，故在 render 之后追加。人工勿填。
+	PushArgs []any `json:"pushArgs,omitempty"`
 }
 
 func init() {
@@ -53,6 +56,10 @@ func init() {
 				ic.Errorf("sql", "sql_render", "%s", err.Error())
 				return nil
 			}
+			if args, err = bindExtra(h.Dialect, args, c.PushArgs); err != nil {
+				ic.Errorf("sql", "sql_render", "%s", err.Error())
+				return nil
+			}
 			s, err := pool.Probe(ic.Ctx, c.Connection, text, args)
 			if err != nil {
 				ic.Errorf("sql", "sql_probe", "SQL 无法执行：%s", err.Error())
@@ -69,6 +76,9 @@ func init() {
 				}
 				text, args, err := render(h.Dialect, c.SQL, varsResolver(rc.Vars))
 				if err != nil {
+					return err
+				}
+				if args, err = bindExtra(h.Dialect, args, c.PushArgs); err != nil {
 					return err
 				}
 				rc.Log.Detail("执行查询：%s", oneLine(text))

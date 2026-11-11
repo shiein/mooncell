@@ -201,7 +201,7 @@ func Define[C any](d Definition[C]) StepType // 在 init() 中调用 Register(De
       "ui": { "x": 120, "y": 80 } }
   ],
   "hops": [{ "id": "h1", "from": "n1", "fromPort": "main", "to": "n2", "toPort": "main", "enabled": true }],
-  "settings": { "batchSize": 1000, "channelBatches": 8, "memoryBudgetMB": 512, "onError": "abort" },
+  "settings": { "batchSize": 1000, "channelBatches": 8, "memoryBudgetMB": 512, "pushdown": false, "onError": "abort" },
   "notes": [{ "id": "t1", "text": "…", "ui": { "x": 0, "y": 0, "w": 240, "h": 80 } }]
 }
 ```
@@ -220,8 +220,13 @@ Decode → 结构校验（ID 唯一、端口存在、连线合法、无环）
 `Plan` 是运行器、预检、设计器字段提示的共同输入。**问题（Problem）分级**：`error` 阻止运行；`warning` 允许运行（例如插入/更新的查询关键字无索引）。
 
 > 优化器（下推）在 `Plan` 层实现（`pipeline.Pushdown`）：把「表输入 → 过滤记录(若干) → 字段选择(至多一个,纯改名)」折叠为一条源端 SQL `SELECT <列|*> FROM (<原 SQL>) _mc_push WHERE <条件>`。
-> 条件经 `expr.ToSQL` 白名单翻译（比较/布尔/算术/IN 字面量列表/IS NULL/CASE WHEN 与一组跨方言同名函数）；含 `var()`、整除/取模、LIKE 系（大小写规则随方言漂移）、正则、成员访问等不可下推结构即放弃该分支。
-> 仅当表输入仅有唯一出边、过滤的「否/错误」端口未连线时才改写；改写后重编译失败自动回退原计划。下推后被并入的步骤不出现在运行节点中，日志记录「下推优化」条目。
+> **默认关闭**（`settings.pushdown`，缺省 false，旧定义兼容），仅运行路径在显式开启时改写；**预览永不下推**——预览走原链，保证所见即引擎语义。
+> 条件经 `expr.ToSQL` 翻译成**可证等价子集**（R1-B2），白名单之外一律放弃该分支退回行内求值：
+> * 允许：整数/精确小数/浮点/日期/时间戳字段与数值字面量的 `==` `!=` `<` `<=` `>` `>=`、`in [字面量…]`、`== nil`/`!= nil`/`isNull(f)`、`&&`/`||`（|| 两臂与 not 复合操作数内不许出现次序比较与裸布尔字段——NULL 时引擎拒行而 SQL 三值并入另一侧，投递结果会不一致）、`not`（NULL 安全子树按德摩根律改写，单个次序比较/裸布尔字段生成 `NOT` 但位置受限）、数值 `+`/`-`（仅作比较操作数）、布尔 kind 字段单独作条件（NULL 敏感叶）、常量 `true`/`false`。
+> * NULL 语义折算：`f != v → (f <> ? OR f IS NULL)`（引擎 `nil != 1` 为真）；`f not in […] → (f NOT IN (…) OR f IS NULL)`；字段对字段 `==`/`!=` 补双 NULL 分支；次序比较 NULL 时引擎报错拒行、SQL 不投递，投递结果一致。
+> * 禁止：`var()`、一切函数调用（`length`/`trim`/`now()`/`today()` 等）、字符串比较与字符串 in（大小写/长度/转义语义随方言漂移）、三元、`??`、`/` `%` `*` `**` `..`、匹配/包含谓词、成员访问、非字面量 in 列表。
+> * **字面量零内联**：翻译出的 SQL 不含任何值字面量——全部生成方言占位符（`?`/`$N`），编号续接原 SQL 的 `${}` 参数之后，值写入节点 `pushArgs` 由表输入按序绑定。
+> 仅当表输入仅有唯一出边、过滤的「否/错误」端口未连线时才改写；改写后重编译失败回退原计划并记 `warn` 日志。下推后被并入的步骤不出现在运行节点中，日志记录「下推优化」条目。
 > 为此 v1 约束：**步骤配置必须是声明式的**，不接受不透明脚本。
 
 ### 4.3 运行模型
@@ -571,6 +576,7 @@ src/etl/
 * 单元：`core`（转换 / schema）、`sqltext`（注释、字面量、`::`）、`expr`（类型推导、NULL）、`secret`（篡改、AAD 错位、密钥丢失）。
 * 引擎：用 `generate_rows` + 内存 sink 测背压、取消、错误输出、复制/分发、上游失败传播。
 * 端到端：`sqlite` 方言跑 表输入 → 表达式 → 插入/更新 全链路；真机 PG/MySQL/DM 用 testcontainers 之外的固定测试库（离线环境）。
+* 下推（R1-B2）：`expr` 单测断言生成 SQL 无值字面量、白名单外结构全部 `ErrNotPushable`；`steps/live_pushdown_test.go`（`etl_live`）在 PG/MySQL/达梦/金仓上对每个允许条件做「开/关下推写入行集合」差分，并对验收反例断言不下推。
 * 前端：Playwright 覆盖「新建转换 → 拖入步骤 → 连线 → 校验 → 预览 → 保存 → 运行 → 查看运行详情」。
 
 ## 20. 分期

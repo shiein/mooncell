@@ -933,3 +933,100 @@ func TestCSVFileRootService(t *testing.T) {
 		t.Fatal("不应在 file_root 之外写出文件")
 	}
 }
+
+// R1-B2 settings.pushdown 运行期开关：缺省不记任何下推日志；开启后记一条「下推优化」且结果正确。
+func TestPushdownRuntimeGate(t *testing.T) {
+	h := newHarness(t)
+	target := filepath.Join(t.TempDir(), "pd.db")
+	ct, _ := h.s.box.Seal("pw", "conn_pd")
+	c, err := h.s.st.CreateConnectionWithID(store.Connection{Config: conn.Config{ID: "conn_pd", Name: "源", DBType: "sqlite", Database: target}}, &ct, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hd, err := h.s.pool.Get(t.Context(), c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hd.DB.Exec(`CREATE TABLE src (id INTEGER, grp INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hd.DB.Exec(`INSERT INTO src VALUES (1,1),(2,1),(3,2),(4,NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hd.DB.Exec(`CREATE TABLE dst (id INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+
+	mkDoc := func(pushdown bool) map[string]any {
+		return map[string]any{
+			"kind": "pipeline", "params": []any{},
+			"nodes": []map[string]any{
+				{"id": "ti", "type": "table_input", "name": "输入", "config": map[string]any{"connection": c.ID, "sql": "SELECT id, grp FROM src"}},
+				{"id": "flt", "type": "filter_rows", "name": "过滤", "config": map[string]any{"condition": "grp == 2"}},
+				{"id": "out", "type": "table_output", "name": "写出", "config": map[string]any{"connection": c.ID, "table": "dst", "commitSize": 10, "fields": []map[string]any{{"stream": "id", "column": "id"}}}},
+			},
+			"hops": []map[string]any{
+				{"id": "h1", "from": "ti", "fromPort": "main", "to": "flt", "toPort": "main"},
+				{"id": "h2", "from": "flt", "fromPort": "true", "to": "out", "toPort": "main"},
+			},
+			"settings": map[string]any{"pushdown": pushdown},
+		}
+	}
+	var seq int
+	runAndLogs := func(doc map[string]any) (store.Run, []map[string]any) {
+		t.Helper()
+		seq++
+		raw, _ := json.Marshal(doc)
+		def, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: fmt.Sprintf("pd%d", seq), Doc: raw}, "admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := h.s.Trigger(def.ID, TriggerOptions{Trigger: "manual", User: "admin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		var r store.Run
+		for time.Now().Before(deadline) {
+			r, _ = h.s.st.GetRun(run.ID)
+			if r.Status != store.RunQueued && r.Status != store.RunRunning {
+				break
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		if r.Status != store.RunSucceeded {
+			t.Fatalf("运行应成功：%s %s", r.Status, r.Error)
+		}
+		var logs struct {
+			Logs []map[string]any `json:"logs"`
+		}
+		h.call("GET", "/api/etl/runs/"+run.ID+"/logs", nil, &logs)
+		return r, logs.Logs
+	}
+	hasPushdownLog := func(logs []map[string]any) bool {
+		for _, l := range logs {
+			if s, ok := l["message"].(string); ok && strings.Contains(s, "下推") {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 缺省（JSON 里去掉 pushdown 键，模拟旧定义）→ 运行日志不得有下推条目
+	docOff := mkDoc(false)
+	delete(docOff["settings"].(map[string]any), "pushdown")
+	_, logsOff := runAndLogs(docOff)
+	if hasPushdownLog(logsOff) {
+		t.Fatalf("pushdown 缺省时运行日志不应有下推条目：%v", logsOff)
+	}
+
+	// 开启 → 记一条「下推优化」，且结果与不下推一致（id=3）
+	_, logsOn := runAndLogs(mkDoc(true))
+	if !hasPushdownLog(logsOn) {
+		t.Fatalf("pushdown 开启时应有下推日志：%v", logsOn)
+	}
+	var n int
+	if err := hd.DB.QueryRow(`SELECT id FROM dst WHERE id = 3`).Scan(&n); err != nil || n != 3 {
+		t.Fatalf("下推运行应写入 id=3：%v %d", err, n)
+	}
+}

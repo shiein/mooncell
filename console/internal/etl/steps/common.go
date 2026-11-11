@@ -54,6 +54,19 @@ func render(d conn.Dialect, sql string, resolve sqltext.Resolver) (string, []any
 	return text, args, nil
 }
 
+// bindExtra 把下推优化写入配置的追加参数接到 ${} 参数之后
+//（其占位符编号已在改写时按序生成，故此序不可颠倒）。
+func bindExtra(d conn.Dialect, args, extra []any) ([]any, error) {
+	for _, a := range extra {
+		b, err := d.Bind(a, core.Field{Kind: core.KindOf(a)})
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, b)
+	}
+	return args, nil
+}
+
 // handleFor 在 Infer 中取连接（失败即报告问题并返回 nil）。
 func handleFor(ic *core.InferContext, connID, path string) (*conn.Pool, *conn.Handle) {
 	if strings.TrimSpace(connID) == "" {

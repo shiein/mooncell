@@ -8,6 +8,7 @@ import (
 	"mooncell/console/internal/etl/conn"
 	"mooncell/console/internal/etl/core"
 	"mooncell/console/internal/etl/expr"
+	"mooncell/console/internal/etl/sqltext"
 )
 
 // PushdownNote 记录一处下推改写，供运行日志与测试断言。
@@ -18,9 +19,15 @@ type PushdownNote struct {
 
 // Pushdown 把「表输入 → 过滤记录(若干) → 字段选择(至多一个,纯改名)」折叠为源端 SQL：
 // SELECT <选择列|*> FROM (<原 SQL>) _mc WHERE <条件1 AND 条件2…>。
-// 条件经 expr.ToSQL 白名单翻译；任一环节不可安全下推即放弃该分支（返回原定义）。
-// 前置要求：plan 由 def 编译得到且无 error。返回的总是新对象，def 不被修改。
+// 仅 settings.pushdown 显式开启时生效（默认关闭，旧定义行为不变）。
+// 条件经 expr.ToSQL 白名单翻译——字面量全部生成绑定参数，按 ${} 参数之后的
+// 占位符序号续接，值写入源配置的 pushArgs；任一环节不可安全下推即放弃该分支
+//（返回原定义）。前置要求：plan 由 def 编译得到且无 error。
+// 返回的总是新对象，def 不被修改。
 func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*Definition, []PushdownNote) {
+	if !plan.Settings.Pushdown {
+		return def, nil
+	}
 	pool, err := conn.PoolFrom(env)
 	if err != nil || pool == nil {
 		return def, nil
@@ -58,14 +65,36 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 		if err != nil {
 			continue // 连接不可用：保留原定义，由编译器报告真实错误
 		}
-		fields := map[string]bool{}
+		fields := map[string]core.Kind{}
 		if s := pn.Outputs[core.PortMain]; s != nil {
-			for _, n := range s.Names() {
-				fields[n] = true
+			for _, f := range s.Fields() {
+				fields[f.Name] = f.Kind
 			}
 		}
+		// 原 SQL 的 ${} 参数已占 1..bindN 号占位符；下推字面量参数从 bindN+1 续接，
+		// 值按同序收集进 pushArgs（table_input 在 ${} 参数之后绑定）。
+		refs, err := sqltext.Scan(cfg.SQL, h.Dialect.Lexer())
+		if err != nil {
+			continue // 词法错误由编译器报告；此处不改写
+		}
+		bindN := 0
+		for _, r := range refs {
+			if !r.Raw {
+				bindN++
+			}
+		}
+		var pushArgs []any
+		emit := func() string {
+			bindN++
+			return h.Dialect.Placeholder(bindN)
+		}
 		toSQL := func(cond string) (string, error) {
-			return expr.ToSQL(cond, h.Dialect.Quote, fields)
+			s, args, err := expr.ToSQL(cond, h.Dialect.Quote, fields, emit)
+			if err != nil {
+				return "", err
+			}
+			pushArgs = append(pushArgs, args...)
+			return s, nil
 		}
 
 		// 沿唯一出边链收集可下推步骤
@@ -141,11 +170,19 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 			sb.WriteString(strings.Join(conds, "\n  AND "))
 		}
 
-		// 改写定义副本：更新源 SQL、删除被并入节点、链尾出边改接源
+		// 改写定义副本：更新源 SQL、携带下推参数、删除被并入节点、链尾出边改接源。
+		// 用 map 改写以保留 connection/maxRows 等未读字段。
 		for i := range out.Nodes {
 			if out.Nodes[i].ID == pn.Node.ID {
-				cfg.SQL = sb.String()
-				b, _ := json.Marshal(cfg)
+				var cfgMap map[string]any
+				if json.Unmarshal(pn.Node.Config, &cfgMap) != nil {
+					continue
+				}
+				cfgMap["sql"] = sb.String()
+				if len(pushArgs) > 0 {
+					cfgMap["pushArgs"] = pushArgs
+				}
+				b, _ := json.Marshal(cfgMap)
 				out.Nodes[i].Config = b
 			}
 		}

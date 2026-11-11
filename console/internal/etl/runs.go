@@ -302,13 +302,16 @@ func (s *Service) runPipeline(ctx context.Context, a *activeRun, parent string, 
 		}
 		return pipeline.Result{}, fmt.Errorf("转换编译失败：%v", plan.Problems.First())
 	}
-	// 下推优化：「表输入 → 过滤 → 字段选择」折叠为源端 SQL。改写后重编译失败则回退原计划（仅少优化，不改变语义）。
+	// 下推优化（settings.pushdown 开启时）：「表输入 → 过滤 → 字段选择」折叠为源端 SQL。
+	// 改写后重编译失败则回退原计划——仅少一次优化、不改变语义，但须记 Warn 保持可观测。
 	if pd, notes := pipeline.Pushdown(ctx, def, plan, e); len(notes) > 0 {
 		if p2 := pipeline.Compile(ctx, pd, pipeline.CompileOptions{Env: e, ExtraVars: kindsOf(vars)}); !p2.Problems.HasErrors() {
 			for _, n := range notes {
-				logger.Detail("下推优化：%s 并入「%s」的源端 SQL", strings.Join(n.From, "、"), n.Into)
+				logger.Info("下推优化：%s 并入「%s」的源端 SQL", strings.Join(n.From, "、"), n.Into)
 			}
 			plan = p2
+		} else {
+			logger.Warn("下推改写后重编译失败，回退为原执行计划：%s", p2.Problems.First())
 		}
 	}
 	// error 端口连线的步骤：采样其拒绝行供运行详情查看。

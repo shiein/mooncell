@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1122,11 +1123,12 @@ func TestNodeCopiesValidation(t *testing.T) {
 	}
 }
 
-// P3.18 下推优化器：表输入→过滤→字段选择 折叠为源端 SQL。
+// R1-B2 下推优化器：表输入→过滤→字段选择 折叠为源端 SQL；默认关闭，
+// 开启后只允许可证等价子集，字面量全部走绑定参数。
 func TestPushdown(t *testing.T) {
 	e, db := env(t)
 	mustExec(t, db, `CREATE TABLE src (id INTEGER, name TEXT, grp INTEGER)`)
-	mustExec(t, db, `INSERT INTO src VALUES (1,'a',1),(2,'b',1),(3,'c',2),(4,'d',2)`)
+	mustExec(t, db, `INSERT INTO src VALUES (1,'a',1),(2,'b',1),(3,'c',2),(4,'d',NULL)`)
 	mustExec(t, db, `CREATE TABLE dst (id INTEGER, label TEXT)`)
 
 	ti := map[string]any{"connection": "db", "sql": "SELECT id, name, grp FROM src"}
@@ -1143,63 +1145,198 @@ func TestPushdown(t *testing.T) {
 				node("sel", "select_fields", sel),
 				node("out", "table_output", out),
 			},
-			Hops: []pipeline.Hop{hop("ti", "main", "flt"), hop("flt", "true", "sel"), hop("sel", "main", "out")},
+			Hops:     []pipeline.Hop{hop("ti", "main", "flt"), hop("flt", "true", "sel"), hop("sel", "main", "out")},
+			Settings: pipeline.Settings{Pushdown: true},
 		}
 	}
-
-	// 可下推：过滤条件白名单内 + 纯改名字段选择
-	def := mk(`grp == 2 and name != "d"`)
-	plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
-	if plan.Problems.HasErrors() {
-		t.Fatalf("%+v", plan.Problems)
+	push := func(def *pipeline.Definition) (*pipeline.Definition, []pipeline.PushdownNote) {
+		plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+		if plan.Problems.HasErrors() {
+			t.Fatalf("编译失败：%+v", plan.Problems)
+		}
+		return pipeline.Pushdown(context.Background(), def, plan, e)
 	}
-	def2, notes := pipeline.Pushdown(context.Background(), def, plan, e)
+	tiCfg := func(def *pipeline.Definition) (sql string, pushArgs []any) {
+		t.Helper()
+		for _, n := range def.Nodes {
+			if n.ID == "ti" {
+				var c struct {
+					SQL      string `json:"sql"`
+					PushArgs []any  `json:"pushArgs"`
+				}
+				if err := json.Unmarshal(n.Config, &c); err != nil {
+					t.Fatalf("ti config 解码失败：%v", err)
+				}
+				return c.SQL, c.PushArgs
+			}
+		}
+		t.Fatal("ti 节点不存在")
+		return "", nil
+	}
+	// 下推/不下推分别跑一遍，比较写入 dst 的 id 集合并清空
+	runIDs := func(def *pipeline.Definition, vars *core.Vars) map[int64]bool {
+		t.Helper()
+		mustExec(t, db, `DELETE FROM dst`)
+		res := run(t, e, def, vars)
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		ids := map[int64]bool{}
+		rows, err := db.Query(`SELECT id FROM dst`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			ids[id] = true
+		}
+		return ids
+	}
+	eqIDs := func(a, b map[int64]bool) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for k := range a {
+			if !b[k] {
+				return false
+			}
+		}
+		return true
+	}
+	var noLiteral = regexp.MustCompile(`'|\d`)
+	var stripIdent = regexp.MustCompile(`"[^"]*"`)
+
+	// —— 默认关闭：旧定义/未开启定义不应被改写 ——
+	defOff := mk(`grp == 2`)
+	defOff.Settings = pipeline.Settings{} // 显式回到缺省（等价于 JSON 里没有 pushdown 字段）
+	def2, notes := push(defOff)
+	if len(notes) != 0 || def2 != defOff {
+		t.Fatalf("settings.pushdown 缺省应关闭：notes=%+v", notes)
+	}
+
+	// —— 可下推：白名单条件 + 纯改名字段选择；字面量进 pushArgs ——
+	def := mk(`grp == 2`)
+	def2, notes = push(def)
 	if len(notes) != 1 {
 		t.Fatalf("应产生 1 处下推，实际 %+v", notes)
 	}
-	var pushedSQL string
-	for _, n := range def2.Nodes {
-		if n.ID == "ti" {
-			var c struct {
-				SQL string `json:"sql"`
-			}
-			_ = json.Unmarshal(n.Config, &c)
-			pushedSQL = c.SQL
-		}
-	}
+	pushedSQL, pushArgs := tiCfg(def2)
 	if !strings.Contains(pushedSQL, "WHERE") || !strings.Contains(pushedSQL, `"name" AS "label"`) {
 		t.Fatalf("改写 SQL 不符合预期：\n%s", pushedSQL)
+	}
+	if noLiteral.MatchString(stripIdent.ReplaceAllString(pushedSQL, "")) {
+		t.Fatalf("下推 SQL 不应含值字面量：\n%s", pushedSQL)
+	}
+	if len(pushArgs) != 1 || pushArgs[0] != float64(2) {
+		t.Fatalf("pushArgs 应含 [2]：%v", pushArgs)
 	}
 	if len(def2.Nodes) != 2 {
 		t.Fatalf("被并入的步骤应消失，剩余 %d 个节点", len(def2.Nodes))
 	}
-	res := run(t, e, def2, nil)
-	if res.Err != nil {
-		t.Fatal(res.Err)
+	if !eqIDs(runIDs(def2, nil), runIDs(def, nil)) {
+		t.Fatal("grp == 2：下推与不下推写入行集合应一致")
 	}
-	if n := count(t, db, `SELECT count(*) FROM dst`); n != 1 {
-		t.Fatalf("下推结果应只有 id=3 一行，实际 %d 行", n)
+
+	// —— != 按引擎 NULL 语义改写（nil != 1 为真，NULL 行保留）——
+	def = mk(`grp != 1`)
+	def2, notes = push(def)
+	if len(notes) != 1 {
+		t.Fatal("grp != 1 应可下推（须带 IS NULL 保护）")
 	}
-	var id int
-	if err := db.QueryRow(`SELECT id FROM dst`).Scan(&id); err != nil || id != 3 {
-		t.Fatalf("应为 id=3，实际 %v %d", err, id)
+	pushedSQL, _ = tiCfg(def2)
+	if !strings.Contains(pushedSQL, "IS NULL") {
+		t.Fatalf("!= 下推必须保留 NULL 行：\n%s", pushedSQL)
+	}
+	if !eqIDs(runIDs(def2, nil), runIDs(def, nil)) {
+		t.Fatal("grp != 1：下推与不下推写入行集合应一致（NULL 行须保留）")
+	}
+	if n := count(t, db, `SELECT count(*) FROM dst`); n != 2 {
+		t.Fatalf("grp != 1 应有 2 行（grp=2 与 NULL），实际 %d", n)
+	}
+
+	// —— ${} 参数与下推参数按占位符顺序绑定 ——
+	defV := mk(`grp != 7`)
+	defV.Params = []core.ParamDecl{
+		{Name: "min", Kind: core.KindInteger, Required: true},
+		{Name: "max", Kind: core.KindInteger, Required: true},
+	}
+	for i := range defV.Nodes {
+		if defV.Nodes[i].ID == "ti" {
+			defV.Nodes[i].Config, _ = json.Marshal(map[string]any{
+				"connection": "db", "sql": "SELECT id, name, grp FROM src WHERE id > ${min} AND id < ${max}",
+			})
+		}
+	}
+	defV2, notes := push(defV)
+	if len(notes) != 1 {
+		t.Fatalf("含 ${} 的源 SQL 也应可下推：%+v", notes)
+	}
+	pushedSQL, pushArgs = tiCfg(defV2)
+	if !strings.Contains(pushedSQL, "${min}") || !strings.Contains(pushedSQL, "${max}") {
+		t.Fatalf("源 SQL 的变量引用应原样保留：\n%s", pushedSQL)
+	}
+	if len(pushArgs) != 1 || pushArgs[0] != float64(7) {
+		t.Fatalf("pushArgs 应含 [7]：%v", pushArgs)
+	}
+	vars := core.NewVars(nil)
+	vars.Set("min", core.Value{Kind: core.KindInteger, V: int64(2)})
+	vars.Set("max", core.Value{Kind: core.KindInteger, V: int64(10)})
+	got := runIDs(defV2, vars)
+	// id>2 && id<10 后剩 3,4；grp!=7 恒真 → {3,4}。若参数顺序错位（7 先绑），id>7 且无 id<7 → 空集。
+	if len(got) != 2 || !got[3] || !got[4] {
+		t.Fatalf("${} 参数与 pushArgs 顺序错误：得到 %v", got)
+	}
+	if !eqIDs(got, runIDs(defV, vars)) {
+		t.Fatal("含 ${} 的下推与不下推行集合应一致")
+	}
+
+	// —— 字符串条件（反例语义）一律不下推 ——
+	for _, cond := range []string{
+		`name == "abc"`, `name != "d"`, `name in ["a","b"]`,
+		`grp == 2 and name != "d"`, `length(name) == 4`, `trim(name) == "x"`,
+		`name + "x" == "abcx"`, `id > 1 || grp == 2`, `not (grp < 1 and id == 1)`,
+	} {
+		d := mk(cond)
+		if _, notes := push(d); len(notes) != 0 {
+			t.Errorf("%s 不应下推", cond)
+		}
+	}
+
+	// —— 预览不下推：即使定义开启 pushdown，预览仍走原链路 ——
+	defP := mk(`grp == 2`)
+	pv := pipeline.Preview(context.Background(), defP, "ti", 10,
+		pipeline.CompileOptions{Env: e}, pipeline.RunOptions{Env: e})
+	if pv.Error != "" {
+		t.Fatalf("预览失败：%s", pv.Error)
+	}
+	if rows := pv.Ports["main"].Rows; len(rows) != 4 {
+		t.Fatalf("开启 pushdown 后预览仍应返回源端全部 4 行，实际 %d", len(rows))
+	}
+	pv = pipeline.Preview(context.Background(), defP, "flt", 10,
+		pipeline.CompileOptions{Env: e}, pipeline.RunOptions{Env: e})
+	if pv.Error != "" {
+		t.Fatalf("过滤节点应在预览中存在（未被折叠）：%s", pv.Error)
 	}
 
 	// 否端口被使用 → 不下推
 	defNo := mk(`grp == 2`)
 	defNo.Hops[1].To = "sel"
 	defNo.Hops = append(defNo.Hops, pipeline.Hop{ID: "x", From: "flt", FromPort: "false", To: "out", ToPort: "main"})
-	plan = pipeline.Compile(context.Background(), defNo, pipeline.CompileOptions{Env: e})
+	plan := pipeline.Compile(context.Background(), defNo, pipeline.CompileOptions{Env: e})
 	_, notes = pipeline.Pushdown(context.Background(), defNo, plan, e)
 	if len(notes) != 0 {
 		t.Fatal("否端口有连线不应下推")
 	}
 
 	// var() 不可下推 → 保留原链路
-	defV := mk(`grp == var("g")`)
-	defV.Params = append(defV.Params, core.ParamDecl{Name: "g", Kind: core.KindInteger})
-	plan = pipeline.Compile(context.Background(), defV, pipeline.CompileOptions{Env: e})
-	_, notes = pipeline.Pushdown(context.Background(), defV, plan, e)
+	defVr := mk(`grp == var("g")`)
+	defVr.Params = append(defVr.Params, core.ParamDecl{Name: "g", Kind: core.KindInteger})
+	plan = pipeline.Compile(context.Background(), defVr, pipeline.CompileOptions{Env: e})
+	_, notes = pipeline.Pushdown(context.Background(), defVr, plan, e)
 	if len(notes) != 0 {
 		t.Fatal("含 var() 的条件不应下推")
 	}

@@ -64,6 +64,9 @@ type Settings struct {
 	ChannelBatches int    `json:"channelBatches"` // 每条连线缓冲批数，默认 8
 	MemoryBudgetMB int    `json:"memoryBudgetMB"` // 每个有状态步骤的内存预算，默认 512
 	LogLevel       string `json:"logLevel"`       // error|warn|info|detail|debug，默认 info
+	// Pushdown 源端下推：默认关闭。仅显式开启时运行路径才把
+	// 「表输入 → 过滤 → 字段选择」折叠为源端 SQL（可证等价子集）。
+	Pushdown bool `json:"pushdown,omitempty"`
 }
 
 // Normalized 返回填充默认值后的设置。

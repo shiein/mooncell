@@ -252,6 +252,13 @@ function DefinitionInspector({ d }) {
                 <Field label="连线缓冲" hint="每条连线的批数"><input className="input" type="number" min="1" value={s.channelBatches || 8} onChange={(e) => setSettings({ channelBatches: Number(e.target.value) || 8 })} /></Field>
               </div>
               <Field label="内存预算（MB）" hint="去重、排序等有状态步骤的上限"><input className="input" type="number" min="16" value={s.memoryBudgetMB || 512} onChange={(e) => setSettings({ memoryBudgetMB: Number(e.target.value) || 512 })} /></Field>
+              <div className="etl-inline">
+                <div className="etl-inline-label">
+                  <span>源端下推</span>
+                  <small>把「表输入 → 过滤/字段选择」折叠为源库 SQL，默认关闭。预览不下推；开启后只有能证明与行内求值等价的条件才会下推，运行结果以源库语义为准的部分已被排除</small>
+                </div>
+                <Switch on={!!s.pushdown} disabled={d.readOnly} onChange={(v) => setSettings({ pushdown: v || undefined })} />
+              </div>
             </React.Fragment>
           ) : (
             <Field label="最大并行作业项" hint="同时就绪的分支并发执行"><input className="input" type="number" min="1" value={s.maxParallel || 4} onChange={(e) => setSettings({ maxParallel: Number(e.target.value) || 4 })} /></Field>
