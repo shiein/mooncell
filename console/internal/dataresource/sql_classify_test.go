@@ -198,7 +198,7 @@ func TestMySQLPageSQLAvoidsWrapWithoutLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(got, " LIMIT 100 OFFSET 0") {
+	if !strings.HasSuffix(got, "\nLIMIT 100 OFFSET 0") {
 		t.Fatalf("无 LIMIT 的 JOIN 应直接追加分页: %s", got)
 	}
 	if strings.Contains(got, "AS _page") {

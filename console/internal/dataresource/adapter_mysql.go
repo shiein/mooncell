@@ -396,17 +396,22 @@ func (a *mysqlAdapter) PageSQL(query string, limit, offset int) (string, error) 
 	// MySQL 要求派生表列名唯一；SELECT * FROM a JOIN b 两表都有 id 时
 	// SELECT * FROM (...) AS _page 会 ERROR 1060 Duplicate column name。
 	// 用户 SQL 无顶层 LIMIT 时直接追加，保留 JOIN 原投影。
-	q := strings.TrimRight(strings.TrimSpace(query), ";")
+	// 末尾的 -- / # 注释与分号先剥离，再换行追加：否则 LIMIT 会被注释吞掉（整表读回、翻页失效）
+	q := trimSQLForWrap(query, dialectMySQL)
 	if sqlHasTopLevelRowLimiter(q) {
-		return fmt.Sprintf("SELECT * FROM (%s) AS _page LIMIT %d OFFSET %d", q, limit, offset), nil
+		return fmt.Sprintf("SELECT * FROM (\n%s\n) AS _page LIMIT %d OFFSET %d", q, limit, offset), nil
 	}
-	return fmt.Sprintf("%s LIMIT %d OFFSET %d", q, limit, offset), nil
+	return fmt.Sprintf("%s\nLIMIT %d OFFSET %d", q, limit, offset), nil
 }
+
+func (a *mysqlAdapter) sqlDialect() sqlDialect { return dialectMySQL }
+
+func (a *mysqlAdapter) rawDB() *sql.DB { return a.db }
 
 func (a *mysqlAdapter) CountSQL(query string) (string, error) {
 	// COUNT 包装在 JOIN 重名列时仍可能失败；调用方已有 totalStatus=unavailable 兜底。
-	q := strings.TrimRight(strings.TrimSpace(query), ";")
-	return fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _count", q), nil
+	q := trimSQLForWrap(query, dialectMySQL)
+	return fmt.Sprintf("SELECT COUNT(*) FROM (\n%s\n) AS _count", q), nil
 }
 
 func (a *mysqlAdapter) QuoteIdentifier(name string) string {

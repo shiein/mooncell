@@ -27,9 +27,10 @@ import (
 
 // APIError 是统一的错误响应结构。同时实现 error 接口供内部传递。
 type APIError struct {
-	Message string `json:"error"`
-	Code    string `json:"code,omitempty"`
-	TxState string `json:"txState,omitempty"`
+	Message  string `json:"error"`
+	Code     string `json:"code,omitempty"`
+	TxState  string `json:"txState,omitempty"`
+	Position int    `json:"position,omitempty"` // SQL 错误位置（1 起字符序号），供编辑器定位
 }
 
 // Error 实现 error 接口。

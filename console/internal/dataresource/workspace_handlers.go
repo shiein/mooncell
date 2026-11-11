@@ -251,16 +251,19 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	stmtType := ClassifySQL(body.SQL)
-	// 无写权限（只读或其它非 write）一律拒绝写操作；mode=="" 已在 resolve 拦截
-	if !canWriteAccess(mode) && !stmtType.IsReadOnly() {
+	d := dialectOf(ws.Adapter)
+	an := analyzeSQL(body.SQL, d)
+	stmtType := an.Type
+	// 无写权限（只读或其它非 write）一律拒绝写操作；mode=="" 已在 resolve 拦截。
+	// 白名单 SET 只改本工作台会话的展示/解析参数，只读用户可用。
+	if !canWriteAccess(mode) && !stmtType.IsReadOnly() && stmtType != StmtSession && an.Reject == "" && stmtType != StmtUnknown {
 		s.auditSQL(user, "只读写入被拒绝", id, stmtType, body.SQL, "拒绝·READ_ONLY", 0)
 		writeErr(w, http.StatusForbidden, "DATA_RESOURCE_READ_ONLY", "只读授权不允许执行写操作")
 		return
 	}
 
-	// 危险 SQL 二次确认：TRUNCATE/DROP/无 WHERE 的 DELETE/UPDATE
-	if stmtType.IsDangerousWrite(body.SQL) && !body.Confirmed {
+	// 危险 SQL 二次确认：TRUNCATE/DROP/无 WHERE 的 DELETE/UPDATE（方言感知，MySQL # 注释与反斜杠转义不再绕过）
+	if isDangerousWriteFor(stmtType, body.SQL, d) && !body.Confirmed {
 		s.auditSQL(user, "危险SQL被拒绝", id, stmtType, body.SQL, "拒绝·DANGEROUS", 0)
 		writeErr(w, http.StatusForbidden, "DANGEROUS_SQL", "危险操作需二次确认：TRUNCATE/DROP/无 WHERE 的 DELETE 或 UPDATE")
 		return
@@ -290,7 +293,12 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 				writeErrTx(w, http.StatusGone, apiErr.Code, apiErr.Message, txState)
 				return
 			}
-			writeErrTx(w, http.StatusForbidden, apiErr.Code, apiErr.Message, txState)
+			status := http.StatusForbidden
+			switch apiErr.Code {
+			case "MULTI_STATEMENT", "UNSUPPORTED_SQL", "UNKNOWN_SQL", "TX_CONTROL_SQL", "AUTO_COMMIT_REQUIRED", "SESSION_SETTING_FAILED", "SESSION_SETTING_LIMIT", "UNSUPPORTED":
+				status = http.StatusBadRequest
+			}
+			writeErrTx(w, status, apiErr.Code, apiErr.Message, txState)
 			return
 		}
 		var de DatabaseError
@@ -304,7 +312,7 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 				// 用 400 而非 408：部分代理对 408 行为怪异；语义靠 code
 				status = http.StatusBadRequest
 			}
-			writeErrTx(w, status, de.Code, de.Message, txState)
+			writeJSON(w, status, APIError{Message: de.Message, Code: de.Code, TxState: txState, Position: de.Position})
 			return
 		}
 		s.auditSQL(user, "执行"+string(stmtType), id, stmtType, body.SQL, "失败", 0)
@@ -312,11 +320,11 @@ func (s *Service) ExecuteInWorkspaceHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// 读写用户：单表 SELECT 且有主键时附带 editable 元数据，供结果区就地改删
-	if canWriteAccess(mode) && result != nil && stmtType.IsReadOnly() {
+	if canWriteAccess(mode) && result != nil && stmtType.IsReadOnly() && !an.Passthrough {
 		s.attachEditableMeta(r.Context(), ws, body.SQL, result, ws.snapshotState().AutoCommit)
 	}
 	// 审计：写操作（DML/DDL）记录类型、哈希、行数、耗时；不记录普通 SELECT 全文。
-	if stmtType.IsWrite() || stmtType.IsDDLorDCL() || stmtType == StmtTruncate || stmtType == StmtCall {
+	if stmtType.IsWrite() || stmtType.IsDDLorDCL() || stmtType == StmtTruncate || stmtType == StmtCall || stmtType == StmtSession {
 		auditResult := "成功"
 		if result.AffectedRows >= 0 {
 			auditResult = fmt.Sprintf("成功·%d行", result.AffectedRows)
@@ -552,7 +560,7 @@ func (s *Service) ExportFromWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "NO_QUERY", "无可导出的查询")
 		return
 	}
-	if err := prepareExportSQL(sqlText); err != nil {
+	if err := prepareExportSQL(sqlText, dialectOf(adapter)); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_SQL", err.Error())
 		return
 	}
@@ -614,4 +622,57 @@ func (s *Service) DeleteWorkspaceHandler(w http.ResponseWriter, r *http.Request)
 	}
 	s.workspaces.DeleteWorkspace(wsID)
 	writeOK(w, map[string]bool{"ok": true})
+}
+
+// CountInWorkspaceHandler 处理 POST /api/data-resources/{id}/workspaces/{workspaceId}/count
+// 按需统计查询总行数（执行时不再自动 COUNT）。
+func (s *Service) CountInWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
+	ws, _, ok := s.resolveWorkspaceForRequest(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		SQL string `json:"sql"`
+	}
+	if err := jsonDecodeBody(w, r, &body); err != nil {
+		writeJSONBodyError(w, err)
+		return
+	}
+	if body.SQL == "" {
+		writeErr(w, http.StatusBadRequest, "EMPTY_SQL", "SQL 不能为空")
+		return
+	}
+	total, txState, err := s.workspaces.CountInWorkspace(r.Context(), ws, body.SQL)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			status := http.StatusBadRequest
+			switch apiErr.Code {
+			case "RESOURCE_BUSY", "IMPORT_ACTIVE":
+				status = http.StatusConflict
+			case "WORKSPACE_CLOSED":
+				status = http.StatusGone
+			}
+			writeErrTx(w, status, apiErr.Code, apiErr.Message, txState)
+			return
+		}
+		var de DatabaseError
+		if errors.As(err, &de) && de.Code != "" {
+			writeErrTx(w, http.StatusBadRequest, de.Code, de.Message, txState)
+			return
+		}
+		writeErrTx(w, http.StatusBadRequest, "COUNT_ERROR", err.Error(), txState)
+		return
+	}
+	writeOK(w, map[string]any{"total": total, "txState": txState})
+}
+
+// ResetSessionSettingsHandler 处理 DELETE /api/data-resources/{id}/workspaces/{workspaceId}/session-settings
+func (s *Service) ResetSessionSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	ws, _, ok := s.resolveWorkspaceForRequest(w, r)
+	if !ok {
+		return
+	}
+	s.workspaces.ResetSessionSettings(ws)
+	writeOK(w, map[string]any{"sessionSettings": []string{}})
 }

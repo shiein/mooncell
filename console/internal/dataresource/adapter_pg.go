@@ -574,15 +574,19 @@ func (a *pgAdapter) SQLTemplate(obj MetadataNode, operation string) (string, err
 
 // PageSQL 包装查询为分页查询（子查询包装，兼容用户 SQL 已含 LIMIT）。
 func (a *pgAdapter) PageSQL(query string, limit, offset int) (string, error) {
-	q := strings.TrimRight(strings.TrimSpace(query), ";")
-	return fmt.Sprintf("SELECT * FROM (%s) AS _page LIMIT %d OFFSET %d", q, limit, offset), nil
+	// 先剥离末尾注释/分号，并在右括号前换行：用户 SQL 以行注释结尾时不会吞掉包装
+	q := trimSQLForWrap(query, dialectPG)
+	return fmt.Sprintf("SELECT * FROM (\n%s\n) AS _page LIMIT %d OFFSET %d", q, limit, offset), nil
 }
+
+func (a *pgAdapter) sqlDialect() sqlDialect { return dialectPG }
+
+func (a *pgAdapter) rawDB() *sql.DB { return a.db }
 
 // CountSQL 包装查询为计数查询。
 func (a *pgAdapter) CountSQL(query string) (string, error) {
-	// 去掉末尾分号
-	q := strings.TrimRight(strings.TrimSpace(query), ";")
-	return fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _count", q), nil
+	q := trimSQLForWrap(query, dialectPG)
+	return fmt.Sprintf("SELECT COUNT(*) FROM (\n%s\n) AS _count", q), nil
 }
 
 // QuoteIdentifier 安全引用标识符（PostgreSQL 用双引号）。
@@ -612,8 +616,12 @@ func (a *pgAdapter) NormalizeError(err error) DatabaseError {
 			if pgErr.Detail != "" {
 				msg = msg + ": " + pgErr.Detail
 			}
+			if pgErr.Hint != "" {
+				msg = msg + "\n提示: " + pgErr.Hint
+			}
 		}
 		code = classifyPGSQLState(pgErr.Code)
+		return DatabaseError{Code: code, Message: sanitizeErrMsg(msg), SQLState: sqlState, Position: int(pgErr.Position)}
 	} else {
 		// 非 pgx 包装错误时回退子串（兼容驱动边界）
 		lower := strings.ToLower(msg)

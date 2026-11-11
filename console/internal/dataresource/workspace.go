@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-sql-driver/mysql"
 )
@@ -183,7 +184,7 @@ func (wm *WorkspaceManager) CreateWorkspaceForSession(resourceID, username, logi
 		AutoCommit:     true,
 		ReadOnly:       readOnly,
 		TxState:        TxNone,
-		Adapter:        adapter,
+		Adapter:        newSessionAdapter(adapter),
 		LastActivity:   time.Now(),
 	}
 	wm.mu.Lock()
@@ -406,7 +407,8 @@ func mapStmtContextError(adapter DataSourceAdapter, err error) error {
 }
 
 // ExecuteInWorkspace 在工作台中执行 SQL，处理自动提交和手工事务逻辑。
-// limit/offset 仅对 SELECT 生效：服务端隐式分页，不改写编辑器中的 SQL 文本。
+// limit/offset 仅对结果集语句生效：服务端隐式分页，不改写编辑器中的 SQL 文本。
+// 不再自动统计总数（慢查询会被 COUNT 拖慢近一倍）；总数由 CountInWorkspace 按需统计。
 // 执行期间登记 stmtCancel，供 POST .../cancel 在不持 mu 的情况下取消语句。
 func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit, offset int) (*ExecutionResult, error) {
 	if !wm.pool.TryBeginOperation(ws.ResourceID) {
@@ -430,23 +432,26 @@ func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspac
 	}()
 	ctx = qctx
 
-	// 校验单语句
-	if err := ValidateSingleStatement(sqlText); err != nil {
-		return nil, err
+	d := dialectOf(ws.Adapter)
+	if err := validateSingleStatementFor(sqlText, d); err != nil {
+		return nil, &APIError{Code: "MULTI_STATEMENT", Message: err.Error()}
 	}
-
-	stmtType := ClassifySQL(sqlText)
+	an := analyzeSQL(sqlText, d)
+	if an.Reject != "" {
+		return nil, &APIError{Code: "UNSUPPORTED_SQL", Message: an.Reject}
+	}
+	stmtType := an.Type
 	if stmtType.IsTransactionControl() {
-		return nil, fmt.Errorf("显式事务控制语句不允许，请使用工作台按钮")
+		return nil, &APIError{Code: "TX_CONTROL_SQL", Message: "显式事务控制语句不允许：请关闭「自动提交」后用工具栏的提交/回滚按钮"}
 	}
 	// 无法可靠分类的语句 fail-closed，避免 UNKNOWN 走写路径破坏事务状态
 	if stmtType == StmtUnknown {
-		return nil, fmt.Errorf("无法识别的 SQL 类型，已拒绝执行")
+		return nil, &APIError{Code: "UNKNOWN_SQL", Message: "无法识别的 SQL 类型，已拒绝执行（支持 SELECT/SHOW/EXPLAIN/DESC、DML、DDL、CALL 与白名单 SET）"}
 	}
 
 	// DDL/DCL/TRUNCATE/CALL 只允许自动提交模式
 	if stmtType.IsAutoCommitOnly() && !ws.AutoCommit {
-		return nil, fmt.Errorf("DDL/DCL/TRUNCATE/过程调用只允许自动提交模式，请先提交或回滚当前事务")
+		return nil, &APIError{Code: "AUTO_COMMIT_REQUIRED", Message: "DDL/DCL/TRUNCATE/过程调用只允许自动提交模式，请先提交或回滚当前事务并开启自动提交"}
 	}
 
 	start := time.Now()
@@ -454,115 +459,230 @@ func (wm *WorkspaceManager) ExecuteInWorkspace(ctx context.Context, ws *Workspac
 		ExecutionID:   newID(),
 		StatementType: stmtType,
 		TxState:       string(ws.TxState),
+		Passthrough:   an.Passthrough,
 	}
-
-	if stmtType.IsReadOnly() {
-		// SELECT：隐式分页
-		if limit <= 0 {
-			limit = DefaultLimit
-		}
-		if limit > MaxLimit {
-			limit = MaxLimit
-		}
-		if offset < 0 {
-			offset = 0
-		}
-		err := wm.executeQueryInWorkspace(ctx, ws, sqlText, limit, offset, result)
+	finish := func(err error) (*ExecutionResult, error) {
 		result.DurationMs = time.Since(start).Milliseconds()
 		result.TxState = string(ws.TxState)
-		if err != nil {
-			return result, err
-		}
-		ws.LastSQL = sqlText // 记录最近成功的查询供导出（无分页包装的原文）
-	} else {
-		// 写操作
-		err := wm.executeWriteInWorkspace(ctx, ws, sqlText, result)
-		result.DurationMs = time.Since(start).Milliseconds()
-		result.TxState = string(ws.TxState)
-		if err != nil {
-			return result, err
-		}
+		result.SessionSettings = ws.sessionDisplays()
+		return result, err
 	}
 
-	return result, nil
-}
-
-// executeQueryInWorkspace 执行 SELECT。
-// 自动提交模式：在只读事务中执行查询和计数。
-// 手工事务模式：在当前事务中执行（不自动统计总数，避免副作用函数被调用两次）。
-func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Workspace, sqlText string, limit, offset int, result *ExecutionResult) error {
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+	if limit > MaxLimit {
+		limit = MaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	result.Limit = limit
 	result.Offset = offset
 
-	if ws.AutoCommit {
-		// 自动提交：只读事务
-		tx, err := ws.Adapter.Begin(ctx, true)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return mapStmtContextError(ws.Adapter, err)
-			}
-			return fmt.Errorf("开启只读事务失败: %w", err)
+	switch {
+	case stmtType == StmtSession:
+		return finish(wm.executeSessionInWorkspace(ctx, ws, an.Session))
+	case stmtType.IsReadOnly():
+		if err := wm.executeQueryInWorkspace(ctx, ws, sqlText, an, limit, offset, result); err != nil {
+			return finish(err)
 		}
-		defer tx.Rollback()
-
-		if err := queryPageIntoResult(ctx, ws.Adapter, tx, sqlText, limit, offset, result); err != nil {
-			return err
-		}
-
-		// 计数：更短独立超时，失败不影响数据返回
-		countSQL, err := ws.Adapter.CountSQL(sqlText)
-		if err == nil {
-			cctx, ccancel := context.WithTimeout(ctx, CountTimeout)
-			var total int
-			if err := tx.QueryRow(cctx, countSQL).Scan(&total); err == nil {
-				result.Total = total
-				result.TotalStatus = "available"
-				result.HasMore = offset+result.ReturnedRows < total
-			} else {
-				result.TotalStatus = "unavailable"
-				result.HasMore = result.ReturnedRows >= limit
-			}
-			ccancel()
-		} else {
-			result.TotalStatus = "unavailable"
-			result.HasMore = result.ReturnedRows >= limit
-		}
-		return nil
+		ws.LastSQL = sqlText // 记录最近成功的查询供导出（无分页包装的原文）
+		return finish(nil)
+	default:
+		return finish(wm.executeWriteInWorkspace(ctx, ws, sqlText, an, limit, result))
 	}
+}
 
-	// 手工事务：在当前事务中执行（Begin 用工作台 txCtx，语句用请求短超时 ctx）
-	if ws.Tx == nil {
-		// 第一条 SQL 创建事务；只读用户必须 Begin(readOnly=true)
-		tx, err := ws.beginManualTxLocked(ws.ReadOnly)
-		if err != nil {
-			return fmt.Errorf("开启事务失败: %w", err)
-		}
-		if err := wm.pool.BeginTx(ws.ResourceID); err != nil {
-			_ = tx.Rollback()
-			ws.clearTxLocked(false, nil)
-			return &APIError{Code: "IMPORT_ACTIVE", Message: err.Error()}
-		}
-		ws.Tx = tx
-		ws.TxState = TxActive
+// sessionDisplays 返回已记录的会话设置（供前端展示）。
+func (ws *Workspace) sessionDisplays() []string {
+	if sa, ok := ws.Adapter.(*sessionAdapter); ok {
+		return sa.state.displays()
 	}
-
-	if err := queryPageIntoResult(ctx, ws.Adapter, ws.Tx, sqlText, limit, offset, result); err != nil {
-		ws.TxState = TxFailed
-		return err
-	}
-	// 手工事务中不自动统计总数（避免副作用函数被调用两次）
-	result.TotalStatus = "unavailable"
-	result.HasMore = result.ReturnedRows >= limit
 	return nil
 }
 
+// sessionState 返回工作台的会话设置记录（测试替身未包装时为 nil）。
+func (ws *Workspace) sessionState() *sessionState {
+	if sa, ok := ws.Adapter.(*sessionAdapter); ok {
+		return sa.state
+	}
+	return nil
+}
+
+// executeSessionInWorkspace 先在事务内试执行设置（失败则不记录），成功后记录供后续重放。
+func (wm *WorkspaceManager) executeSessionInWorkspace(ctx context.Context, ws *Workspace, ch *sessionChange) error {
+	st := ws.sessionState()
+	if st == nil || ch == nil {
+		return &APIError{Code: "UNSUPPORTED_SQL", Message: "当前工作台不支持会话设置"}
+	}
+	run := func(tx Transaction) error {
+		for _, it := range ch.Set {
+			if _, err := tx.Exec(ctx, it.Replay); err != nil {
+				return mapStmtContextError(ws.Adapter, err)
+			}
+		}
+		return nil
+	}
+	if ws.AutoCommit || ws.Tx == nil {
+		if len(ch.Set) > 0 {
+			tx, err := ws.Adapter.Begin(ctx, ws.ReadOnly || ws.AutoCommit)
+			if err != nil {
+				return mapStmtContextError(ws.Adapter, err)
+			}
+			err = run(tx)
+			_ = tx.Rollback()
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		// 手工事务内：同时作用于当前事务（PG 为 SET LOCAL，事务内立即生效）
+		if err := run(ws.Tx); err != nil {
+			ws.TxState = TxFailed
+			return err
+		}
+	}
+	if err := st.apply(ch); err != nil {
+		return &APIError{Code: "SESSION_SETTING_LIMIT", Message: err.Error()}
+	}
+	return nil
+}
+
+// ResetSessionSettings 清空工作台的会话设置记录。
+func (wm *WorkspaceManager) ResetSessionSettings(ws *Workspace) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.LastActivity = time.Now()
+	if st := ws.sessionState(); st != nil {
+		st.clear()
+	}
+}
+
+// executeQueryInWorkspace 执行结果集语句（不统计总数）。
+// 自动提交模式：在只读事务中执行。手工事务模式：在当前事务中执行。
+// Passthrough（SHOW/DESC/EXPLAIN）不做子查询包装，直接执行后按 offset/limit 流式读取。
+func (wm *WorkspaceManager) executeQueryInWorkspace(ctx context.Context, ws *Workspace, sqlText string, an SQLAnalysis, limit, offset int, result *ExecutionResult) error {
+	result.TotalStatus = "skipped"
+	read := func(q Transaction) error {
+		if an.Passthrough {
+			return queryRawIntoResult(ctx, ws.Adapter, q, sqlText, limit, offset, result)
+		}
+		return queryPageIntoResult(ctx, ws.Adapter, q, sqlText, limit, offset, result)
+	}
+
+	if ws.AutoCommit {
+		tx, err := ws.Adapter.Begin(ctx, true)
+		if err != nil {
+			return beginError(ws.Adapter, "开启只读事务失败", err)
+		}
+		defer tx.Rollback()
+		return read(tx)
+	}
+
+	// 手工事务：在当前事务中执行（Begin 用工作台 txCtx，语句用请求短超时 ctx）
+	if err := wm.ensureManualTxLocked(ws, ws.ReadOnly); err != nil {
+		return err
+	}
+	if err := read(ws.Tx); err != nil {
+		ws.TxState = TxFailed
+		return err
+	}
+	return nil
+}
+
+// beginError 统一处理 Begin 失败：取消/超时归一，会话设置重放失败原样透传。
+func beginError(adapter DataSourceAdapter, prefix string, err error) error {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return mapStmtContextError(adapter, err)
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
+}
+
+// ensureManualTxLocked 手工事务模式下按需开启工作台事务（调用方持 ws.mu）。
+func (wm *WorkspaceManager) ensureManualTxLocked(ws *Workspace, readOnly bool) error {
+	if ws.Tx != nil {
+		return nil
+	}
+	tx, err := ws.beginManualTxLocked(readOnly)
+	if err != nil {
+		return beginError(ws.Adapter, "开启事务失败", err)
+	}
+	if err := wm.pool.BeginTx(ws.ResourceID); err != nil {
+		_ = tx.Rollback()
+		ws.clearTxLocked(false, nil)
+		return &APIError{Code: "IMPORT_ACTIVE", Message: err.Error()}
+	}
+	ws.Tx = tx
+	ws.TxState = TxActive
+	return nil
+}
+
+// CountInWorkspace 按需统计查询总行数（用户点击「统计总数」）。
+// 自动提交在独立只读事务中执行；手工事务在当前事务中执行（用户主动触发，接受函数被再次求值）。
+func (wm *WorkspaceManager) CountInWorkspace(ctx context.Context, ws *Workspace, sqlText string) (int64, string, error) {
+	if !wm.pool.TryBeginOperation(ws.ResourceID) {
+		return 0, "", &APIError{Code: "RESOURCE_BUSY", Message: "资源正在导入或更新，请稍后再试"}
+	}
+	defer wm.pool.EndOperation(ws.ResourceID)
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if err := ws.ensureOpenLocked(); err != nil {
+		return 0, "", &APIError{Code: "WORKSPACE_CLOSED", Message: err.Error()}
+	}
+	ws.LastActivity = time.Now()
+	qctx, cancel := context.WithTimeout(ctx, QueryTimeout)
+	ws.setStmtCancel(cancel)
+	defer func() {
+		ws.clearStmtCancel()
+		cancel()
+	}()
+
+	d := dialectOf(ws.Adapter)
+	if err := validateSingleStatementFor(sqlText, d); err != nil {
+		return 0, string(ws.TxState), &APIError{Code: "MULTI_STATEMENT", Message: err.Error()}
+	}
+	an := analyzeSQL(sqlText, d)
+	if an.Type != StmtSelect || an.Passthrough || an.Reject != "" {
+		return 0, string(ws.TxState), &APIError{Code: "COUNT_UNSUPPORTED", Message: "仅普通查询支持统计总数"}
+	}
+	countSQL, err := ws.Adapter.CountSQL(sqlText)
+	if err != nil {
+		return 0, string(ws.TxState), err
+	}
+	var total int64
+	if ws.AutoCommit {
+		tx, err := ws.Adapter.Begin(qctx, true)
+		if err != nil {
+			return 0, string(ws.TxState), beginError(ws.Adapter, "开启只读事务失败", err)
+		}
+		defer tx.Rollback()
+		if err := tx.QueryRow(qctx, countSQL).Scan(&total); err != nil {
+			return 0, string(ws.TxState), mapStmtContextError(ws.Adapter, err)
+		}
+		return total, string(ws.TxState), nil
+	}
+	if err := wm.ensureManualTxLocked(ws, ws.ReadOnly); err != nil {
+		return 0, string(ws.TxState), err
+	}
+	if err := ws.Tx.QueryRow(qctx, countSQL).Scan(&total); err != nil {
+		ws.TxState = TxFailed
+		return 0, string(ws.TxState), mapStmtContextError(ws.Adapter, err)
+	}
+	return total, string(ws.TxState), nil
+}
+
 // queryPageIntoResult 执行分页查询并填充 result。
-// 优先 PageSQL。仅当识别为派生表重名列（MySQL 1060 等）且 offset==0 时流式兜底；
-// 其它失败直接返回，避免语法/权限错误二次打库，或大 offset 拖死连接池。
+// 多取 1 行精确判断是否还有下一页。优先 PageSQL；仅当识别为派生表重名列（MySQL 1060 等）
+// 且 offset==0 时流式兜底；其它失败直接返回，避免语法/权限错误二次打库，或大 offset 拖死连接池。
 func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q interface {
 	Query(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }, sqlText string, limit, offset int, result *ExecutionResult) error {
-	pageSQL, err := adapter.PageSQL(sqlText, limit, offset)
+	pageSQL, err := adapter.PageSQL(sqlText, limit+1, offset)
 	if err != nil {
 		return err
 	}
@@ -586,10 +706,10 @@ func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q inter
 				Message: "该查询存在重复列名，无法自动分页；请显式指定列别名，或去掉 SQL 中的 LIMIT/FETCH/FOR UPDATE 后重试",
 			}.toError()
 		}
-		return mapStmtContextError(adapter, pageErr)
+		return shiftErrorPosition(mapStmtContextError(adapter, pageErr), pageSQL, trimSQLForWrap(sqlText, dialectOf(adapter)))
 	}
 	// 仅 offset=0 的重名列：流式读 limit+1，避免全量拉取后丢弃
-	raw := strings.TrimRight(strings.TrimSpace(sqlText), ";")
+	raw := trimSQLForWrap(sqlText, dialectOf(adapter))
 	rows2, err2 := q.Query(ctx, raw)
 	if err2 != nil {
 		return mapStmtContextError(adapter, pageErr)
@@ -599,6 +719,42 @@ func queryPageIntoResult(ctx context.Context, adapter DataSourceAdapter, q inter
 		return mapStmtContextError(adapter, err)
 	}
 	return nil
+}
+
+// queryRawIntoResult 直接执行（不包装）并流式跳过 offset、读取 limit+1 行。
+func queryRawIntoResult(ctx context.Context, adapter DataSourceAdapter, q interface {
+	Query(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}, sqlText string, limit, offset int, result *ExecutionResult) error {
+	rows, err := q.Query(ctx, trimSQLForWrap(sqlText, dialectOf(adapter)))
+	if err != nil {
+		return mapStmtContextError(adapter, err)
+	}
+	defer rows.Close()
+	if err := fillResultStream(rows, result, limit, offset); err != nil {
+		return mapStmtContextError(adapter, err)
+	}
+	return nil
+}
+
+// shiftErrorPosition 把数据库报告的错误位置（基于包装后 SQL，1 起的字符序号）换算回用户 SQL。
+// 落在包装前缀内的位置无意义，清零。
+func shiftErrorPosition(err error, wrapped, user string) error {
+	var de DatabaseError
+	if !errors.As(err, &de) || de.Position <= 0 {
+		return err
+	}
+	idx := strings.Index(wrapped, user)
+	if idx < 0 {
+		de.Position = 0
+		return de
+	}
+	prefix := utf8.RuneCountInString(wrapped[:idx])
+	if de.Position <= prefix || de.Position > prefix+utf8.RuneCountInString(user)+1 {
+		de.Position = 0
+	} else {
+		de.Position -= prefix
+	}
+	return de
 }
 
 // isDuplicateColumnPageError 识别 MySQL 1060 / 派生表重名列等包装失败。
@@ -626,25 +782,68 @@ func isDuplicateColumnPageError(err error) bool {
 	return false
 }
 
-// executeWriteInWorkspace 执行写操作。
-func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, result *ExecutionResult) error {
+// executeWriteInWorkspace 执行写操作（DML/DDL/CALL）。
+// an.NoTx：PG 系 VACUUM/CONCURRENTLY 等在独占连接上事务外执行；
+// an.Passthrough：EXPLAIN ANALYZE <写语句>，在写事务中执行并返回计划行。
+func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Workspace, sqlText string, an SQLAnalysis, limit int, result *ExecutionResult) error {
 	if ws.ReadOnly {
 		// 第二层兜底：只读工作台不得执行写（handler 应已拦截）
 		return &APIError{Code: "DATA_RESOURCE_READ_ONLY", Message: "只读授权不允许执行写操作"}
 	}
+	exec := func(tx Transaction) error {
+		if an.Passthrough {
+			rows, err := tx.Query(ctx, trimSQLForWrap(sqlText, dialectOf(ws.Adapter)))
+			if err != nil {
+				return mapStmtContextError(ws.Adapter, err)
+			}
+			defer rows.Close()
+			if err := fillResultStream(rows, result, limit, 0); err != nil {
+				return mapStmtContextError(ws.Adapter, err)
+			}
+			return nil
+		}
+		res, err := tx.Exec(ctx, sqlText)
+		if err != nil {
+			return mapStmtContextError(ws.Adapter, err)
+		}
+		n, _ := res.RowsAffected()
+		result.AffectedRows = n
+		return nil
+	}
+
+	if an.NoTx {
+		if !ws.AutoCommit {
+			return &APIError{Code: "AUTO_COMMIT_REQUIRED", Message: "该语句不能在事务块内执行，请开启自动提交"}
+		}
+		var settings []sessionSetting
+		if st := ws.sessionState(); st != nil {
+			settings = st.snapshot()
+		}
+		inner := ws.Adapter
+		if sa, ok := inner.(*sessionAdapter); ok {
+			inner = sa.DataSourceAdapter
+		}
+		n, err := execOutsideTx(ctx, inner, settings, sqlText)
+		if err != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				return apiErr
+			}
+			return mapStmtContextError(ws.Adapter, err)
+		}
+		result.AffectedRows = n
+		return nil
+	}
+
 	if ws.AutoCommit {
 		// 自动提交：独立事务
 		tx, err := ws.Adapter.Begin(ctx, false)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return mapStmtContextError(ws.Adapter, err)
-			}
-			return fmt.Errorf("开启事务失败: %w", err)
+			return beginError(ws.Adapter, "开启事务失败", err)
 		}
-		res, err := tx.Exec(ctx, sqlText)
-		if err != nil {
+		if err := exec(tx); err != nil {
 			_ = tx.Rollback()
-			return mapStmtContextError(ws.Adapter, err)
+			return err
 		}
 		// 失效路径可能已 closed：禁止提交在途自动提交写
 		if ws.isClosed() {
@@ -654,32 +853,17 @@ func (wm *WorkspaceManager) executeWriteInWorkspace(ctx context.Context, ws *Wor
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("提交失败: %w", err)
 		}
-		n, _ := res.RowsAffected()
-		result.AffectedRows = n
 		return nil
 	}
 
 	// 手工事务（Begin 用工作台 txCtx，语句用请求短超时 ctx）
-	if ws.Tx == nil {
-		tx, err := ws.beginManualTxLocked(false)
-		if err != nil {
-			return fmt.Errorf("开启事务失败: %w", err)
-		}
-		if err := wm.pool.BeginTx(ws.ResourceID); err != nil {
-			_ = tx.Rollback()
-			ws.clearTxLocked(false, nil)
-			return &APIError{Code: "IMPORT_ACTIVE", Message: err.Error()}
-		}
-		ws.Tx = tx
-		ws.TxState = TxActive
+	if err := wm.ensureManualTxLocked(ws, false); err != nil {
+		return err
 	}
-	res, err := ws.Tx.Exec(ctx, sqlText)
-	if err != nil {
+	if err := exec(ws.Tx); err != nil {
 		ws.TxState = TxFailed
-		return mapStmtContextError(ws.Adapter, err)
+		return err
 	}
-	n, _ := res.RowsAffected()
-	result.AffectedRows = n
 	return nil
 }
 
@@ -740,17 +924,21 @@ func (wm *WorkspaceManager) SetAutoCommit(ws *Workspace, autoCommit bool) (works
 }
 
 // fillResult 从已分页的 rows 填充 ExecutionResult（PageSQL 已含 LIMIT/OFFSET）。
-// HasMore 启发式：返回行数 == limit 时可能还有下一页。
 func fillResult(rows interface {
 	Columns() ([]string, error)
 	Next() bool
 	Scan(...any) error
 	Err() error
 }, result *ExecutionResult, limit int) error {
-	if err := scanRowsInto(rows, result, limit); err != nil {
+	// PageSQL 按 limit+1 取数：多出的 1 行只用于判断是否还有下一页
+	if err := scanRowsInto(rows, result, limit+1); err != nil {
 		return err
 	}
-	result.HasMore = result.ReturnedRows == limit
+	result.HasMore = result.ReturnedRows > limit
+	if result.HasMore {
+		result.Rows = result.Rows[:limit]
+		result.ReturnedRows = limit
+	}
 	return nil
 }
 

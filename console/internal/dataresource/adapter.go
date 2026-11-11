@@ -146,6 +146,7 @@ type DatabaseError struct {
 	Code     string `json:"code"`               // 稳定错误码
 	Message  string `json:"message"`            // 用户可读消息（脱敏）
 	SQLState string `json:"sqlState,omitempty"` // SQLSTATE（已脱敏）
+	Position int    `json:"position,omitempty"` // 错误位置：用户 SQL 中 1 起的字符序号（仅 PG 提供）
 }
 
 // Capabilities 声明适配器支持的能力，不支持的能力在前端关闭对应菜单。

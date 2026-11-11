@@ -34,7 +34,7 @@ type ExecutionResult struct {
 	Rows          [][]any         `json:"rows,omitempty"`
 	ReturnedRows  int             `json:"returnedRows"`
 	Total         int             `json:"total,omitempty"`
-	TotalStatus   string          `json:"totalStatus,omitempty"` // available/unavailable
+	TotalStatus   string          `json:"totalStatus,omitempty"` // available/unavailable/skipped（未统计，可按需调 count）
 	HasMore       bool            `json:"hasMore,omitempty"`
 	Limit         int             `json:"limit,omitempty"`  // 本次分页 limit
 	Offset        int             `json:"offset,omitempty"` // 本次分页 offset
@@ -42,6 +42,10 @@ type ExecutionResult struct {
 	DurationMs    int64           `json:"durationMs"`
 	Messages      []string        `json:"messages,omitempty"`
 	TxState       string          `json:"txState"` // none/active/failed
+	// Passthrough 为 true 表示 SHOW/DESC/EXPLAIN 等直通语句：不支持统计总数与就地编辑。
+	Passthrough bool `json:"passthrough,omitempty"`
+	// SessionSettings 是当前工作台已记录、每个事务开头重放的会话设置。
+	SessionSettings []string `json:"sessionSettings,omitempty"`
 	// Editable 非空表示该 SELECT 结果支持就地编辑（单表 + 有主键）；只读用户由 handler 省略。
 	Editable *EditableInfo `json:"editable,omitempty"`
 }

@@ -236,6 +236,7 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/children", drAuth(dataResSvc.MetadataChildren))
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/structure", drAuth(dataResSvc.MetadataStructure))
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/ddl", drAuth(dataResSvc.MetadataDDL))
+	mux.HandleFunc("GET /api/data-resources/{id}/metadata/completion", drAuth(dataResSvc.MetadataCompletion))
 	mux.HandleFunc("POST /api/data-resources/{id}/metadata/sql-template", drAuth(dataResSvc.MetadataSQLTemplate))
 
 	// 数据资源工作台：执行/导出仅经 workspace 契约（设计文档第三节），
@@ -244,6 +245,8 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("PATCH /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit", drAuth(dataResSvc.PatchAutoCommit))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/execute", drAuth(dataResSvc.ExecuteInWorkspaceHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/cancel", drAuth(dataResSvc.CancelWorkspaceHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/count", drAuth(dataResSvc.CountInWorkspaceHandler))
+	mux.HandleFunc("DELETE /api/data-resources/{id}/workspaces/{workspaceId}/session-settings", drAuth(dataResSvc.ResetSessionSettingsHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/row-edits", drAuth(dataResSvc.ApplyRowEditsHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/commit", drAuth(dataResSvc.CommitWorkspaceHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/rollback", drAuth(dataResSvc.RollbackWorkspaceHandler))
