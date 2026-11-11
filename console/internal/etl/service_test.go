@@ -524,3 +524,162 @@ func TestErrorSampleBounds(t *testing.T) {
 		t.Fatal("常规值应原样保留")
 	}
 }
+
+// 导出/导入：包格式校验、引用按名映射、缺失项由调用方映射或保留。
+func TestExportImport(t *testing.T) {
+	h := newHarness(t)
+	target := filepath.Join(t.TempDir(), "t.db")
+	ct, _ := h.s.box.Seal("pw", "conn_e")
+	c, err := h.s.st.CreateConnectionWithID(store.Connection{Config: conn.Config{ID: "conn_e", Name: "源库", DBType: "sqlite", Database: target}}, &ct, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct2, _ := h.s.box.Seal("pw2", "conn_e2")
+	c2, err := h.s.st.CreateConnectionWithID(store.Connection{Config: conn.Config{ID: "conn_e2", Name: "源库二号", DBType: "sqlite", Database: target}}, &ct2, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := json.Marshal(map[string]any{
+		"kind": "pipeline", "params": []any{},
+		"nodes": []map[string]any{
+			{"id": "in", "type": "table_input", "name": "源", "config": map[string]any{"connection": c.ID, "sql": "select 1"}},
+			{"id": "d", "type": "dummy", "name": "空", "config": map[string]any{}},
+		},
+		"hops": []map[string]any{{"id": "h", "from": "in", "fromPort": "main", "to": "d", "toPort": "main"}},
+	})
+	def, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "导出源", Folder: "组A", Doc: doc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 导出：包标识/版本/引用齐全
+	var ex map[string]any
+	if code := h.call("GET", "/api/etl/definitions/"+def.ID+"/export", nil, &ex); code != 200 {
+		t.Fatalf("导出应 200：%d %v", code, ex)
+	}
+	if ex["format"] != "mooncell-etl-export" || ex["version"] != float64(1) {
+		t.Fatalf("包标识/版本异常：%v", ex)
+	}
+	refs := ex["references"].(map[string]any)
+	conns := refs["connections"].([]any)
+	if len(conns) != 1 || conns[0].(map[string]any)["name"] != "源库" {
+		t.Fatalf("导出引用应含连接名：%v", refs)
+	}
+
+	// ② 预览：同名冲突 → finalName 加后缀；连接按名匹配到 conn_e
+	var pv map[string]any
+	if code := h.call("POST", "/api/etl/definitions/import/preview", map[string]any{"document": ex}, &pv); code != 200 {
+		t.Fatalf("预览应 200：%d %v", code, pv)
+	}
+	if pv["finalName"] != "导出源 (导入)" {
+		t.Fatalf("冲突名应加后缀：%v", pv["finalName"])
+	}
+	item := pv["connections"].([]any)[0].(map[string]any)
+	if item["matched"] == nil || item["matched"].(map[string]any)["id"] != c.ID {
+		t.Fatalf("应按名匹配到原连接：%v", item)
+	}
+
+	// ③ 导入：显式映射到「源库二号」→ 文档里 connection 应换成 c2.ID
+	var imp store.Definition
+	if code := h.call("POST", "/api/etl/definitions/import", map[string]any{
+		"document":      ex,
+		"connectionMap": map[string]string{c.ID: c2.ID},
+	}, &imp); code != 200 {
+		t.Fatalf("导入应 200：%d %v", code, imp)
+	}
+	if imp.Name != "导出源 (导入)" || imp.ID == def.ID {
+		t.Fatalf("导入名/ID 异常：%+v", imp)
+	}
+	var got struct {
+		Nodes []struct {
+			Config map[string]string `json:"config"`
+		} `json:"nodes"`
+	}
+	_ = json.Unmarshal(imp.Doc, &got)
+	if got.Nodes[0].Config["connection"] != c2.ID {
+		t.Fatalf("连接未按映射替换：%v", got.Nodes[0].Config)
+	}
+
+	// ④ 跨库场景：连接 ID 悬空但名称存在 → 未显式映射时自动按名匹配
+	var exd exportDoc
+	raw, _ := json.Marshal(ex)
+	_ = json.Unmarshal(raw, &exd)
+	var ddoc map[string]any
+	_ = json.Unmarshal(exd.Definition.Doc, &ddoc)
+	ddoc["nodes"].([]any)[0].(map[string]any)["config"].(map[string]any)["connection"] = "conn_gone"
+	exd.Definition.Doc, _ = json.Marshal(ddoc)
+	exd.References.Connections[0].ID = "conn_gone"
+	var imp2 store.Definition
+	if code := h.call("POST", "/api/etl/definitions/import", map[string]any{"document": exd}, &imp2); code != 200 {
+		t.Fatalf("悬空引用导入应 200：%d %v", code, imp2)
+	}
+	_ = json.Unmarshal(imp2.Doc, &got)
+	if got.Nodes[0].Config["connection"] != c.ID {
+		t.Fatalf("应自动按名匹配到「源库」：%v", got.Nodes[0].Config)
+	}
+
+	// ⑤ 格式/版本拒绝
+	var bad map[string]any
+	if code := h.call("POST", "/api/etl/definitions/import", map[string]any{
+		"document": map[string]any{"format": "other", "version": 1},
+	}, &bad); code != 400 {
+		t.Fatalf("非导出格式应 400：%d %v", code, bad)
+	}
+	ex["version"] = 99
+	if code := h.call("POST", "/api/etl/definitions/import", map[string]any{"document": ex}, &bad); code != 400 {
+		t.Fatalf("未知版本应 400：%d %v", code, bad)
+	}
+}
+
+// 作业引用定义的导出/导入：references.definitions 按名匹配或映射。
+func TestExportImportDefRefs(t *testing.T) {
+	h := newHarness(t)
+	sub, _ := json.Marshal(map[string]any{
+		"kind": "pipeline", "params": []any{},
+		"nodes": []map[string]any{{"id": "g", "type": "generate_rows", "name": "g", "config": map[string]any{"limit": 1}}},
+	})
+	p, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "子转换", Doc: sub}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wfdoc, _ := json.Marshal(map[string]any{
+		"kind": "workflow", "params": []any{},
+		"nodes": []map[string]any{
+			{"id": "start", "type": "start", "name": "开始", "config": map[string]any{}},
+			{"id": "t", "type": "pipeline", "name": "转换", "config": map[string]any{"pipeline": p.ID}},
+			{"id": "n", "type": "notify", "name": "通知", "config": map[string]any{"channel": "webhook", "url": "https://x", "secretCipher": "v1:xyz", "aadSuffix": p.ID + "/n"}},
+		},
+		"hops": []map[string]any{{"id": "h", "from": "start", "fromPort": "success", "to": "t", "toPort": "main"}},
+	})
+	wf, err := h.s.st.CreateDefinition(store.Definition{Kind: "workflow", Name: "父作业", Doc: wfdoc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ex map[string]any
+	if code := h.call("GET", "/api/etl/definitions/"+wf.ID+"/export", nil, &ex); code != 200 {
+		t.Fatalf("导出应 200：%d %v", code, ex)
+	}
+	// notify 的密文不应出现在导出包里（AAD 绑旧 defID，不可解）
+	if strings.Contains(fmt.Sprint(ex), "v1:xyz") || strings.Contains(fmt.Sprint(ex), "aadSuffix") {
+		t.Fatal("通知凭据密文不应随导出包迁移")
+	}
+	// 子转换引用应出现在 references.definitions
+	dr := ex["references"].(map[string]any)["definitions"].([]any)
+	if len(dr) != 1 || dr[0].(map[string]any)["name"] != "子转换" {
+		t.Fatalf("引用定义缺失：%v", dr)
+	}
+	// 导入：自动匹配同名子转换
+	var imp store.Definition
+	if code := h.call("POST", "/api/etl/definitions/import", map[string]any{"document": ex}, &imp); code != 200 {
+		t.Fatalf("导入应 200：%d %v", code, imp)
+	}
+	var got struct {
+		Nodes []struct {
+			Config map[string]string `json:"config"`
+		} `json:"nodes"`
+	}
+	_ = json.Unmarshal(imp.Doc, &got)
+	if got.Nodes[1].Config["pipeline"] != p.ID {
+		t.Fatalf("未映射时定义引用应保留原值（同实例名匹配）：%v", got.Nodes[1].Config)
+	}
+}

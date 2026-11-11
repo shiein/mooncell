@@ -500,6 +500,7 @@ type Dialect interface {
 | `GET connections/{id}/schemas` · `…/tables?schema=` · `…/columns?schema=&table=` | 设计器选择器 |
 | `GET/POST definitions` · `GET/PUT/DELETE definitions/{id}` | 定义 CRUD（PUT 带 `revision` 乐观锁） |
 | `GET definitions/{id}/versions` · `POST definitions/{id}/versions/{rev}/restore` | 历史版本 |
+| `GET definitions/{id}/export` · `POST definitions/import/preview` · `POST definitions/import` | 单定义 JSON 导出/导入：包标识 `format=mooncell-etl-export` + `version`；连接与被引定义按名匹配，缺失项由调用方显式映射或保留原引用 |
 | `POST definitions/validate` | 编译：问题列表 + 每条连线的 schema |
 | `POST pipelines/preview` | 数据预览 |
 | `POST definitions/{id}/run` | 手动运行（参数覆盖） |

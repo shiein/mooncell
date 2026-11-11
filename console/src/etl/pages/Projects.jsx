@@ -47,6 +47,8 @@ export function ProjectsPage({ go }) {
   const [folderFilter, setFolderFilter] = React.useState(''); // '' 全部 / '__none__' 未分组 / 文件夹名
   const [runSort, setRunSort] = React.useState(null); // null 默认 | 'bad' 失败优先 | 'good' 成功优先
   const [creating, setCreating] = React.useState(null); // 'workflow' | 'pipeline'
+  const [importing, setImporting] = React.useState(null); // { document, preview }
+  const fileRef = React.useRef(null);
   const newMenu = usePopover();
   const load = React.useCallback(() => {
     etlApi.definitions().then((l) => { setList(l); setErr(''); }).catch((e) => setErr(e.message));
@@ -89,6 +91,20 @@ export function ProjectsPage({ go }) {
     } catch (x) { toast(x.message, { tone: 'error' }); }
   };
 
+  const pickImport = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    let document;
+    try {
+      document = JSON.parse(await f.text());
+    } catch (x) { toast('文件不是合法 JSON', { tone: 'error' }); return; }
+    try {
+      const preview = await etlApi.importPreview(document);
+      setImporting({ document, preview });
+    } catch (x) { toast(x.message, { tone: 'error' }); }
+  };
+
   return (
     <div>
       <Stats ov={ov} />
@@ -105,6 +121,8 @@ export function ProjectsPage({ go }) {
           <input className="input" placeholder="搜索名称或描述" value={kw} onChange={(e) => setKw(e.target.value)} />
         </div>
         <span style={{ flex: 1 }}></span>
+        <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={pickImport} />
+        <Btn variant="outline" icon="upload" onClick={() => fileRef.current && fileRef.current.click()}>导入</Btn>
         <Btn variant="primary" icon="plus" onClick={newMenu.open}>新建<Icon name="chevronD" size={13} /></Btn>
         <Popover anchor={newMenu.anchor} onClose={newMenu.close} width={260} align="right">
           <MenuItem icon="workflow" label="新建作业" sub="编排执行顺序、条件分支与调度" onClick={() => { newMenu.close(); setCreating('workflow'); }} />
@@ -174,6 +192,13 @@ export function ProjectsPage({ go }) {
         {list && list.length && !shownCount ? <div className="etl-list-empty">没有匹配的项</div> : null}
       </div>
       {creating ? <CreateDialog kind={creating} onClose={() => setCreating(null)} onCreated={(d) => { setCreating(null); go.designer(d.id); }} /> : null}
+      {importing ? (
+        <ImportDialog
+          state={importing}
+          onClose={() => setImporting(null)}
+          onDone={(d) => { setImporting(null); load(); toast(`已导入「${d.name}」`); go.designer(d.id); }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -201,6 +226,18 @@ function RowMenu({ d, onChanged }) {
       <Btn variant="ghost" size="sm" icon="more" title="更多" onClick={pop.open}></Btn>
       <Popover anchor={pop.anchor} onClose={pop.close} width={180} align="right">
         <MenuItem icon="copy" label="复制" onClick={async () => { pop.close(); try { await etlApi.duplicate(d.id); toast('已复制'); onChanged(); } catch (e) { toast(e.message, { tone: 'error' }); } }} />
+        <MenuItem icon="download" label="导出" onClick={async () => {
+          pop.close();
+          try {
+            const pkg = await etlApi.exportDefinition(d.id);
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json' }));
+            a.download = `${d.name}.etl.json`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+            toast('已导出');
+          } catch (e) { toast(e.message, { tone: 'error' }); }
+        }} />
         <div className="etl-menu-sep"></div>
         <MenuItem icon="trash" label="删除" danger onClick={del} />
       </Popover>
@@ -247,6 +284,87 @@ function CreateDialog({ kind, onClose, onCreated }) {
         <Field label="名称"><input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={kind === 'workflow' ? '如 订单增量同步作业' : '如 订单 B→A 增量'} /></Field>
         <Field label="描述（可选）"><textarea className="textarea" rows={2} value={desc} onChange={(e) => setDesc(e.target.value)} /></Field>
       </form>
+    </Dialog>
+  );
+}
+
+// 导入定义：展示导出包信息，连接/被引定义按名自动匹配，缺失或可改写为现存目标。
+function ImportDialog({ state, onClose, onDone }) {
+  const { document, preview } = state;
+  const [conns, setConns] = React.useState([]);
+  const [defs, setDefs] = React.useState([]);
+  const [busy, setBusy] = React.useState(false);
+  const [connMap, setConnMap] = React.useState(() => Object.fromEntries((preview.connections || []).map((c) => [c.id, c.matched ? c.matched.id : ''])));
+  const [defMap, setDefMap] = React.useState(() => Object.fromEntries((preview.definitions || []).map((d) => [d.id, d.matched ? d.matched.id : ''])));
+  React.useEffect(() => {
+    etlApi.connections().then(setConns).catch(() => {});
+    etlApi.definitions().then(setDefs).catch(() => {});
+  }, []);
+  const kindLabel = preview.kind === 'workflow' ? '作业' : '转换';
+  const missing = [...(preview.connections || []), ...(preview.definitions || [])].filter((x) => !x.matched).length;
+
+  const refRow = (label, sub, value, onChange, opts) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderBottom: '1px solid var(--border)' }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{label}</div>
+        {sub ? <div className="etl-muted" style={{ fontSize: 11.5 }}>{sub}</div> : null}
+      </div>
+      <div style={{ width: 240, flex: 'none' }}>
+        <Select value={value} onChange={onChange} options={opts} />
+      </div>
+    </div>
+  );
+  const keepOpt = { value: '', label: '保持原引用（导入后需修复）' };
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const cm = {}, dm = {};
+      Object.entries(connMap).forEach(([k, v]) => { if (v) cm[k] = v; });
+      Object.entries(defMap).forEach(([k, v]) => { if (v) dm[k] = v; });
+      onDone(await etlApi.importDefinition({ document, connectionMap: cm, definitionMap: dm }));
+    } catch (e) { toast(e.message, { tone: 'error' }); setBusy(false); }
+  };
+
+  return (
+    <Dialog open onClose={onClose} width={620} title={`导入${kindLabel}「${preview.name}」`}
+      desc={preview.finalName !== preview.name ? `名称冲突，将保存为「${preview.finalName}」` : `保存为「${preview.finalName}」`}
+      foot={<React.Fragment>
+        <Btn variant="ghost" onClick={onClose}>取消</Btn>
+        <Btn variant="primary" icon="check" disabled={busy} onClick={submit}>{busy ? <Spinner size={12} /> : null}导入</Btn>
+      </React.Fragment>}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {preview.folder ? <div className="etl-muted" style={{ fontSize: 12.5 }}>文件夹：{preview.folder}</div> : null}
+        {(preview.warnings || []).map((t, i) => (
+          <div key={i} style={{ fontSize: 12.5, color: 'var(--warn)', display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+            <Icon name="alert" size={13} style={{ flex: 'none', marginTop: 2 }} />{t}
+          </div>
+        ))}
+        {(preview.connections || []).length ? (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>连接映射{missing ? <span className="etl-muted" style={{ fontWeight: 400 }}>（{missing} 项未按名匹配）</span> : null}</div>
+            {preview.connections.map((c) => refRow(
+              c.name || c.id, c.dbType ? `${c.dbType}${c.matched ? ' · 已按名匹配' : ' · 未匹配'}` : (c.matched ? '已按名匹配' : '原引用已失效'),
+              connMap[c.id] || '', (v) => setConnMap((m) => ({ ...m, [c.id]: v })),
+              [keepOpt, ...conns.map((x) => ({ value: x.id, label: `${x.name}（${x.dbType}）` }))],
+            ))}
+          </div>
+        ) : null}
+        {(preview.definitions || []).length ? (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>引用的作业 / 转换</div>
+            {preview.definitions.map((d) => refRow(
+              d.name || d.id, `${d.kind === 'workflow' ? '作业' : '转换'}${d.matched ? ' · 已按名匹配' : ' · 未匹配'}`,
+              defMap[d.id] || '', (v) => setDefMap((m) => ({ ...m, [d.id]: v })),
+              [keepOpt, ...defs.filter((x) => x.kind === d.kind).map((x) => ({ value: x.id, label: x.name }))],
+            ))}
+          </div>
+        ) : null}
+        {!(preview.connections || []).length && !(preview.definitions || []).length ? (
+          <div className="etl-muted" style={{ fontSize: 12.5 }}>该定义没有外部引用，可直接导入。</div>
+        ) : null}
+        <div className="etl-muted" style={{ fontSize: 11.5 }}>提示：通知凭据不随导出包迁移，导入后需在属性面板重新设置。</div>
+      </div>
     </Dialog>
   );
 }
