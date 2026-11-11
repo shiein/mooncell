@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"mooncell/console/internal/dataresource"
+	etlstore "mooncell/console/internal/etl/store"
 	"mooncell/console/internal/serverops"
 )
 
@@ -28,6 +29,7 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 		AppIDs               []string                         `json:"appIds"`
 		DataResourceGrants   []dataresource.DataResourceGrant `json:"dataResourceGrants"`
 		ServerResourceGrants []serverops.ServerResourceGrant  `json:"serverResourceGrants"`
+		EtlGrants            []etlstore.DefinitionGrant       `json:"etlGrants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -44,6 +46,9 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 	for i := range body.ServerResourceGrants {
 		body.ServerResourceGrants[i].Username = body.Username
 	}
+	for i := range body.EtlGrants {
+		body.EtlGrants[i].Username = body.Username
+	}
 	if err := a.store.createUserBundle(
 		body.Username,
 		body.Password,
@@ -51,6 +56,7 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 		normalizeAppIDs(body.AppIDs),
 		body.DataResourceGrants,
 		body.ServerResourceGrants,
+		body.EtlGrants,
 		a.sessionUser(r),
 	); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "创建失败:用户名可能已存在或授权无效"})
@@ -78,6 +84,7 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		AppIDs               *[]string                         `json:"appIds"`               // 非 nil 则全量替换授权
 		DataResourceGrants   *[]dataresource.DataResourceGrant `json:"dataResourceGrants"`   // 非 nil 则全量替换数据资源授权
 		ServerResourceGrants *[]serverops.ServerResourceGrant  `json:"serverResourceGrants"` // 非 nil 则全量替换服务器运维授权
+		EtlGrants            *[]etlstore.DefinitionGrant       `json:"etlGrants"`            // 非 nil 则全量替换数据集成授权
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"})
@@ -120,6 +127,14 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		serverGrants = &g
 	}
+	var etlGrants *[]etlstore.DefinitionGrant
+	if body.EtlGrants != nil {
+		g := *body.EtlGrants
+		for i := range g {
+			g[i].Username = target
+		}
+		etlGrants = &g
+	}
 	var beforeCommit func()
 	if grants != nil || serverGrants != nil {
 		beforeCommit = func() {
@@ -132,7 +147,7 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, serverGrants, actor, beforeCommit); err != nil {
+	if err := a.store.updateUserBundle(target, body.Password, appIDs, grants, serverGrants, etlGrants, actor, beforeCommit); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "更新用户失败: " + err.Error()})
 		return
 	}

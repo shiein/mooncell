@@ -157,8 +157,8 @@ function Select({ options, value, onChange, className = "", ...rest }) {
   );
 }
 
-function Switch({ on, onChange }) {
-  return <button type="button" className="switch" data-on={String(!!on)} onClick={() => onChange && onChange(!on)} aria-pressed={!!on}></button>;
+function Switch({ on, onChange, disabled }) {
+  return <button type="button" className="switch" data-on={String(!!on)} disabled={disabled} onClick={() => onChange && onChange(!on)} aria-pressed={!!on}></button>;
 }
 
 // Checkbox:自绘方框 + 勾,替代原生 input[type=checkbox](跨浏览器外观一致,套设计系统 token)。

@@ -163,6 +163,9 @@ func remapDoc(doc json.RawMessage, connMap, defMap map[string]string) (json.RawM
 
 // exportDefinition 导出单个定义为 JSON 包（GET /api/etl/definitions/{id}/export）。
 func (h *handlers) exportDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeUse) {
+		return
+	}
 	d, err := h.s.st.GetDefinition(r.PathValue("id"))
 	if err != nil {
 		failErr(w, err)
@@ -224,6 +227,9 @@ type importItem struct {
 
 // importPreview 解析导出包并报告引用匹配结果（不创建任何记录）。
 func (h *handlers) importPreview(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	var in struct {
 		Document json.RawMessage `json:"document"`
 	}
@@ -330,6 +336,9 @@ func importName(existing []store.DefinitionSummary, kind, name string) string {
 
 // importDefinition 按用户确认的连接/定义映射创建定义（POST /api/etl/definitions/import）。
 func (h *handlers) importDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	var in struct {
 		Document      json.RawMessage   `json:"document"`
 		ConnectionMap map[string]string `json:"connectionMap"`

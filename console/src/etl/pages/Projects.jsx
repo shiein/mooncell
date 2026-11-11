@@ -38,7 +38,7 @@ function Stats({ ov }) {
   );
 }
 
-export function ProjectsPage({ go }) {
+export function ProjectsPage({ go, isAdmin }) {
   const ov = useOverview();
   const [list, setList] = React.useState(null);
   const [err, setErr] = React.useState('');
@@ -121,19 +121,23 @@ export function ProjectsPage({ go }) {
           <input className="input" placeholder="搜索名称或描述" value={kw} onChange={(e) => setKw(e.target.value)} />
         </div>
         <span style={{ flex: 1 }}></span>
-        <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={pickImport} />
-        <Btn variant="outline" icon="upload" onClick={() => fileRef.current && fileRef.current.click()}>导入</Btn>
-        <Btn variant="primary" icon="plus" onClick={newMenu.open}>新建<Icon name="chevronD" size={13} /></Btn>
-        <Popover anchor={newMenu.anchor} onClose={newMenu.close} width={260} align="right">
-          <MenuItem icon="workflow" label="新建作业" sub="编排执行顺序、条件分支与调度" onClick={() => { newMenu.close(); setCreating('workflow'); }} />
-          <MenuItem icon="pipeline" label="新建转换" sub="在步骤之间流动与变换数据" onClick={() => { newMenu.close(); setCreating('pipeline'); }} />
-        </Popover>
+        {isAdmin ? (
+          <React.Fragment>
+            <input ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={pickImport} />
+            <Btn variant="outline" icon="upload" onClick={() => fileRef.current && fileRef.current.click()}>导入</Btn>
+            <Btn variant="primary" icon="plus" onClick={newMenu.open}>新建<Icon name="chevronD" size={13} /></Btn>
+            <Popover anchor={newMenu.anchor} onClose={newMenu.close} width={260} align="right">
+              <MenuItem icon="workflow" label="新建作业" sub="编排执行顺序、条件分支与调度" onClick={() => { newMenu.close(); setCreating('workflow'); }} />
+              <MenuItem icon="pipeline" label="新建转换" sub="在步骤之间流动与变换数据" onClick={() => { newMenu.close(); setCreating('pipeline'); }} />
+            </Popover>
+          </React.Fragment>
+        ) : null}
       </div>
 
       <div className="card" style={{ overflow: 'hidden' }}>
         {err ? <div className="etl-list-empty" style={{ color: 'var(--error)' }}>{err} <Btn variant="ghost" size="sm" onClick={load}>重试</Btn></div> : null}
         {!list && !err ? <div className="etl-list-empty" style={{ padding: 40 }}><Spinner /></div> : null}
-        {list && !list.length ? <Empty onCreate={setCreating} /> : null}
+        {list && !list.length ? <Empty onCreate={isAdmin ? setCreating : null} /> : null}
         {list && list.length ? (
           <table className="table etl-table">
             <thead>
@@ -179,7 +183,7 @@ export function ProjectsPage({ go }) {
                   <td>
                     <div className="etl-actions" onClick={(e) => e.stopPropagation()}>
                       <Btn variant="ghost" size="sm" icon="play" title="运行" onClick={(e) => run(d, e)}></Btn>
-                      <Btn variant="ghost" size="sm" icon="pencil" title="编辑" onClick={() => go.designer(d.id)}></Btn>
+                      <Btn variant="ghost" size="sm" icon="pencil" title={d.access === 'use' ? '查看（只读授权）' : '编辑'} onClick={() => go.designer(d.id)}></Btn>
                       <RowMenu d={d} onChanged={load} />
                     </div>
                   </td>
@@ -221,11 +225,12 @@ function RowMenu({ d, onChanged }) {
     toast('已删除', { icon: 'trash' });
     onChanged();
   };
+  const canEdit = d.access !== 'use'; // admin|edit 可写；use 仅查看+运行
   return (
     <React.Fragment>
       <Btn variant="ghost" size="sm" icon="more" title="更多" onClick={pop.open}></Btn>
       <Popover anchor={pop.anchor} onClose={pop.close} width={180} align="right">
-        <MenuItem icon="copy" label="复制" onClick={async () => { pop.close(); try { await etlApi.duplicate(d.id); toast('已复制'); onChanged(); } catch (e) { toast(e.message, { tone: 'error' }); } }} />
+        {canEdit ? <MenuItem icon="copy" label="复制" onClick={async () => { pop.close(); try { await etlApi.duplicate(d.id); toast('已复制'); onChanged(); } catch (e) { toast(e.message, { tone: 'error' }); } }} /> : null}
         <MenuItem icon="download" label="导出" onClick={async () => {
           pop.close();
           try {
@@ -238,8 +243,12 @@ function RowMenu({ d, onChanged }) {
             toast('已导出');
           } catch (e) { toast(e.message, { tone: 'error' }); }
         }} />
-        <div className="etl-menu-sep"></div>
-        <MenuItem icon="trash" label="删除" danger onClick={del} />
+        {canEdit ? (
+          <React.Fragment>
+            <div className="etl-menu-sep"></div>
+            <MenuItem icon="trash" label="删除" danger onClick={del} />
+          </React.Fragment>
+        ) : null}
       </Popover>
     </React.Fragment>
   );
@@ -249,8 +258,9 @@ function Empty({ onCreate }) {
   return (
     <div className="etl-empty">
       <div style={{ display: 'inline-flex', padding: 14, borderRadius: 14, background: 'var(--primary-soft)', color: 'var(--primary)' }}><Icon name="flow" size={24} /></div>
-      <h3>还没有作业或转换</h3>
-      <p>典型用法：建一个转换描述「从哪读、怎么变、写到哪」，再建一个作业在合适的条件下调度它。</p>
+      <h3>{onCreate ? '还没有作业或转换' : '暂无授权的定义'}</h3>
+      <p>{onCreate ? '典型用法：建一个转换描述「从哪读、怎么变、写到哪」，再建一个作业在合适的条件下调度它。' : '请联系管理员在用户管理中授予定义的「使用」或「编辑」授权。'}</p>
+      {onCreate ? (
       <div className="etl-concepts">
         <div className="etl-concept">
           <div className="etl-concept-title"><span className="etl-kind-chip" data-kind="pipeline" style={{ width: 26, height: 26 }}><Icon name="pipeline" size={14} /></span>转换</div>
@@ -263,6 +273,7 @@ function Empty({ onCreate }) {
           <Btn variant="outline" size="sm" icon="plus" style={{ marginTop: 10 }} onClick={() => onCreate('workflow')}>新建作业</Btn>
         </div>
       </div>
+      ) : null}
     </div>
   );
 }

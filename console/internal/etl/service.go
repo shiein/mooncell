@@ -184,7 +184,8 @@ func (s *Service) resolveConnection(ctx context.Context, id string) (conn.Config
 	return c.Config, pw, nil
 }
 
-// RegisterRoutes 注册 /api/etl/*。wrap 负责鉴权并用 WithUser 注入用户名。
+// RegisterRoutes 注册 /api/etl/*。wrap 负责鉴权并用 WithUser 注入用户名与角色；
+// 定义级 use/edit 授权在各 handler 内逐路由校验。
 func (s *Service) RegisterRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
 	h := &handlers{s: s}
 	r := func(pattern string, fn http.HandlerFunc) { mux.HandleFunc(pattern, wrap(fn)) }
@@ -237,12 +238,22 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc)
 
 type userKey struct{}
 
-// WithUser 把当前用户名注入请求上下文（由 Console 鉴权 wrapper 调用）。
-func WithUser(r *http.Request, username string) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), userKey{}, username))
+type ctxUser struct {
+	name string
+	role string
+}
+
+// WithUser 把当前用户名与角色注入请求上下文（由 Console 鉴权 wrapper 调用）。
+func WithUser(r *http.Request, username, role string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), userKey{}, ctxUser{name: username, role: role}))
 }
 
 func userOf(r *http.Request) string {
-	u, _ := r.Context().Value(userKey{}).(string)
-	return u
+	u, _ := r.Context().Value(userKey{}).(ctxUser)
+	return u.name
+}
+
+func isAdmin(r *http.Request) bool {
+	u, _ := r.Context().Value(userKey{}).(ctxUser)
+	return u.role == "admin"
 }

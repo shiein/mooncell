@@ -7,9 +7,11 @@ import { useAsync } from '../lib/async.js';
 import { listUsers, createUser, updateUser, deleteUser } from '../lib/api.js';
 import { listDataResources } from '../lib/dataresource-api.js';
 import { listServerResources } from '../lib/serverops-api.js';
+import { etlApi } from '../etl/api.js';
 
-function UsersPage() {
+function UsersPage({ features }) {
   const store = useMC();
+  const etlOn = !!(features && features.etl); // ETL 模块未启用时不显示数据集成列与授权区块
   const [open, setOpen] = React.useState(false);
   const [editUser, setEditUser] = React.useState(null);
   const { data: users, error, loading, retry } = useAsync(listUsers, []);
@@ -41,7 +43,7 @@ function UsersPage() {
 
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
-          <thead><tr><th>用户名</th><th>角色</th><th>授权应用</th><th>数据资源</th><th>服务器</th><th>创建时间</th><th style={{ width: 120 }}></th></tr></thead>
+          <thead><tr><th>用户名</th><th>角色</th><th>授权应用</th><th>数据资源</th>{etlOn ? <th>数据集成</th> : null}<th>服务器</th><th>创建时间</th><th style={{ width: 120 }}></th></tr></thead>
           <tbody>
             {(users || []).map((u) => (
               <tr key={u.username}>
@@ -72,6 +74,17 @@ function UsersPage() {
                     <span style={{ fontSize: 12.5 }}>{(u.dataResourceGrants || []).length} 项</span>
                   )}
                 </td>
+                {etlOn ? (
+                <td>
+                  {u.role === "admin" ? (
+                    <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>全部定义</span>
+                  ) : !(u.etlGrants || []).length ? (
+                    <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>未授权</span>
+                  ) : (
+                    <span style={{ fontSize: 12.5 }}>{(u.etlGrants || []).length} 项</span>
+                  )}
+                </td>
+                ) : null}
                 <td>
                   {u.role === "admin" ? (
                     <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>全部</span>
@@ -104,9 +117,9 @@ function UsersPage() {
         {!loading && !error && users && users.length === 0 ? <EmptyState icon="user" title="暂无用户" /> : null}
       </div>
 
-      <CreateUserDialog open={open} apps={store.apps || []} onClose={() => setOpen(false)}
+      <CreateUserDialog open={open} apps={store.apps || []} etlOn={etlOn} onClose={() => setOpen(false)}
         onCreated={() => { setOpen(false); retry(); }} />
-      <EditUserDialog user={editUser} apps={store.apps || []} open={!!editUser}
+      <EditUserDialog user={editUser} apps={store.apps || []} etlOn={etlOn} open={!!editUser}
         onClose={() => setEditUser(null)} onSaved={() => { setEditUser(null); retry(); }} />
     </div>
   );
@@ -164,6 +177,38 @@ function DataResourceGrantPicker({ resources, grants, onChange }) {
   );
 }
 
+/** 数据集成授权：按定义授予 使用(查看+运行)/编辑(含修改/调度/复制)。 */
+function EtlGrantPicker({ definitions, grants, onChange }) {
+  const byId = Object.fromEntries((grants || []).map((g) => [g.definitionId, g.accessMode]));
+  const setMode = (definitionId, mode) => {
+    const next = (grants || []).filter((g) => g.definitionId !== definitionId);
+    if (mode) next.push({ definitionId, accessMode: mode });
+    onChange(next);
+  };
+  if (!definitions.length) {
+    return <div style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>暂无数据集成定义，请先在「数据集成」中创建</div>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto",
+      border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>
+      {definitions.map((d) => (
+        <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+          <span style={{ flex: 1, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis" }}>
+            {d.kind === 'workflow' ? '作业' : '转换'} · {d.name}
+          </span>
+          <select className="input" style={{ width: 110, padding: "4px 8px" }}
+            value={byId[d.id] || ""}
+            onChange={(e) => setMode(d.id, e.target.value)}>
+            <option value="">无权限</option>
+            <option value="use">使用</option>
+            <option value="edit">编辑</option>
+          </select>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** 服务器运维授权：第一版仅「可运维」复选框，无只读假象。 */
 function ServerResourceGrantPicker({ resources, grants, onChange }) {
   const selected = new Set((grants || []).map((g) => g.resourceId));
@@ -190,20 +235,23 @@ function ServerResourceGrantPicker({ resources, grants, onChange }) {
   );
 }
 
-function CreateUserDialog({ open, onClose, onCreated, apps }) {
+function CreateUserDialog({ open, onClose, onCreated, apps, etlOn }) {
   const [u, setU] = React.useState("");
   const [p, setP] = React.useState("");
   const [appIds, setAppIds] = React.useState([]);
   const [drGrants, setDrGrants] = React.useState([]);
   const [srvGrants, setSrvGrants] = React.useState([]);
+  const [etlGrants, setEtlGrants] = React.useState([]);
+  const [etlDefs, setEtlDefs] = React.useState([]);
   const [resources, setResources] = React.useState([]);
   const [servers, setServers] = React.useState([]);
   const [busy, setBusy] = React.useState(false);
   React.useEffect(() => {
     if (open) {
-      setU(""); setP(""); setAppIds([]); setDrGrants([]); setSrvGrants([]); setBusy(false);
+      setU(""); setP(""); setAppIds([]); setDrGrants([]); setSrvGrants([]); setEtlGrants([]); setBusy(false);
       listDataResources().then(setResources).catch(() => setResources([]));
       listServerResources().then((d) => setServers(d.resources || [])).catch(() => setServers([]));
+      if (etlOn) etlApi.definitions().then(setEtlDefs).catch(() => setEtlDefs([]));
     }
   }, [open]);
 
@@ -215,6 +263,7 @@ function CreateUserDialog({ open, onClose, onCreated, apps }) {
         username: u.trim(), password: p, appIds,
         dataResourceGrants: drGrants.map((g) => ({ resourceId: g.resourceId, accessMode: g.accessMode })),
         serverResourceGrants: srvGrants.map((g) => ({ resourceId: g.resourceId })),
+        etlGrants: etlGrants.map((g) => ({ definitionId: g.definitionId, accessMode: g.accessMode })),
       });
       toast(`已创建用户 ${u.trim()}`);
       onCreated();
@@ -239,6 +288,11 @@ function CreateUserDialog({ open, onClose, onCreated, apps }) {
         <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证。PostgreSQL/Kingbase 可见范围为整个库的所有 schema，实际权限由数据库账号决定；推荐资源使用只读账号">
           <DataResourceGrantPicker resources={resources} grants={drGrants} onChange={setDrGrants} />
         </Field>
+        {etlOn ? (
+        <Field label="数据集成授权" hint="「使用」可查看定义并运行/查看运行记录；「编辑」另可修改、复制与维护调度">
+          <EtlGrantPicker definitions={etlDefs} grants={etlGrants} onChange={setEtlGrants} />
+        </Field>
+        ) : null}
         <Field label="服务器运维授权" hint="可运维即能打开 Web SSH/SFTP；SSH 账号权限由远端决定，不提供假只读终端">
           <ServerResourceGrantPicker resources={servers} grants={srvGrants} onChange={setSrvGrants} />
         </Field>
@@ -247,11 +301,13 @@ function CreateUserDialog({ open, onClose, onCreated, apps }) {
   );
 }
 
-function EditUserDialog({ user, open, onClose, onSaved, apps }) {
+function EditUserDialog({ user, open, onClose, onSaved, apps, etlOn }) {
   const [p, setP] = React.useState("");
   const [appIds, setAppIds] = React.useState([]);
   const [drGrants, setDrGrants] = React.useState([]);
   const [srvGrants, setSrvGrants] = React.useState([]);
+  const [etlGrants, setEtlGrants] = React.useState([]);
+  const [etlDefs, setEtlDefs] = React.useState([]);
   const [resources, setResources] = React.useState([]);
   const [servers, setServers] = React.useState([]);
   const [busy, setBusy] = React.useState(false);
@@ -265,9 +321,13 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
       setSrvGrants([...(user.serverResourceGrants || [])].map((g) => ({
         resourceId: g.resourceId,
       })));
+      setEtlGrants([...(user.etlGrants || [])].map((g) => ({
+        definitionId: g.definitionId, accessMode: g.accessMode,
+      })));
       setBusy(false);
       listDataResources().then(setResources).catch(() => setResources([]));
       listServerResources().then((d) => setServers(d.resources || [])).catch(() => setServers([]));
+      if (etlOn) etlApi.definitions().then(setEtlDefs).catch(() => setEtlDefs([]));
     }
   }, [open, user]);
 
@@ -278,6 +338,7 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
         appIds,
         dataResourceGrants: drGrants.map((g) => ({ resourceId: g.resourceId, accessMode: g.accessMode })),
         serverResourceGrants: srvGrants.map((g) => ({ resourceId: g.resourceId })),
+        etlGrants: etlGrants.map((g) => ({ definitionId: g.definitionId, accessMode: g.accessMode })),
       };
       if (p.trim()) payload.password = p.trim();
       await updateUser(user.username, payload);
@@ -304,6 +365,11 @@ function EditUserDialog({ user, open, onClose, onSaved, apps }) {
         <Field label="数据资源授权" hint="只读须该资源最近测试通过只读事务认证。PostgreSQL/Kingbase 可见范围为整个库的所有 schema，实际权限由数据库账号决定；推荐资源使用只读账号">
           <DataResourceGrantPicker resources={resources} grants={drGrants} onChange={setDrGrants} />
         </Field>
+        {etlOn ? (
+        <Field label="数据集成授权" hint="「使用」可查看定义并运行/查看运行记录；「编辑」另可修改、复制与维护调度">
+          <EtlGrantPicker definitions={etlDefs} grants={etlGrants} onChange={setEtlGrants} />
+        </Field>
+        ) : null}
         <Field label="服务器运维授权" hint="撤销后会立即终止该用户在对应服务器上的活动会话">
           <ServerResourceGrantPicker resources={servers} grants={srvGrants} onChange={setSrvGrants} />
         </Field>

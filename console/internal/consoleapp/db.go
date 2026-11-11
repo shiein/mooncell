@@ -13,6 +13,7 @@ import (
 
 	"mooncell/console/internal/dataresource"
 	"mooncell/console/internal/etl"
+	etlstore "mooncell/console/internal/etl/store"
 	"mooncell/console/internal/serverops"
 )
 
@@ -265,6 +266,7 @@ type UserInfo struct {
 	AppIDs               []string                         `json:"appIds"`               // 授权访问的应用;admin 忽略(全量)
 	DataResourceGrants   []dataresource.DataResourceGrant `json:"dataResourceGrants"`   // 数据资源授权;admin 忽略(隐式全量)
 	ServerResourceGrants []serverops.ServerResourceGrant  `json:"serverResourceGrants"` // 服务器运维授权;admin 忽略(隐式全量)
+	EtlGrants            []etlstore.DefinitionGrant       `json:"etlGrants"`            // 数据集成定义授权;admin 忽略(隐式全量)
 }
 
 func (s *Store) userRole(username string) string {
@@ -292,6 +294,7 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 		u.AppIDs = []string{}
 		u.DataResourceGrants = []dataresource.DataResourceGrant{}
 		u.ServerResourceGrants = []serverops.ServerResourceGrant{}
+		u.EtlGrants = []etlstore.DefinitionGrant{}
 		out = append(out, u)
 	}
 	if err := rows.Err(); err != nil {
@@ -327,6 +330,11 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 批量拉数据集成定义授权。
+	etlGrantsByUser, err := etlstore.AllGrantsByUser(s.db)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
 		if apps, ok := byUser[out[i].Username]; ok {
 			out[i].AppIDs = apps
@@ -336,6 +344,9 @@ func (s *Store) listUsers() ([]UserInfo, error) {
 		}
 		if gs, ok := srvGrantsByUser[out[i].Username]; ok {
 			out[i].ServerResourceGrants = gs
+		}
+		if gs, ok := etlGrantsByUser[out[i].Username]; ok {
+			out[i].EtlGrants = gs
 		}
 	}
 	return out, nil
@@ -359,6 +370,7 @@ func (s *Store) createUserBundle(
 	appIDs []string,
 	grants []dataresource.DataResourceGrant,
 	serverGrants []serverops.ServerResourceGrant,
+	etlGrants []etlstore.DefinitionGrant,
 	grantedBy string,
 ) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -389,6 +401,9 @@ func (s *Store) createUserBundle(
 		return err
 	}
 	if err := serverops.SetUserGrantsTx(tx, username, serverGrants, grantedBy); err != nil {
+		return err
+	}
+	if err := etlstore.SetUserGrantsTx(tx, username, etlGrants, grantedBy); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -493,6 +508,7 @@ func (s *Store) deleteUser(username string) (bool, error) {
 			"DELETE FROM data_resource_grants WHERE username = ?",
 			"DELETE FROM saved_sql WHERE username = ?",
 			"DELETE FROM server_resource_grants WHERE username = ?",
+			"DELETE FROM etl_grants WHERE username = ?",
 		} {
 			if _, err := tx.Exec(stmt, username); err != nil {
 				return false, err
@@ -512,6 +528,7 @@ func (s *Store) updateUserBundle(
 	appIDs *[]string,
 	grants *[]dataresource.DataResourceGrant,
 	serverGrants *[]serverops.ServerResourceGrant,
+	etlGrants *[]etlstore.DefinitionGrant,
 	grantedBy string,
 	beforeCommit func(),
 ) error {
@@ -555,6 +572,11 @@ func (s *Store) updateUserBundle(
 	}
 	if serverGrants != nil {
 		if err := serverops.SetUserGrantsTx(tx, username, *serverGrants, grantedBy); err != nil {
+			return err
+		}
+	}
+	if etlGrants != nil {
+		if err := etlstore.SetUserGrantsTx(tx, username, *etlGrants, grantedBy); err != nil {
 			return err
 		}
 	}

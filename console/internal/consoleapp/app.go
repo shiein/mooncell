@@ -288,9 +288,9 @@ func Run(distFS fs.FS, version string, args []string) {
 		serverOpsSvc.RegisterRoutes(mux, soAuth)
 	}
 
-	// 数据集成:仅 admin(handler 内无细粒度授权,v1 全量)
+	// 数据集成:admin 全量；普通用户按 etl_grants 定义级授权（handler 内强制校验）
 	if a.etl != nil {
-		a.etl.RegisterRoutes(mux, a.requireAdminETL)
+		a.etl.RegisterRoutes(mux, a.requireAuthETL)
 	}
 
 	// 多 Agent 管理:仅 admin

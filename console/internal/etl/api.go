@@ -60,6 +60,70 @@ func decode(r *http.Request, v any) error {
 	return nil
 }
 
+// ---------------------------------------------------------------- 定义级授权（P3.16）
+
+// modeRank 把授权模式映射为可比较的级别（"" < use < edit < admin）。
+func modeRank(m string) int {
+	switch m {
+	case store.ModeAdmin:
+		return 3
+	case store.ModeEdit:
+		return 2
+	case store.ModeUse:
+		return 1
+	}
+	return 0
+}
+
+func modeLabel(m string) string {
+	if m == store.ModeEdit {
+		return "编辑"
+	}
+	return "使用"
+}
+
+// defMode 返回请求者对 defID 的有效模式。
+func (h *handlers) defMode(r *http.Request, defID string) string {
+	if isAdmin(r) {
+		return store.ModeAdmin
+	}
+	m, err := h.s.st.AccessMode(userOf(r), defID)
+	if err != nil {
+		return ""
+	}
+	return m
+}
+
+// requireDef 校验请求者对 defID 至少持有 min 模式；不满足写 403 并返回 false。
+func (h *handlers) requireDef(w http.ResponseWriter, r *http.Request, defID, min string) bool {
+	if modeRank(h.defMode(r, defID)) >= modeRank(min) {
+		return true
+	}
+	fail(w, http.StatusForbidden, "forbidden", "无权访问该定义（需要"+modeLabel(min)+"授权）")
+	return false
+}
+
+// requireAdmin 仅限管理员（连接 CRUD/测试、新建/导入定义、调度目标之外的模块级写）。
+func (h *handlers) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if isAdmin(r) {
+		return true
+	}
+	fail(w, http.StatusForbidden, "forbidden", "该操作需要管理员权限")
+	return false
+}
+
+// grantScope 返回非管理员的授权映射 definition_id→mode；admin 返回 nil（不过滤）。
+func (h *handlers) grantScope(r *http.Request) map[string]string {
+	if isAdmin(r) {
+		return nil
+	}
+	m, err := h.s.st.GrantedModes(userOf(r))
+	if err != nil {
+		return map[string]string{}
+	}
+	return m
+}
+
 // ---------------------------------------------------------------- 概览与目录
 
 func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +131,16 @@ func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		failErr(w, err)
 		return
+	}
+	scope := h.grantScope(r)
+	if scope != nil {
+		granted := defs[:0]
+		for _, d := range defs {
+			if _, ok := scope[d.ID]; ok {
+				granted = append(granted, d)
+			}
+		}
+		defs = granted
 	}
 	scheds, _ := h.s.st.ListSchedules("")
 	conns, _ := h.s.st.ListConnections()
@@ -76,6 +150,11 @@ func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
 	var rows int64
 	var recent24 []store.Run
 	for _, run := range recent {
+		if scope != nil {
+			if _, ok := scope[run.DefinitionID]; !ok {
+				continue
+			}
+		}
 		if run.QueuedAt >= since {
 			byStatus[run.Status]++
 			rows += run.RowsWritten
@@ -85,6 +164,11 @@ func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
 	enabled := 0
 	var upcoming []store.Schedule
 	for _, sc := range scheds {
+		if scope != nil {
+			if _, ok := scope[sc.TargetID]; !ok {
+				continue
+			}
+		}
 		if sc.Enabled {
 			enabled++
 			upcoming = append(upcoming, sc)
@@ -186,6 +270,9 @@ func (h *handlers) getConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) saveConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	var in connInput
 	if err := decode(r, &in); err != nil {
 		failErr(w, err)
@@ -235,6 +322,9 @@ func (h *handlers) saveConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) deleteConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	c, err := h.s.st.GetConnection(id)
 	if err != nil {
@@ -255,6 +345,9 @@ func (h *handlers) deleteConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) testDraftConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	var in connInput
 	if err := decode(r, &in); err != nil {
 		failErr(w, err)
@@ -279,6 +372,9 @@ func (h *handlers) testDraftConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) testConnection(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	cfg, pw, err := h.s.resolveConnection(r.Context(), id)
 	if err != nil {
@@ -458,19 +554,40 @@ func (h *handlers) listDefinitions(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	if scope := h.grantScope(r); scope != nil {
+		out := make([]store.DefinitionSummary, 0, len(list))
+		for _, d := range list {
+			if mode, ok := scope[d.ID]; ok {
+				d.Access = mode
+				out = append(out, d)
+			}
+		}
+		list = out
+	} else {
+		for i := range list {
+			list[i].Access = store.ModeAdmin
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"definitions": list})
 }
 
 func (h *handlers) getDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeUse) {
+		return
+	}
 	d, err := h.s.st.GetDefinition(r.PathValue("id"))
 	if err != nil {
 		failErr(w, err)
 		return
 	}
+	d.Access = h.defMode(r, d.ID)
 	writeJSON(w, http.StatusOK, d)
 }
 
 func (h *handlers) createDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
 	var in defInput
 	if err := decode(r, &in); err != nil {
 		failErr(w, err)
@@ -504,6 +621,9 @@ func (h *handlers) createDefinition(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) updateDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeEdit) {
+		return
+	}
 	var in defInput
 	if err := decode(r, &in); err != nil {
 		failErr(w, err)
@@ -534,10 +654,14 @@ func (h *handlers) updateDefinition(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	h.s.audit(userOf(r), "修改"+kindLabel(d.Kind), "数据集成·"+d.Name, "成功")
 	writeJSON(w, http.StatusOK, d)
 }
 
 func (h *handlers) deleteDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeEdit) {
+		return
+	}
 	id := r.PathValue("id")
 	d, err := h.s.st.GetDefinition(id)
 	if err != nil {
@@ -557,6 +681,9 @@ func (h *handlers) deleteDefinition(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) duplicateDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeEdit) {
+		return
+	}
 	d, err := h.s.st.GetDefinition(r.PathValue("id"))
 	if err != nil {
 		failErr(w, err)
@@ -577,10 +704,22 @@ func (h *handlers) duplicateDefinition(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	// 非管理员复制出的副本自动归属本人（edit），否则复制完立刻无权查看
+	if !isAdmin(r) {
+		if err := h.s.st.Grant(userOf(r), cp.ID, store.ModeEdit, userOf(r)); err != nil {
+			failErr(w, err)
+			return
+		}
+		cp.Access = store.ModeEdit
+	}
+	h.s.audit(userOf(r), "复制"+kindLabel(cp.Kind), "数据集成·"+cp.Name, "成功")
 	writeJSON(w, http.StatusOK, cp)
 }
 
 func (h *handlers) listVersions(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeUse) {
+		return
+	}
 	list, err := h.s.st.ListVersions(r.PathValue("id"))
 	if err != nil {
 		failErr(w, err)
@@ -590,6 +729,9 @@ func (h *handlers) listVersions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) getVersion(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeUse) {
+		return
+	}
 	rev, _ := strconv.Atoi(r.PathValue("rev"))
 	v, err := h.s.st.GetVersion(r.PathValue("id"), rev)
 	if err != nil {
@@ -600,6 +742,9 @@ func (h *handlers) getVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) restoreVersion(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeEdit) {
+		return
+	}
 	rev, _ := strconv.Atoi(r.PathValue("rev"))
 	cur, err := h.s.st.GetDefinition(r.PathValue("id"))
 	if err != nil {
@@ -679,6 +824,19 @@ func nonNil(p core.Problems) core.Problems {
 }
 
 func (h *handlers) preview(w http.ResponseWriter, r *http.Request) {
+	// 预览按未落库文档真实执行读操作，等价于任意连接的数据访问：
+	// 非管理员须持有任一「编辑」授权（可修改定义者即视为数据集成开发者）。
+	if !isAdmin(r) {
+		ok, err := h.s.st.HasAnyGrant(userOf(r), store.ModeEdit)
+		if err != nil {
+			failErr(w, err)
+			return
+		}
+		if !ok {
+			fail(w, http.StatusForbidden, "forbidden", "数据预览需要任一定义的编辑授权")
+			return
+		}
+	}
 	var in struct {
 		Doc    json.RawMessage       `json:"doc"`
 		NodeID string                `json:"nodeId"`
@@ -710,6 +868,9 @@ func (h *handlers) preview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) runDefinition(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDef(w, r, r.PathValue("id"), store.ModeUse) {
+		return
+	}
 	var in struct {
 		Params map[string]core.Value `json:"params"`
 	}
@@ -738,11 +899,40 @@ func (h *handlers) listRuns(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	if scope := h.grantScope(r); scope != nil {
+		out := list[:0]
+		for _, run := range list {
+			if _, ok := scope[run.DefinitionID]; ok {
+				out = append(out, run)
+			}
+		}
+		list = out
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": list})
+}
+
+// runDefID 取运行所属定义 ID（供授权校验）。
+func (h *handlers) runDefID(id string) (string, error) {
+	if a := h.s.runs.get(id); a != nil {
+		return a.run.DefinitionID, nil
+	}
+	run, err := h.s.st.GetRun(id)
+	if err != nil {
+		return "", err
+	}
+	return run.DefinitionID, nil
 }
 
 func (h *handlers) getRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	defID, err := h.runDefID(id)
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	if !h.requireDef(w, r, defID, store.ModeUse) {
+		return
+	}
 	run, err := h.s.st.GetRun(id)
 	if err != nil {
 		failErr(w, err)
@@ -771,6 +961,14 @@ func (h *handlers) getRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) runLogs(w http.ResponseWriter, r *http.Request) {
+	defID, err := h.runDefID(r.PathValue("id"))
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	if !h.requireDef(w, r, defID, store.ModeUse) {
+		return
+	}
 	q := r.URL.Query()
 	after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
 	limit, _ := strconv.Atoi(q.Get("limit"))
@@ -784,6 +982,14 @@ func (h *handlers) runLogs(w http.ResponseWriter, r *http.Request) {
 
 // runEvents 是 SSE：status / node / metrics / log 事件，运行结束发送 end 后关闭。
 func (h *handlers) runEvents(w http.ResponseWriter, r *http.Request) {
+	defID, err := h.runDefID(r.PathValue("id"))
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	if !h.requireDef(w, r, defID, store.ModeUse) {
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		fail(w, http.StatusInternalServerError, "sse", "不支持流式响应")
@@ -825,6 +1031,14 @@ func (h *handlers) runEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) cancelRun(w http.ResponseWriter, r *http.Request) {
+	defID, err := h.runDefID(r.PathValue("id"))
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	if !h.requireDef(w, r, defID, store.ModeUse) {
+		return
+	}
 	if err := h.s.Cancel(r.PathValue("id"), userOf(r)); err != nil {
 		failErr(w, err)
 		return
@@ -833,6 +1047,14 @@ func (h *handlers) cancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) resumeRun(w http.ResponseWriter, r *http.Request) {
+	defID, err := h.runDefID(r.PathValue("id"))
+	if err != nil {
+		failErr(w, err)
+		return
+	}
+	if !h.requireDef(w, r, defID, store.ModeUse) {
+		return
+	}
 	run, err := h.s.Trigger("", TriggerOptions{Trigger: "resume", ResumeOf: r.PathValue("id"), User: userOf(r)})
 	if err != nil {
 		failErr(w, err)
@@ -849,13 +1071,23 @@ func (h *handlers) listSchedules(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	if scope := h.grantScope(r); scope != nil {
+		out := list[:0]
+		for _, sc := range list {
+			if _, ok := scope[sc.TargetID]; ok {
+				out = append(out, sc)
+			}
+		}
+		list = out
+	}
 	type out struct {
 		store.Schedule
 		Description string `json:"description"`
+		Access      string `json:"access,omitempty"`
 	}
 	res := make([]out, len(list))
 	for i, sc := range list {
-		res[i] = out{Schedule: sc, Description: schedule.Describe(sc.Cron)}
+		res[i] = out{Schedule: sc, Description: schedule.Describe(sc.Cron), Access: h.defMode(r, sc.TargetID)}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"schedules": res})
 }
@@ -866,7 +1098,18 @@ func (h *handlers) saveSchedule(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	if !h.requireDef(w, r, in.TargetID, store.ModeEdit) {
+		return
+	}
 	in.ID = r.PathValue("id")
+	if in.ID != "" {
+		// 编辑既有调度：原目标也须 edit，否则可把别人的调度改挂到自己的定义上
+		if cur, err := h.s.st.GetSchedule(in.ID); err == nil && cur.TargetID != in.TargetID {
+			if !h.requireDef(w, r, cur.TargetID, store.ModeEdit) {
+				return
+			}
+		}
+	}
 	if _, err := h.s.st.GetDefinition(in.TargetID); err != nil {
 		failErr(w, fmt.Errorf("调度目标无效：%w", err))
 		return
@@ -916,6 +1159,9 @@ func (h *handlers) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 	sc, err := h.s.st.GetSchedule(r.PathValue("id"))
 	if err != nil {
 		failErr(w, err)
+		return
+	}
+	if !h.requireDef(w, r, sc.TargetID, store.ModeEdit) {
 		return
 	}
 	if err := h.s.st.DeleteSchedule(sc.ID); err != nil {

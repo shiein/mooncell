@@ -19,6 +19,7 @@ type Definition struct {
 	CreatedAt   int64           `json:"createdAt"`
 	UpdatedBy   string          `json:"updatedBy"`
 	UpdatedAt   int64           `json:"updatedAt"`
+	Access      string          `json:"access,omitempty"` // 请求者对本定义的授权模式：admin|edit|use（仅鉴权后填充）
 }
 
 // DefinitionSummary 是列表项：不含文档，带最近运行与调度信息。
@@ -30,6 +31,7 @@ type DefinitionSummary struct {
 	LastRunAt     int64  `json:"lastRunAt,omitempty"`
 	ScheduleCount int    `json:"scheduleCount"`
 	NextFireAt    int64  `json:"nextFireAt,omitempty"`
+	Access        string `json:"access,omitempty"` // 请求者授权模式：admin|edit|use
 }
 
 // keepVersions 是每个定义保留的历史版本数。
@@ -156,6 +158,9 @@ func (s *Store) DeleteDefinition(id string) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM etl_schedules WHERE target_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM etl_grants WHERE definition_id=?`, id); err != nil {
 		return err
 	}
 	return tx.Commit()

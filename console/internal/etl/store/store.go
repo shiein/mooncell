@@ -62,6 +62,16 @@ func Migrate(db *sql.DB) error {
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_etl_connections_name ON etl_connections(LOWER(name));
 
+		CREATE TABLE IF NOT EXISTS etl_grants (
+			username      TEXT NOT NULL,
+			definition_id TEXT NOT NULL,
+			access_mode   TEXT NOT NULL CHECK(access_mode IN ('use','edit')),
+			granted_by    TEXT NOT NULL DEFAULT '',
+			granted_at    INTEGER NOT NULL,
+			PRIMARY KEY (username, definition_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_etl_grants_def ON etl_grants(definition_id);
+
 		CREATE TABLE IF NOT EXISTS etl_definitions (
 			id          TEXT PRIMARY KEY,
 			kind        TEXT NOT NULL,          -- pipeline | workflow

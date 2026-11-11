@@ -15,11 +15,18 @@ const PRESETS = [
 
 const OVERLAP = { skip: '跳过本次', queue: '排队等待', parallel: '并行运行' };
 
-export function SchedulesPage({ go }) {
+export function SchedulesPage({ go, isAdmin }) {
   const [list, setList] = React.useState(null);
   const [editing, setEditing] = React.useState(null);
+  const [editTargets, setEditTargets] = React.useState(null);
   const load = React.useCallback(() => { etlApi.schedules().then(setList).catch(() => setList([])); }, []);
   React.useEffect(() => { load(); }, [load]);
+  // 新建调度需「编辑」授权；非管理员只有持有 edit 定义时才显示入口（后端逐目标校验）
+  React.useEffect(() => {
+    if (isAdmin) { setEditTargets(null); return; }
+    etlApi.definitions().then((l) => setEditTargets((l || []).some((d) => d.access === 'edit'))).catch(() => setEditTargets(false));
+  }, [isAdmin]);
+  const canCreate = isAdmin || editTargets === true;
 
   const toggle = async (s, enabled) => {
     try { await etlApi.saveSchedule({ ...s, enabled }); load(); toast(enabled ? '调度已启用' : '调度已停用'); } catch (e) { toast(e.message, { tone: 'error' }); }
@@ -35,7 +42,7 @@ export function SchedulesPage({ go }) {
       <div className="etl-toolbar">
         <span className="etl-muted">调度在 Console 进程内运行；Console 停机期间错过的触发按「错过策略」处理。</span>
         <span style={{ flex: 1 }}></span>
-        <Btn variant="primary" icon="plus" onClick={() => setEditing({})}>新建调度</Btn>
+        {canCreate ? <Btn variant="primary" icon="plus" onClick={() => setEditing({})}>新建调度</Btn> : null}
       </div>
       <div className="card" style={{ overflow: 'hidden' }}>
         {!list ? <div className="etl-list-empty" style={{ padding: 40 }}><Spinner /></div> : null}
@@ -44,7 +51,7 @@ export function SchedulesPage({ go }) {
             <div style={{ display: 'inline-flex', padding: 14, borderRadius: 14, background: 'var(--muted)', color: 'var(--muted-fg)' }}><Icon name="calendar" size={22} /></div>
             <h3>还没有调度</h3>
             <p>为作业（或转换）添加 cron 规则，按时自动运行。</p>
-            <Btn variant="outline" icon="plus" style={{ marginTop: 14 }} onClick={() => setEditing({})}>新建调度</Btn>
+            {canCreate ? <Btn variant="outline" icon="plus" style={{ marginTop: 14 }} onClick={() => setEditing({})}>新建调度</Btn> : null}
           </div>
         ) : null}
         {list && list.length ? (
@@ -55,7 +62,7 @@ export function SchedulesPage({ go }) {
             <tbody>
               {list.map((s) => (
                 <tr key={s.id}>
-                  <td><Switch on={s.enabled} onChange={(v) => toggle(s, v)} /></td>
+                  <td><Switch on={s.enabled} disabled={s.access === 'use'} onChange={(v) => toggle(s, v)} /></td>
                   <td>
                     <div style={{ fontWeight: 600 }}>{s.description}</div>
                     <div className="etl-muted"><code className="code-chip">{s.cron}</code>{s.name ? ` · ${s.name}` : ''}{s.timezone ? ` · ${s.timezone}` : ''}</div>
@@ -70,8 +77,12 @@ export function SchedulesPage({ go }) {
                   <td className="etl-muted">{OVERLAP[s.overlap] || s.overlap}</td>
                   <td>
                     <div className="etl-actions">
-                      <Btn variant="ghost" size="sm" icon="pencil" title="编辑" onClick={() => setEditing(s)}></Btn>
-                      <Btn variant="ghost" size="sm" icon="trash" title="删除" onClick={() => del(s)}></Btn>
+                      {s.access !== 'use' ? (
+                        <React.Fragment>
+                          <Btn variant="ghost" size="sm" icon="pencil" title="编辑" onClick={() => setEditing(s)}></Btn>
+                          <Btn variant="ghost" size="sm" icon="trash" title="删除" onClick={() => del(s)}></Btn>
+                        </React.Fragment>
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -116,7 +127,7 @@ function ScheduleDialog({ initial, onClose, onSaved }) {
         <div className="etl-row2">
           <Field label="调度目标">
             <Select value={s.targetId || ''} onChange={(targetId) => set({ targetId, params: {} })}
-              options={[{ value: '', label: '选择作业或转换…' }, ...defs.map((d) => ({ value: d.id, label: `${d.kind === 'workflow' ? '作业' : '转换'} · ${d.name}` }))]} />
+              options={[{ value: '', label: '选择作业或转换…' }, ...defs.filter((d) => d.access !== 'use').map((d) => ({ value: d.id, label: `${d.kind === 'workflow' ? '作业' : '转换'} · ${d.name}` }))]} />
           </Field>
           <Field label="名称（可选）"><input className="input" value={s.name} onChange={(e) => set({ name: e.target.value })} placeholder="如 夜间全量" /></Field>
         </div>

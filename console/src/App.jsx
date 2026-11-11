@@ -74,6 +74,8 @@ function App() {
     }
     if (roleNow && roleNow !== "admin") {
       const allowed = new Set(["apps", "app-detail", "data-resources", "data-workspace", "server-operations"]);
+      // 数据集成：features.etl 由后端按定义级授权下发（admin 全量，普通用户须持任一授权）
+      if (f && f.etl) { allowed.add("etl"); allowed.add("etl-designer"); allowed.add("etl-run"); }
       if (!allowed.has(r.page)) return { page: "apps" };
     }
     return r;
@@ -560,12 +562,12 @@ function App() {
             {route.page === "server-operations" ? <ServerResourcesPage /> : null}
             {route.page === "etl" || route.page === "etl-designer" || route.page === "etl-run" ? (
               <React.Suspense fallback={<div style={{ padding: 60, textAlign: "center", color: "var(--muted-fg)" }}>正在加载数据集成…</div>}>
-                <EtlModule route={route} nav={nav} />
+                <EtlModule route={route} nav={nav} role={role} />
               </React.Suspense>
             ) : null}
             {route.page === "cabinet" ? <CabinetPage /> : null}
             {route.page === "audit" ? <AuditPage /> : null}
-            {route.page === "users" ? <UsersPage /> : null}
+            {route.page === "users" ? <UsersPage features={features} /> : null}
             {route.page === "agents" ? <AgentsPage /> : null}
             {route.page === "system" ? <SystemPage /> : null}
           </Shell>

@@ -395,3 +395,7 @@ tr:hover .etl-actions { opacity: 1; }
   .etl-concepts { grid-template-columns: 1fr; }
   .etl-palette { display: none; }
 }
+
+/* 只读授权提示（access=use） */
+.etl-insp-ro { display: flex; align-items: center; gap: 6px; margin: 0 12px 8px; padding: 6px 10px; border: 1px solid var(--warn); border-radius: 8px; background: var(--warn-soft, rgba(200,150,40,.10)); color: var(--warn); font-size: 12px; }
+.etl-palette[data-readonly="1"] .etl-palette-scroll { opacity: .55; }

@@ -21,10 +21,12 @@ import (
 )
 
 type harness struct {
-	t   *testing.T
-	s   *Service
-	srv *httptest.Server
-	db  *sql.DB
+	t    *testing.T
+	s    *Service
+	srv  *httptest.Server
+	db   *sql.DB
+	user string
+	role string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -45,12 +47,14 @@ func newHarness(t *testing.T) *harness {
 	}
 	s.Start()
 	mux := http.NewServeMux()
+	h := &harness{t: t, s: s, db: db, user: "admin", role: "admin"}
 	s.RegisterRoutes(mux, func(next http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) { next(w, WithUser(r, "admin")) }
+		return func(w http.ResponseWriter, r *http.Request) { next(w, WithUser(r, h.user, h.role)) }
 	})
 	srv := httptest.NewServer(mux)
+	h.srv = srv
 	t.Cleanup(func() { srv.Close(); s.Close(); db.Close() })
-	return &harness{t: t, s: s, srv: srv, db: db}
+	return h
 }
 
 func (h *harness) call(method, path string, body any, out any) int {
@@ -681,5 +685,141 @@ func TestExportImportDefRefs(t *testing.T) {
 	_ = json.Unmarshal(imp.Doc, &got)
 	if got.Nodes[1].Config["pipeline"] != p.ID {
 		t.Fatalf("未映射时定义引用应保留原值（同实例名匹配）：%v", got.Nodes[1].Config)
+	}
+}
+
+// P3.16 定义级授权：use=查看+运行；edit=含写；无授权=不可见。admin 隐式全量。
+func TestDefinitionGrants(t *testing.T) {
+	h := newHarness(t)
+	docRaw, _ := json.Marshal(map[string]any{
+		"kind": "pipeline", "params": []any{},
+		"nodes": []map[string]any{
+			{"id": "g", "type": "generate_rows", "name": "生成", "config": map[string]any{"limit": 2}},
+			{"id": "d", "type": "dummy", "name": "空", "config": map[string]any{}},
+		},
+		"hops": []map[string]any{{"id": "h", "from": "g", "fromPort": "main", "to": "d", "toPort": "main"}},
+	})
+	doc := json.RawMessage(docRaw)
+	d1, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "授权目标", Doc: doc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "未授权", Doc: doc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- 普通用户无任何授权 ----
+	h.user, h.role = "u1", "user"
+	var defs struct {
+		Definitions []store.DefinitionSummary `json:"definitions"`
+	}
+	if code := h.call("GET", "/api/etl/definitions", nil, &defs); code != 200 || len(defs.Definitions) != 0 {
+		t.Fatalf("无授权应得空列表：%d %v", code, defs.Definitions)
+	}
+	for _, tc := range []struct {
+		method, path string
+		body         any
+	}{
+		{"GET", "/api/etl/definitions/" + d1.ID, nil},
+		{"POST", "/api/etl/definitions/" + d1.ID + "/run", map[string]any{}},
+		{"GET", "/api/etl/definitions/" + d1.ID + "/export", nil},
+		{"POST", "/api/etl/definitions", map[string]any{"kind": "pipeline", "name": "x"}},
+		{"POST", "/api/etl/definitions/import/preview", map[string]any{"document": map[string]any{}}},
+		{"POST", "/api/etl/connections", map[string]any{"name": "c", "dbType": "postgres", "host": "h", "username": "u"}},
+		{"POST", "/api/etl/pipelines/preview", map[string]any{"doc": doc, "nodeId": "d", "limit": 2}},
+	} {
+		if code := h.call(tc.method, tc.path, tc.body, nil); code != 403 {
+			t.Fatalf("%s %s 无授权应 403，实得 %d", tc.method, tc.path, code)
+		}
+	}
+	// 连接只读元数据（设计器需要）与普通读路径对普通用户放开
+	var conns map[string]any
+	if code := h.call("GET", "/api/etl/connections", nil, &conns); code != 200 {
+		t.Fatalf("连接列表应 200：%d", code)
+	}
+	if code := h.call("GET", "/api/etl/catalog", nil, nil); code != 200 {
+		t.Fatalf("目录应 200：%d", code)
+	}
+
+	// ---- use 授权：可见、可运行、不可写 ----
+	if err := store.SetUserGrants(h.db, "u1", []store.DefinitionGrant{{DefinitionID: d1.ID, AccessMode: store.ModeUse}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.call("GET", "/api/etl/definitions", nil, &defs); code != 200 || len(defs.Definitions) != 1 {
+		t.Fatalf("use 授权应见 1 项：%d %v", code, defs.Definitions)
+	}
+	if defs.Definitions[0].Access != store.ModeUse {
+		t.Fatalf("access 应为 use：%q", defs.Definitions[0].Access)
+	}
+	var got store.Definition
+	if code := h.call("GET", "/api/etl/definitions/"+d1.ID, nil, &got); code != 200 || got.Access != store.ModeUse {
+		t.Fatalf("详情应 200 且 access=use：%d %q", code, got.Access)
+	}
+	if code := h.call("GET", "/api/etl/definitions/"+d2.ID, nil, nil); code != 403 {
+		t.Fatalf("未授权定义详情应 403：%d", code)
+	}
+	var run map[string]any
+	if code := h.call("POST", "/api/etl/definitions/"+d1.ID+"/run", map[string]any{}, &run); code != 200 {
+		t.Fatalf("use 授权应可运行：%d %v", code, run)
+	}
+	for _, tc := range []struct {
+		method, path string
+		body         any
+	}{
+		{"PUT", "/api/etl/definitions/" + d1.ID, map[string]any{"revision": got.Revision}},
+		{"DELETE", "/api/etl/definitions/" + d1.ID, nil},
+		{"POST", "/api/etl/definitions/" + d1.ID + "/duplicate", nil},
+		{"POST", "/api/etl/schedules", map[string]any{"targetId": d1.ID, "cron": "0 2 * * *"}},
+		{"POST", "/api/etl/pipelines/preview", map[string]any{"doc": doc, "nodeId": "d", "limit": 2}},
+	} {
+		if code := h.call(tc.method, tc.path, tc.body, nil); code != 403 {
+			t.Fatalf("use 授权下 %s %s 应 403，实得 %d", tc.method, tc.path, code)
+		}
+	}
+
+	// ---- 升级 edit：可写；复制出的副本自动归属 ----
+	if err := store.SetUserGrants(h.db, "u1", []store.DefinitionGrant{{DefinitionID: d1.ID, AccessMode: store.ModeEdit}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.call("PUT", "/api/etl/definitions/"+d1.ID, map[string]any{"revision": got.Revision}, &got); code != 200 {
+		t.Fatalf("edit 授权应可保存：%d", code)
+	}
+	var cp store.Definition
+	if code := h.call("POST", "/api/etl/definitions/"+d1.ID+"/duplicate", nil, &cp); code != 200 || cp.ID == "" {
+		t.Fatalf("edit 授权应可复制：%d", code)
+	}
+	if mode, _ := h.s.st.AccessMode("u1", cp.ID); mode != store.ModeEdit {
+		t.Fatalf("副本应自动归属 edit：%q", mode)
+	}
+	var pv map[string]any
+	if code := h.call("POST", "/api/etl/pipelines/preview", map[string]any{"doc": doc, "nodeId": "d", "limit": 2}, &pv); code != 200 {
+		t.Fatalf("edit 授权应可预览：%d %v", code, pv)
+	}
+	var sc map[string]any
+	if code := h.call("POST", "/api/etl/schedules", map[string]any{"targetId": d1.ID, "cron": "0 2 * * *"}, &sc); code != 200 {
+		t.Fatalf("edit 授权应可建调度：%d %v", code, sc)
+	}
+
+	// ---- store 层校验与级联清理 ----
+	if err := store.SetUserGrants(h.db, "u2", []store.DefinitionGrant{{DefinitionID: d1.ID, AccessMode: "root"}}, "a"); err == nil {
+		t.Fatal("非法 access_mode 应被拒绝")
+	}
+	if err := store.SetUserGrants(h.db, "u2", []store.DefinitionGrant{{DefinitionID: "ghost", AccessMode: store.ModeUse}}, "a"); err == nil {
+		t.Fatal("不存在的定义应被拒绝")
+	}
+	if err := h.s.st.Grant("u2", d2.ID, store.ModeUse, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.s.st.DeleteDefinition(d2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if mode, _ := h.s.st.AccessMode("u2", d2.ID); mode != "" {
+		t.Fatalf("删除定义后授权应清理：%q", mode)
+	}
+	// admin 不受影响（h.user/role 仍 u1，但直接调 AccessMode 无 admin 概念——回到 admin 视角验证列表全量）
+	h.user, h.role = "admin", "admin"
+	if code := h.call("GET", "/api/etl/definitions", nil, &defs); code != 200 || len(defs.Definitions) < 2 {
+		t.Fatalf("admin 应见全部定义：%d %v", code, defs.Definitions)
 	}
 }

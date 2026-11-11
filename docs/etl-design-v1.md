@@ -490,23 +490,27 @@ type Dialect interface {
 
 ---
 
-## 14. HTTP API（`/api/etl/`，v1 全部 admin）
+## 14. HTTP API（`/api/etl/`）
 
-| 方法 路径 | 说明 |
-|---|---|
-| `GET catalog/steps` · `GET catalog/actions` · `GET catalog/functions` · `GET catalog/dialects` | 组件 / 函数 / 方言目录 |
-| `GET/POST connections` · `GET/PUT/DELETE connections/{id}` | 连接 CRUD |
-| `POST connections/test` · `POST connections/{id}/test` | 测试连接 |
-| `GET connections/{id}/schemas` · `…/tables?schema=` · `…/columns?schema=&table=` | 设计器选择器 |
-| `GET/POST definitions` · `GET/PUT/DELETE definitions/{id}` | 定义 CRUD（PUT 带 `revision` 乐观锁） |
-| `GET definitions/{id}/versions` · `POST definitions/{id}/versions/{rev}/restore` | 历史版本 |
-| `GET definitions/{id}/export` · `POST definitions/import/preview` · `POST definitions/import` | 单定义 JSON 导出/导入：包标识 `format=mooncell-etl-export` + `version`；连接与被引定义按名匹配，缺失项由调用方显式映射或保留原引用 |
-| `POST definitions/validate` | 编译：问题列表 + 每条连线的 schema |
-| `POST pipelines/preview` | 数据预览 |
-| `POST definitions/{id}/run` | 手动运行（参数覆盖） |
-| `GET runs` · `GET runs/{id}` · `GET runs/{id}/logs?after=` · `POST runs/{id}/cancel` · `POST runs/{id}/resume` | 运行记录 |
-| `GET runs/{id}/events` | SSE：度量快照、节点状态、日志增量 |
-| `GET/POST schedules` · `PUT/DELETE schedules/{id}` · `GET schedules/preview?cron=&tz=` | 调度 |
+鉴权分两层：`requireAuthETL` 校验登录态并拒绝零授权普通用户（`features.etl` 同规则下发，未授权者入口隐藏）；各 handler 再按 `etl_grants` 逐路由校验定义级授权（详见 §16）。普通用户视角下未授权即不存在：列表类接口只回授权项，单条操作未授权统一 `403`。
+
+| 方法 路径 | 说明 | 普通用户 |
+|---|---|---|
+| `GET overview` · `GET catalog` | 概览（按授权过滤）· 组件 / 函数 / 方言目录 | 授权项可见 |
+| `GET connections` · `GET connections/{id}` | 连接列表 / 详情（`SecretCipher` 永不序列化，`hasPassword` 布尔代替） | 只读元数据 |
+| `POST/PUT/DELETE connections` · `POST …/test` | 连接 CRUD 与测试 | admin 专属 |
+| `GET connections/{id}/schemas` · `…/tables?schema=` · `…/columns?schema=&table=` | 设计器选择器（活库元数据，只读） | 任一授权即可 |
+| `GET definitions` | 列表（每项带 `access`） | 仅授权定义 |
+| `POST definitions` · `POST definitions/import*` | 新建 / 导入 | admin 专属 |
+| `GET/PUT/DELETE definitions/{id}` · `POST …/duplicate` | 定义 CRUD（PUT 带 `revision` 乐观锁） | `use` 可读；其余 `edit` |
+| `GET definitions/{id}/versions` · `POST …/versions/{rev}/restore` | 历史版本 | 读 `use` / 恢复 `edit` |
+| `GET definitions/{id}/export` | 导出 JSON 包（`format=mooncell-etl-export`；凭据不随包） | `use` |
+| `POST definitions/validate` | 编译：问题列表 + 每条连线的 schema | 任一授权 |
+| `POST pipelines/preview` | 数据预览（真实执行读，等价任意连接读权限） | 任一 `edit` 授权 |
+| `POST definitions/{id}/run` | 手动运行（参数覆盖） | `use` |
+| `GET runs` · `GET runs/{id}` · `GET runs/{id}/logs` · `GET runs/{id}/events` | 运行记录与实时事件 | `use`（按定义过滤） |
+| `POST runs/{id}/cancel` · `POST runs/{id}/resume` | 取消 / 续跑 | `use`（按运行所属定义） |
+| `GET/POST schedules` · `PUT/DELETE schedules/{id}` · `GET schedules/preview?cron=&tz=` | 调度（列表按授权过滤并带 `access`） | 读 `use` / 写 `edit` |
 
 错误响应统一 `{ "error": "中文说明", "code": "machine_code", "problems": [...] }`。
 
@@ -537,9 +541,15 @@ src/etl/
 
 ## 16. 安全与权限
 
-* v1：模块全部接口 `admin` 专属（`requireRole("admin")`）。后续可加「数据集成开发者」角色（TODO）。
+* **定义级授权（P3.16）**：`etl_grants(username, definition_id, access_mode)`，模式 `use`/`edit`；`admin` 隐式全量不落库。
+  * `use`：查看定义与历史版本、运行/取消/续跑、查看运行记录与日志、导出。
+  * `edit`：`use` 之上再加保存/删除/复制/恢复版本、维护调度；数据预览要求持有任一 `edit`（可改定义者即可经任意连接读数据，属有意边界）。
+  * 列表接口只回授权项；单条操作未授权统一 `403`。撤销授权即时生效（下次请求即拒绝，会话不缓存）。
+  * 用户管理页按定义下发授权（`etlGrants` 随用户创建/编辑同事务提交；删除用户/定义级联清理）。`features.etl` 仅对 admin 或持有任一授权的普通用户下发 `true`，导航与路由据此 fail-closed。
+  * 非管理员复制定义得到的副本自动授予本人 `edit`（否则复制完立刻无权查看）；新建与导入仍为 admin 专属。
+* **连接凭据**：`SecretCipher` 永不出 API（`json:"-"`），`hasPassword` 布尔代替；连接的新建/修改/删除/测试 admin 专属；schemas/tables/columns 活库元数据浏览对任一授权用户开放（只读，供设计器选择器用）。
 * SQL 由管理员编写、在管理员配置的连接上执行——这是产品能力而非注入面；但**变量值进入 SQL 一律走绑定参数**，文本替换仅限白名单格式。
-* 审计：连接增删改、定义保存/删除、手动运行/取消、调度启停写入现有审计日志（`数据集成·…`）。
+* 审计：连接增删改、定义保存/删除/复制/导入导出/恢复版本、手动运行/取消、调度增删改写入现有审计日志（`数据集成·…`）；授权变更走用户管理的创建/编辑审计。
 * 日志与错误信息中不得出现密码；DSN 不入日志。
 
 ## 17. 进程与自更新

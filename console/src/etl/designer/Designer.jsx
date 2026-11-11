@@ -61,13 +61,17 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   const history = React.useRef({ past: [], future: [], last: 0 });
   const unsubRef = React.useRef(null);
   const kind = meta ? meta.kind : 'pipeline';
+  // 只读授权（access=use）：可看可运行，所有文档/元数据变更均被拦截
+  const readOnly = !!(meta && meta.access === 'use');
+  const readOnlyRef = React.useRef(false);
+  readOnlyRef.current = readOnly;
 
   // ---- 加载
   const load = React.useCallback(async () => {
     try {
       const d = await etlApi.definition(defId);
       const nd = normalizeDoc(d.doc, d.kind);
-      setMetaState({ id: d.id, kind: d.kind, name: d.name, description: d.description, folder: d.folder, revision: d.revision, updatedAt: d.updatedAt, updatedBy: d.updatedBy });
+      setMetaState({ id: d.id, kind: d.kind, name: d.name, description: d.description, folder: d.folder, revision: d.revision, updatedAt: d.updatedAt, updatedBy: d.updatedBy, access: d.access });
       setDocState(nd);
       setRfNodes(toFlowNodes(nd, d.kind));
       setDirty(false);
@@ -86,6 +90,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
 
   // ---- 文档变更（带撤销历史；连续输入 600ms 内合并为一步）
   const updateDoc = React.useCallback((fn, opts) => {
+    if (readOnlyRef.current) return;
     setDocState((prev) => {
       if (!prev) return prev;
       const next = fn(prev);
@@ -102,11 +107,12 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
     });
     setDirty(true);
   }, []);
-  const setMeta = (patch) => { setMetaState((m) => ({ ...m, ...patch })); setDirty(true); };
+  const setMeta = (patch) => { if (readOnlyRef.current) return; setMetaState((m) => ({ ...m, ...patch })); setDirty(true); };
   const updateNode = React.useCallback((id, fn) => updateDoc((d) => ({ ...d, nodes: d.nodes.map((n) => (n.id === id ? fn(n) : n)) })), [updateDoc]);
   const updateHop = React.useCallback((id, patch) => updateDoc((d) => ({ ...d, hops: d.hops.map((h) => (h.id === id ? { ...h, ...patch } : h)) })), [updateDoc]);
 
   const removeNodes = React.useCallback((ids) => {
+    if (readOnlyRef.current) return;
     const set = new Set(ids);
     if (kind === 'workflow') {
       const start = doc && doc.nodes.find((n) => n.type === 'start');
@@ -119,6 +125,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   }, [doc, kind, updateDoc]);
 
   const removeHops = React.useCallback((ids) => {
+    if (readOnlyRef.current) return;
     const set = new Set(ids);
     updateDoc((d) => ({ ...d, hops: d.hops.filter((h) => !set.has(h.id)) }));
     setSelection((s) => (s.type === 'edge' && set.has(s.id) ? { type: 'none' } : s));
@@ -132,6 +139,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   }, [doc]);
 
   const undo = () => {
+    if (readOnlyRef.current) return;
     const h = history.current;
     if (!h.past.length || !doc) return;
     const prev = h.past.pop();
@@ -142,6 +150,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
     setDirty(true);
   };
   const redo = () => {
+    if (readOnlyRef.current) return;
     const h = history.current;
     if (!h.future.length || !doc) return;
     const next = h.future.pop();
@@ -320,6 +329,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   }, [removeHops]);
 
   const onConnect = React.useCallback((conn) => {
+    if (readOnlyRef.current) return;
     const err = canConnect(kind, doc, conn, catalog);
     if (err) { toast(err, { tone: 'warn' }); return; }
     updateDoc((d) => ({ ...d, hops: [...d.hops, makeHop(kind, conn)] }));
@@ -328,6 +338,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   const isValidConnection = React.useCallback((conn) => !canConnect(kind, doc, conn, catalog), [kind, doc, catalog]);
 
   const addNode = React.useCallback((m, screenPos) => {
+    if (readOnlyRef.current) return;
     let pos;
     if (screenPos) pos = rf.screenToFlowPosition(screenPos);
     else {
@@ -345,6 +356,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
 
   const onDrop = (e) => {
     e.preventDefault();
+    if (readOnlyRef.current) return;
     const id = e.dataTransfer.getData(DND_TYPE);
     const m = id && catalog.meta(kind, id);
     if (m) addNode(m, { x: e.clientX, y: e.clientY });
@@ -376,6 +388,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   }, [doc]);
 
   const tidy = () => {
+    if (readOnlyRef.current) return;
     const next = autoLayout(doc);
     updateDoc(() => next);
     setRfNodes((nds) => toFlowNodes(next, kind, nds));
@@ -383,6 +396,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   };
 
   const duplicateNode = (id) => {
+    if (readOnlyRef.current) return;
     const src = doc.nodes.find((n) => n.id === id);
     if (!src || src.type === 'start') return;
     const m = catalog.meta(kind, src.type);
@@ -396,12 +410,14 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   // ---- 注释便签（doc.notes，伪节点）
   const updateNote = React.useCallback((id, patch) => updateDoc((d) => ({ ...d, notes: (d.notes || []).map((n) => (n.id === id ? { ...n, ...patch } : n)) })), [updateDoc]);
   const addNote = React.useCallback((pos) => {
+    if (readOnlyRef.current) return;
     const nt = { id: uid('nt'), x: Math.round(pos.x / GRID) * GRID, y: Math.round(pos.y / GRID) * GRID, w: 200, text: '' };
     updateDoc((d) => ({ ...d, notes: [...(d.notes || []), nt] }));
     setRfNodes((nds) => [...nds.map((x) => ({ ...x, selected: false })), { id: nt.id, type: 'note', position: { x: nt.x, y: nt.y }, data: {}, selected: true }]);
     setSelection({ type: 'note', id: nt.id });
   }, [updateDoc]);
   const removeNote = React.useCallback((id) => {
+    if (readOnlyRef.current) return;
     updateDoc((d) => ({ ...d, notes: (d.notes || []).filter((n) => n.id !== id) }));
     setRfNodes((nds) => nds.filter((n) => n.id !== id));
     setSelection((s) => (s.type === 'note' && s.id === id ? { type: 'none' } : s));
@@ -433,6 +449,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
   }, [rf]);
 
   const pasteClipboard = React.useCallback(async (flowPos) => {
+    if (readOnlyRef.current) return;
     let raw = null;
     try {
       const t = await navigator.clipboard.readText();
@@ -488,6 +505,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
 
   // ---- 连线插入步骤：from→to 改为 from→新节点→to
   const insertOnHop = React.useCallback((hopId, m) => {
+    if (readOnlyRef.current) return;
     const hop = doc.hops.find((h) => h.id === hopId);
     if (!hop) return;
     const srcN = doc.nodes.find((n) => n.id === hop.from);
@@ -529,10 +547,13 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
       setRfNodes((nds) => nds.map((x) => ({ ...x, selected: x.id === node.id })));
       setSelection({ type: noteById[node.id] ? 'note' : 'node', id: node.id });
     }
+    // 只读：注释菜单只剩删除，直接不开
+    if (noteById[node.id] && readOnlyRef.current) return;
     openMenu(noteById[node.id] ? 'note' : 'node', node.id, e);
   }, [openMenu, noteById]);
   const onEdgeContextMenu = React.useCallback((e, edge) => {
     setSelection({ type: 'edge', id: edge.id });
+    if (readOnlyRef.current) return; // 连线菜单全是变更项
     openMenu('edge', edge.id, e);
   }, [openMenu]);
   const onPaneContextMenu = React.useCallback((e) => openMenu('pane', null, e), [openMenu]);
@@ -620,7 +641,7 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
     scheduleCount, noteById, updateNote, removeNote,
   };
   const d = {
-    kind, catalog, doc, meta, setMeta, selection, updateDoc, updateNode, updateHop, removeNodes, removeHops,
+    kind, catalog, doc, meta, setMeta, selection, updateDoc, updateNode, updateHop, removeNodes, removeHops, readOnly,
     problems, allProblems: validation.problems, nodeSchemas: validation.nodes, hopFields: validation.hops, vars: validation.vars,
     pipelines, workflows, scheduleCount, drawer, setDrawer, preview, previewVals, setPreviewVals, runPreview, live, focusNode, validating, validated,
     openRun: onOpenRun,
@@ -637,7 +658,8 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
           <div className="etl-dz-title">
             <span className="etl-kind-chip" data-kind={kind} style={{ width: 26, height: 26, borderRadius: 7 }}><Icon name={kind === 'workflow' ? 'workflow' : 'pipeline'} size={14} /></span>
             <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{kind === 'workflow' ? '作业' : '转换'}</span>
-            <input className="etl-dz-name" value={meta.name} style={{ width: `calc(${Math.min(26, Math.max(4, meta.name.length * 1.05))}em + 14px)` }} onChange={(e) => setMeta({ name: e.target.value })} aria-label="名称" />
+            <input className="etl-dz-name" value={meta.name} readOnly={meta.access === 'use'} style={{ width: `calc(${Math.min(26, Math.max(4, meta.name.length * 1.05))}em + 14px)` }} onChange={(e) => setMeta({ name: e.target.value })} aria-label="名称" />
+            {meta.access === 'use' ? <span className="etl-kind-chip" style={{ fontSize: 11, padding: '2px 8px', height: 20 }} title="只读授权：可查看与运行，修改需要编辑授权">只读</span> : null}
             <span className="etl-save-state" data-state={saveState} title={meta.updatedAt ? `最后保存 ${fmtDateTime(meta.updatedAt, true)} · ${meta.updatedBy || ''}` : ''}>
               <span className="dot"></span>
               {saving ? '保存中…' : dirty ? '未保存' : `已保存 · v${meta.revision}`}
@@ -652,9 +674,9 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
             {!errCount && !warnCount && validated && !validating ? <span style={{ color: 'var(--success)' }}>校验通过</span> : null}
           </button>
           <span className="etl-dz-sep"></span>
-          <Btn variant="ghost" size="sm" icon="undo" title="撤销（⌘Z）" disabled={!history.current.past.length} onClick={undo}></Btn>
-          <Btn variant="ghost" size="sm" icon="redo" title="重做（⇧⌘Z）" disabled={!history.current.future.length} onClick={redo}></Btn>
-          <Btn variant="ghost" size="sm" icon="layout" title="整理布局" onClick={tidy}></Btn>
+          <Btn variant="ghost" size="sm" icon="undo" title="撤销（⌘Z）" disabled={readOnly || !history.current.past.length} onClick={undo}></Btn>
+          <Btn variant="ghost" size="sm" icon="redo" title="重做（⇧⌘Z）" disabled={readOnly || !history.current.future.length} onClick={redo}></Btn>
+          <Btn variant="ghost" size="sm" icon="layout" title="整理布局" disabled={readOnly} onClick={tidy}></Btn>
           <Btn variant="ghost" size="sm" icon="history" title="历史版本" onClick={() => setVersionsOpen(true)}></Btn>
           <span className="etl-dz-sep"></span>
           {running ? (
@@ -662,11 +684,11 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
           ) : (
             <Btn variant="outline" size="sm" icon="play" onClick={onRunClick}>运行</Btn>
           )}
-          <Btn variant="primary" size="sm" icon="save" disabled={saving || !dirty} onClick={() => save()}>保存</Btn>
+          <Btn variant="primary" size="sm" icon="save" disabled={saving || !dirty || meta.access === 'use'} title={meta.access === 'use' ? '只读授权不可保存' : ''} onClick={() => save()}>保存</Btn>
         </header>
 
         <div className="etl-dz-body">
-          <Palette kind={kind} catalog={catalog} onAdd={(m) => addNode(m)} />
+          <Palette kind={kind} catalog={catalog} onAdd={(m) => addNode(m)} disabled={readOnly} />
           <div className="etl-dz-center">
             <div className="etl-canvas" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }} onDrop={onDrop}>
               <ReactFlow
@@ -675,8 +697,9 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
                 isValidConnection={isValidConnection} onNodeDragStop={onNodeDragStop}
                 onPaneClick={onPaneClick} onNodeContextMenu={onNodeContextMenu}
                 onEdgeContextMenu={onEdgeContextMenu} onPaneContextMenu={onPaneContextMenu}
+                nodesDraggable={!readOnly} nodesConnectable={!readOnly}
                 snapToGrid snapGrid={[GRID, GRID]} fitView fitViewOptions={{ padding: 0.12, maxZoom: 1, minZoom: 0.6 }}
-                minZoom={0.2} maxZoom={2} deleteKeyCode={['Backspace', 'Delete']} multiSelectionKeyCode={['Meta', 'Shift']}
+                minZoom={0.2} maxZoom={2} deleteKeyCode={readOnly ? null : ['Backspace', 'Delete']} multiSelectionKeyCode={['Meta', 'Shift']}
                 selectionOnDrag selectionMode={SelectionMode.Partial} panOnDrag={false}
                 panOnScroll zoomOnScroll={false} zoomActivationKeyCode={['Meta', 'Control']}
                 proOptions={{ hideAttribution: true }} connectionRadius={28}
@@ -714,10 +737,10 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
         <CanvasMenu menu={menu} onClose={closeMenu}>
           {menu.type === 'pane' ? (
             <React.Fragment>
-              <MenuItem icon="copy" label="粘贴" sub="⌘V" onClick={() => { pasteClipboard(menu.flowPos); setMenu(null); }} />
-              <MenuItem icon="fileText" label="添加注释" onClick={() => { addNote(menu.flowPos); setMenu(null); }} />
+              {!readOnly ? <MenuItem icon="copy" label="粘贴" sub="⌘V" onClick={() => { pasteClipboard(menu.flowPos); setMenu(null); }} /> : null}
+              {!readOnly ? <MenuItem icon="fileText" label="添加注释" onClick={() => { addNote(menu.flowPos); setMenu(null); }} /> : null}
               <MenuItem icon="check" label="全选" sub="⌘A" onClick={() => { selectAll(); setMenu(null); }} />
-              <MenuItem icon="layout" label="整理布局" onClick={() => { tidy(); setMenu(null); }} />
+              {!readOnly ? <MenuItem icon="layout" label="整理布局" onClick={() => { tidy(); setMenu(null); }} /> : null}
             </React.Fragment>
           ) : null}
           {menu.type === 'edge' ? (menu.insert ? (
@@ -737,13 +760,17 @@ function Designer({ defId, focusNodeId, onBack, onOpenRun }) {
           {menu.type === 'node' ? (
             <React.Fragment>
               <MenuItem icon="copy" label="复制" sub="⌘C" onClick={() => { copySel(); setMenu(null); }} />
-              <MenuItem icon="plus" label="创建副本" sub="⌘D" disabled={selectedNodeIds().length > 1 || (nodeById[menu.id] && nodeById[menu.id].type === 'start')}
-                onClick={() => { duplicateNode(menu.id); setMenu(null); }} />
-              {kind === 'pipeline' ? (
+              {!readOnly ? (
+                <MenuItem icon="plus" label="创建副本" sub="⌘D" disabled={selectedNodeIds().length > 1 || (nodeById[menu.id] && nodeById[menu.id].type === 'start')}
+                  onClick={() => { duplicateNode(menu.id); setMenu(null); }} />
+              ) : null}
+              {kind === 'pipeline' && !readOnly ? (
                 <MenuItem icon="eye" label="预览数据" onClick={() => { setDrawer({ open: true, tab: 'preview' }); runPreview(menu.id); setMenu(null); }} />
               ) : null}
-              <MenuItem icon="trash" danger label={selectedNodeIds().length > 1 ? `删除 ${selectedNodeIds().length} 个节点` : '删除节点'}
-                onClick={() => { removeNodes(selectedNodeIds().length ? selectedNodeIds() : [menu.id]); setMenu(null); }} />
+              {!readOnly ? (
+                <MenuItem icon="trash" danger label={selectedNodeIds().length > 1 ? `删除 ${selectedNodeIds().length} 个节点` : '删除节点'}
+                  onClick={() => { removeNodes(selectedNodeIds().length ? selectedNodeIds() : [menu.id]); setMenu(null); }} />
+              ) : null}
             </React.Fragment>
           ) : null}
         </CanvasMenu>

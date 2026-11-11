@@ -11,6 +11,7 @@ import (
 
 	"mooncell/console/internal/dataresource"
 	"mooncell/console/internal/etl"
+	etlstore "mooncell/console/internal/etl/store"
 	"mooncell/console/internal/serverops"
 )
 
@@ -95,7 +96,7 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":     username,
 		"role":     a.store.userRole(username),
-		"features": a.featureFlags(),
+		"features": a.featureFlags(username, a.store.userRole(username)),
 	})
 }
 
@@ -128,7 +129,7 @@ func (a *api) session(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":     sess.Username,
 		"role":     role,
-		"features": a.featureFlags(),
+		"features": a.featureFlags(sess.Username, role),
 	})
 }
 
@@ -145,11 +146,17 @@ func (a *api) touchLoginSession(w http.ResponseWriter, r *http.Request) {
 
 // featureFlags 返回前端能力开关与相关客户端软限制。
 // zmodemMaxTransferMB 仅为浏览器侧软上限（ZMODEM 走 PTY 裸字节，服务端不强制）。
-func (a *api) featureFlags() map[string]any {
+// etl 对普通用户按定义级授权判定：无任何授权则入口隐藏（接口层仍有逐路由强制校验）。
+func (a *api) featureFlags(username, role string) map[string]any {
 	enabled := a.serverOps != nil && a.serverOps.Enabled()
+	etlVisible := a.etl != nil
+	if etlVisible && !isAdmin(role) {
+		ok, err := etlstore.HasAnyGrant(a.store.db, username)
+		etlVisible = err == nil && ok
+	}
 	out := map[string]any{
 		"serverOperations": enabled,
-		"etl":              a.etl != nil,
+		"etl":              etlVisible,
 	}
 	if a.serverOps != nil {
 		out["zmodemMaxTransferMB"] = a.serverOps.Config().ZmodemMaxTransferMB
@@ -263,8 +270,10 @@ func (a *api) requireAuthDR(next func(http.ResponseWriter, *http.Request)) http.
 	}
 }
 
-// requireAdminETL 是数据集成模块的认证 wrapper：v1 仅管理员可用，并注入用户名供审计/归属。
-func (a *api) requireAdminETL(next http.HandlerFunc) http.HandlerFunc {
+// requireAuthETL 是数据集成模块的认证 wrapper：验证登录后注入用户名/角色到 context。
+// 零授权普通用户在此直接 403（与 featureFlags 的 etl 可见性一致，撤销授权立即生效）；
+// 更细的定义级权限（use/edit）由 etl handler 按 etl_grants 逐路由强制校验。
+func (a *api) requireAuthETL(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, role, ok := a.currentUser(r)
 		if !ok {
@@ -272,10 +281,13 @@ func (a *api) requireAdminETL(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if !isAdmin(role) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "权限不足:数据集成仅管理员可用"})
-			return
+			granted, err := etlstore.HasAnyGrant(a.store.db, user)
+			if err != nil || !granted {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "无数据集成授权"})
+				return
+			}
 		}
-		next(w, etl.WithUser(r, user))
+		next(w, etl.WithUser(r, user, role))
 	}
 }
 

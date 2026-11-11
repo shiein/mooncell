@@ -12,7 +12,7 @@ const DIALECT_STYLE = {
   dm: { short: 'DM', bg: 'var(--primary-soft)', fg: 'var(--primary)' },
 };
 
-export function ConnectionsPage() {
+export function ConnectionsPage({ isAdmin }) {
   const [list, setList] = React.useState(null);
   const [editing, setEditing] = React.useState(null);
   const [testing, setTesting] = React.useState({});
@@ -46,7 +46,7 @@ export function ConnectionsPage() {
       <div className="etl-toolbar">
         <span className="etl-muted"><Icon name="key" size={13} style={{ verticalAlign: -2, marginRight: 5 }} />密码以独立密钥加密保存在 Console 数据库中，请将密钥文件与数据库一起备份。</span>
         <span style={{ flex: 1 }}></span>
-        <Btn variant="primary" icon="plus" onClick={() => setEditing({})}>新建连接</Btn>
+        {isAdmin ? <Btn variant="primary" icon="plus" onClick={() => setEditing({})}>新建连接</Btn> : null}
       </div>
       {!list ? <div className="etl-list-empty" style={{ padding: 40 }}><Spinner /></div> : null}
       {list && !list.length ? (
@@ -54,7 +54,7 @@ export function ConnectionsPage() {
           <div style={{ display: 'inline-flex', padding: 14, borderRadius: 14, background: 'var(--info-soft)', color: 'var(--info)' }}><Icon name="database" size={22} /></div>
           <h3>还没有连接</h3>
           <p>支持 PostgreSQL、MySQL、达梦 DM8、KingbaseES。连接只用于数据集成，与「数据资源」互不影响。</p>
-          <Btn variant="outline" icon="plus" style={{ marginTop: 14 }} onClick={() => setEditing({})}>新建连接</Btn>
+          {isAdmin ? <Btn variant="outline" icon="plus" style={{ marginTop: 14 }} onClick={() => setEditing({})}>新建连接</Btn> : null}
         </div>
       ) : null}
       {list && list.length ? (
@@ -78,9 +78,13 @@ export function ConnectionsPage() {
                   <span className="etl-muted" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.lastTestMsg}>
                     {c.lastTestAt ? `${fmtAgo(c.lastTestAt)} · ${c.lastTestMsg}` : c.hasPassword ? '' : '未设置密码'}
                   </span>
-                  <Btn variant="ghost" size="sm" icon={testing[c.id] ? undefined : 'activity'} title="测试" disabled={testing[c.id]} onClick={() => test(c)}>{testing[c.id] ? <Spinner size={11} /> : null}</Btn>
-                  <Btn variant="ghost" size="sm" icon="pencil" title="编辑" onClick={() => setEditing(c)}></Btn>
-                  <Btn variant="ghost" size="sm" icon="trash" title="删除" onClick={() => del(c)}></Btn>
+                  {isAdmin ? (
+                    <React.Fragment>
+                      <Btn variant="ghost" size="sm" icon={testing[c.id] ? undefined : 'activity'} title="测试" disabled={testing[c.id]} onClick={() => test(c)}>{testing[c.id] ? <Spinner size={11} /> : null}</Btn>
+                      <Btn variant="ghost" size="sm" icon="pencil" title="编辑" onClick={() => setEditing(c)}></Btn>
+                      <Btn variant="ghost" size="sm" icon="trash" title="删除" onClick={() => del(c)}></Btn>
+                    </React.Fragment>
+                  ) : null}
                 </div>
               </div>
             );

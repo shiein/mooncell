@@ -49,6 +49,16 @@ export function Inspector({ d }) {
   return <DefinitionInspector d={d} />;
 }
 
+// RoBanner：只读授权提示（access=use）。
+function RoBanner({ d }) {
+  if (!d.readOnly) return null;
+  return (
+    <div className="etl-insp-ro" role="note">
+      <Icon name="key" size={12} /> 只读授权：可查看与运行，修改需要编辑授权
+    </div>
+  );
+}
+
 function NodeInspector({ d, node }) {
   const { kind, catalog } = d;
   const meta = catalog.meta(kind, node.type) || { label: node.type, description: '' };
@@ -81,11 +91,12 @@ function NodeInspector({ d, node }) {
       <div className="etl-insp-head">
         <span className="etl-chip" style={{ background: c.soft, color: c.color, width: 34, height: 34, borderRadius: 9 }}><Icon name={meta.icon || 'circle'} size={17} /></span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <input className="etl-insp-name" value={node.name} onChange={(e) => d.updateNode(node.id, (n) => ({ ...n, name: e.target.value }))} aria-label="名称" />
+          <input className="etl-insp-name" value={node.name} readOnly={d.readOnly} onChange={(e) => d.updateNode(node.id, (n) => ({ ...n, name: e.target.value }))} aria-label="名称" />
           <div className="etl-insp-desc">{meta.label} · {meta.description}</div>
         </div>
-        <Btn variant="ghost" size="sm" icon="trash" title="删除（Delete）" onClick={() => d.removeNodes([node.id])}></Btn>
+        {!d.readOnly ? <Btn variant="ghost" size="sm" icon="trash" title="删除（Delete）" onClick={() => d.removeNodes([node.id])}></Btn> : null}
       </div>
+      <RoBanner d={d} />
       <div className="etl-insp-tabs"><Tabs tabs={tabs} active={tab} onChange={setTab} /></div>
       <div className="etl-insp-body" key={node.id + tab}>
         {tab === 'config' ? <Form cfg={node.config || {}} set={set} ctx={ctx} node={node} /> : null}
@@ -139,8 +150,9 @@ function EdgeInspector({ d, hop }) {
           <div className="etl-insp-title">连线</div>
           <div className="etl-insp-desc">{from ? from.name : '?'} → {to ? to.name : '?'}</div>
         </div>
-        <Btn variant="ghost" size="sm" icon="trash" title="删除连线" onClick={() => d.removeHops([hop.id])}></Btn>
+        {!d.readOnly ? <Btn variant="ghost" size="sm" icon="trash" title="删除连线" onClick={() => d.removeHops([hop.id])}></Btn> : null}
       </div>
+      <RoBanner d={d} />
       <div className="etl-insp-body">
         {kind === 'workflow' ? (
           <Field label="触发条件" hint="上游作业项结束于该结果时，沿此连线继续">
@@ -188,6 +200,7 @@ function DefinitionInspector({ d }) {
           <div className="etl-insp-desc">选中画布上的组件或连线可编辑其属性。</div>
         </div>
       </div>
+      <RoBanner d={d} />
       <div className="etl-insp-body">
         <Field label="描述">
           <textarea className="textarea" rows={2} value={d.meta.description || ''} placeholder="这个定义做什么、数据从哪来到哪去"

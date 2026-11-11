@@ -5,7 +5,7 @@ import { CATEGORY, matches } from '../util.js';
 
 export const DND_TYPE = 'application/x-mooncell-etl';
 
-export function Palette({ kind, catalog, onAdd }) {
+export function Palette({ kind, catalog, onAdd, disabled }) {
   const [kw, setKw] = React.useState('');
   const [collapsed, setCollapsed] = React.useState({});
   const items = (kind === 'workflow' ? catalog.actions : catalog.steps) || [];
@@ -18,7 +18,7 @@ export function Palette({ kind, catalog, onAdd }) {
     }));
   }, [items, kw]);
   return (
-    <aside className="etl-palette">
+    <aside className="etl-palette" data-readonly={disabled ? '1' : undefined}>
       <div className="etl-palette-head">
         <div className="etl-search" style={{ width: '100%' }}>
           <Icon name="search" size={14} />
@@ -40,9 +40,9 @@ export function Palette({ kind, catalog, onAdd }) {
                 const planned = m.maturity === 'planned';
                 return (
                   <button key={m.id} type="button" className="etl-palette-item" data-planned={String(planned)}
-                    draggable={!planned} title={m.description}
+                    draggable={!planned && !disabled} title={disabled ? '只读授权：不可修改定义' : m.description}
                     onDragStart={(e) => { e.dataTransfer.setData(DND_TYPE, m.id); e.dataTransfer.effectAllowed = 'move'; }}
-                    onClick={() => { if (!planned) onAdd(m); }}>
+                    onClick={() => { if (!planned && !disabled) onAdd(m); }}>
                     <span className="etl-chip" style={{ background: c.soft, color: c.color }}><Icon name={m.icon || 'circle'} size={14} /></span>
                     <span style={{ minWidth: 0, flex: 1 }}>
                       <div className="etl-palette-label">{m.label}</div>

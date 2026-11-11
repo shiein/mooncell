@@ -20,7 +20,8 @@ const TABS = [
  * route: { page: 'etl' | 'etl-designer' | 'etl-run', tab, defId, runId }
  * nav(page, opts) 由 App 提供。
  */
-export function EtlModule({ route, nav }) {
+export function EtlModule({ route, nav, role }) {
+  const isAdmin = role === 'admin';
   const go = {
     tab: (tab) => nav('etl', { tab }),
     designer: (defId, nodeId) => nav('etl-designer', { defId, node: nodeId }),
@@ -43,10 +44,10 @@ export function EtlModule({ route, nav }) {
         </div>
       </div>
       <Tabs tabs={TABS} active={tab} onChange={go.tab} style={{ marginBottom: 18 }} />
-      {tab === 'projects' ? <ProjectsPage go={go} /> : null}
+      {tab === 'projects' ? <ProjectsPage go={go} isAdmin={isAdmin} /> : null}
       {tab === 'runs' ? <RunsPage go={go} /> : null}
-      {tab === 'schedules' ? <SchedulesPage go={go} /> : null}
-      {tab === 'connections' ? <ConnectionsPage /> : null}
+      {tab === 'schedules' ? <SchedulesPage go={go} isAdmin={isAdmin} /> : null}
+      {tab === 'connections' ? <ConnectionsPage isAdmin={isAdmin} /> : null}
     </div>
   );
 }

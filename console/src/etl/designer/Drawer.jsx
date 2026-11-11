@@ -10,7 +10,7 @@ export function Drawer({ d }) {
   const warns = (d.allProblems || []).length - errs;
   const tabs = [
     { id: 'problems', label: '问题', count: (d.allProblems || []).length || undefined },
-    ...(d.kind === 'pipeline' ? [{ id: 'preview', label: '数据预览' }] : []),
+    ...(d.kind === 'pipeline' && !d.readOnly ? [{ id: 'preview', label: '数据预览' }] : []),
     { id: 'run', label: d.live.runId ? '本次运行' : '运行' },
   ];
   return (
