@@ -37,10 +37,55 @@ type runManager struct {
 	mu      sync.Mutex
 	active  map[string]*activeRun
 	defSems map[string]chan struct{} // 定义级串行令牌（Serial 运行使用）
+	// inflight：各定义已进入执行（含排队等全局令牌）的运行数；inflightCh 在计数变化时
+	// 关闭并换新，供 Serial 运行等待「同定义已无在途运行」。
+	inflight   map[string]int
+	inflightCh chan struct{}
 }
 
 func newRunManager(s *Service) *runManager {
-	return &runManager{s: s, sem: make(chan struct{}, s.cfg.MaxConcurrentRuns), active: map[string]*activeRun{}, defSems: map[string]chan struct{}{}}
+	return &runManager{s: s, sem: make(chan struct{}, s.cfg.MaxConcurrentRuns), active: map[string]*activeRun{}, defSems: map[string]chan struct{}{},
+		inflight: map[string]int{}, inflightCh: make(chan struct{})}
+}
+
+// enter 登记一个在途运行，返回登记的释放函数。
+func (m *runManager) enter(defID string) func() {
+	m.mu.Lock()
+	m.inflight[defID]++
+	m.mu.Unlock()
+	return m.enterRelease(defID)
+}
+
+// enterExclusive 等到该定义没有任何在途运行（手动、parallel 调度、其他 queue 调度）后登记，
+// 实现调度重叠策略 queue 的「等上一次结束再跑」。ctx 取消时放弃等待。
+func (m *runManager) enterExclusive(ctx context.Context, defID string) (func(), error) {
+	for {
+		m.mu.Lock()
+		if m.inflight[defID] == 0 {
+			m.inflight[defID]++
+			m.mu.Unlock()
+			return m.enterRelease(defID), nil
+		}
+		ch := m.inflightCh
+		m.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (m *runManager) enterRelease(defID string) func() {
+	return func() {
+		m.mu.Lock()
+		if m.inflight[defID]--; m.inflight[defID] <= 0 {
+			delete(m.inflight, defID)
+		}
+		close(m.inflightCh)
+		m.inflightCh = make(chan struct{})
+		m.mu.Unlock()
+	}
 }
 
 func (m *runManager) defSem(defID string) chan struct{} {
@@ -164,7 +209,12 @@ func (s *Service) Trigger(defID string, opts TriggerOptions) (store.Run, error) 
 	s.runs.mu.Lock()
 	s.runs.active[run.ID] = a
 	s.runs.mu.Unlock()
-	go s.execute(ctx, a, opts)
+	// 非 Serial 运行在返回前登记在途：调用方拿到运行后立即触发的 queue 调度必须能看到它。
+	var leave func()
+	if !opts.Serial {
+		leave = s.runs.enter(run.DefinitionID)
+	}
+	go s.execute(ctx, a, opts, leave)
 	return run, nil
 }
 
@@ -176,14 +226,19 @@ func orEmpty(m map[string]core.Value) map[string]core.Value {
 }
 
 // execute 是一次运行的完整生命周期：排队 → 运行 → 落库终态 → 广播结束。
-func (s *Service) execute(ctx context.Context, a *activeRun, opts TriggerOptions) {
+func (s *Service) execute(ctx context.Context, a *activeRun, opts TriggerOptions, leave func()) {
+	if leave != nil {
+		defer leave()
+	}
 	defer func() {
 		if p := recover(); p != nil {
 			log.Printf("[etl] 运行 %s panic：%v", a.run.ID, p)
 			s.finish(a, store.RunFailed, fmt.Errorf("内部错误：%v", p))
 		}
 	}()
-	// 排队：先拿定义级串行令牌（如需要），再拿全局并发令牌
+	// 排队：先拿定义级串行令牌（如需要），再拿全局并发令牌。
+	// Serial（queue）运行还须等同定义的全部在途运行结束——包括不持令牌的手动/parallel 运行，
+	// 否则手动运行期间触发的 queue 调度会直接与之重叠。非 Serial 运行已在 Trigger 登记、不等待。
 	if opts.Serial {
 		ds := s.runs.defSem(a.run.DefinitionID)
 		select {
@@ -193,6 +248,12 @@ func (s *Service) execute(ctx context.Context, a *activeRun, opts TriggerOptions
 			s.finish(a, store.RunCanceled, context.Cause(ctx))
 			return
 		}
+		release, err := s.runs.enterExclusive(ctx, a.run.DefinitionID)
+		if err != nil {
+			s.finish(a, store.RunCanceled, context.Cause(ctx))
+			return
+		}
+		defer release()
 	}
 	select {
 	case s.runs.sem <- struct{}{}:

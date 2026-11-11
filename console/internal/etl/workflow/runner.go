@@ -96,9 +96,18 @@ func Run(ctx context.Context, plan *Plan, opts RunOptions) Result {
 		}
 	}
 
+	// 汇合节点只等「开始」可达的入线：不可达节点永远不会决出状态，若计入入度，
+	// 汇合节点会一直挂起、最后被当作未触达跳过，作业却报成功。
+	reach := plan.reachable()
 	states := map[string]*nodeState{}
 	for _, pn := range plan.Nodes {
-		states[pn.Node.ID] = &nodeState{pn: pn, pendingIn: len(pn.In),
+		pending := 0
+		for _, h := range pn.In {
+			if reach[h.From] {
+				pending++
+			}
+		}
+		states[pn.Node.ID] = &nodeState{pn: pn, pendingIn: pending,
 			ev: NodeEvent{NodeID: pn.Node.ID, NodeName: pn.Node.Name, NodeType: pn.Node.Type, Status: NodePending}}
 	}
 	if plan.Start == nil {

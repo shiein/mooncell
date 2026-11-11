@@ -878,6 +878,14 @@ func (h *handlers) restoreVersion(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	// 与普通保存同一授权口径（R1-m4）：旧版本可能引用了操作者已无 use 授权的定义，
+	// 恢复即等于把它们重新拉进作业。
+	if cur.Kind == "workflow" && !isAdmin(r) {
+		if missing := h.ungrantedRefs(r, v.Doc); len(missing) > 0 {
+			fail(w, http.StatusForbidden, "forbidden", "该版本引用了未授权定义："+strings.Join(missing, "、"))
+			return
+		}
+	}
 	cur.Doc = v.Doc
 	d, err := h.s.st.UpdateDefinition(cur, cur.Revision, userOf(r))
 	if err != nil {

@@ -164,17 +164,7 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 
 	// 可达性
 	if p.Start != nil {
-		reach := map[string]bool{p.Start.Node.ID: true}
-		for _, pn := range p.Nodes {
-			if !reach[pn.Node.ID] {
-				continue
-			}
-			for _, hops := range pn.Out {
-				for _, h := range hops {
-					reach[h.To] = true
-				}
-			}
-		}
+		reach := p.reachable()
 		for _, pn := range p.Nodes {
 			if !reach[pn.Node.ID] {
 				p.Problems = append(p.Problems, core.Problem{Severity: core.SeverityWarning, NodeID: pn.Node.ID, Code: "unreachable", Message: fmt.Sprintf("「%s」不会被执行：从「开始」无法到达", pn.Node.Name)})
@@ -240,4 +230,24 @@ func topo(nodes []Node, byID map[string]*PlanNode) (order, cyclic []string) {
 	}
 	sort.Strings(cyclic)
 	return order, cyclic
+}
+
+// reachable 返回从「开始」沿出线可到达的节点集合（Nodes 为拓扑序，单趟即可）。
+func (p *Plan) reachable() map[string]bool {
+	reach := map[string]bool{}
+	if p.Start == nil {
+		return reach
+	}
+	reach[p.Start.Node.ID] = true
+	for _, pn := range p.Nodes {
+		if !reach[pn.Node.ID] {
+			continue
+		}
+		for _, hops := range pn.Out {
+			for _, h := range hops {
+				reach[h.To] = true
+			}
+		}
+	}
+	return reach
 }
