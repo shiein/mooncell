@@ -228,6 +228,11 @@ func init() {
 			if _, err := csvDelim(c.Delimiter); err != nil {
 				ic.Errorf("delimiter", "delimiter", "%s", err.Error())
 			}
+			if ic.Copies > 1 {
+				// 各副本独立打开同一路径：覆盖模式互相截断/覆写偏移，追加模式下
+				// csv.Writer 按 4KB 缓冲冲刷，会在记录中间与其他副本交错。
+				ic.Errorf("", "csv_copies", "「CSV 输出」不支持并行副本（当前 %d）：多个副本写同一文件会互相覆盖或交错出残缺行，请把副本数设为 1", ic.Copies)
+			}
 			return nil
 		},
 		Open: func(rc *core.RunContext, c *CSVOutputConfig) (core.Runner, error) {
@@ -235,10 +240,18 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
+			if rc.Copies > 1 {
+				return nil, fmt.Errorf("「CSV 输出」不支持并行副本（%d）", rc.Copies)
+			}
 			return core.RunnerFunc(func(ctx context.Context) error {
 				p, err := resolveFilePath(rc.Env, c.Path, true)
 				if err != nil {
 					return err
+				}
+				if rc.Preview {
+					// 预览不落盘（不创建、不截断、不追加），只把将写入的行转发到输出端口。
+					out := rc.Out(core.PortMain)
+					return rc.In(core.PortMain).Each(ctx, func(b core.Batch) error { return out.Send(ctx, b) })
 				}
 				flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 				if c.Append {

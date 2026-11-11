@@ -256,7 +256,7 @@ func (u *upserter) add(ctx context.Context, r core.Row) error {
 		return err
 	}
 	if !row.nullKey {
-		row.key = string(rowKey(nil, row.keyVals, seq(len(row.keyVals))))
+		row.key = dbKey(row.keyVals, u.plan.keys)
 	}
 	u.pending = append(u.pending, row)
 	return nil
@@ -463,7 +463,7 @@ func (u *upserter) lookup(ctx context.Context, tx conn.Querier, rows []iuRow) (m
 				}
 				upd[i] = v
 			}
-			k := string(rowKey(nil, keyVals, seq(nk)))
+			k := dbKey(keyVals, u.plan.keys)
 			if _, dup := found[k]; !dup {
 				found[k] = upd
 			}
@@ -631,7 +631,7 @@ func (u *upserter) updateReturning(ctx context.Context, tx conn.Querier, rows []
 				}
 				keyVals[i] = v
 			}
-			matched[string(rowKey(nil, keyVals, seq(nk)))] = true
+			matched[dbKey(keyVals, u.plan.keys)] = true
 		}
 		if err := res.Close(); err != nil {
 			return nil, err

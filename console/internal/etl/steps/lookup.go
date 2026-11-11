@@ -77,7 +77,8 @@ func init() {
 			Description: "把参照流按键装入内存哈希表，主流行查表并追加返回字段；重复键保留首行，未命中填默认值（默认 NULL）。参照数据量大请改用「数据库查询」。",
 			Inputs: []core.PortDecl{
 				{Name: core.PortMain, Label: "输入", Required: true},
-				{Name: PortInfo, Label: "参照", Required: true},
+				// Info：参照流整体读完主流才开始消费；编译器据此拒绝两路共享上游（会互等卡死）。
+				{Name: PortInfo, Label: "参照", Required: true, Info: true},
 			},
 			Outputs:  []core.PortDecl{{Name: core.PortMain, Label: "输出"}},
 			Keywords: []string{"Stream lookup", "流查询", "内存查询", "关联"},

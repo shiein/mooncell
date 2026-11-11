@@ -40,6 +40,10 @@ func init() {
 			if c.CommitSize < 0 {
 				ic.Errorf("commitSize", "commit_size", "提交记录数不能为负")
 			}
+			if c.Truncate && ic.Copies > 1 {
+				// 每个副本都会各自清表：后启动的副本会删掉先启动副本已提交的行。
+				ic.Errorf("truncate", "truncate_copies", "「开始前清空表」不能与并行副本（当前 %d）同时使用：各副本会各自清表并删掉彼此已写入的行；请把副本数设为 1，或在作业里先用「执行 SQL」清表", ic.Copies)
+			}
 			_, h := handleFor(ic, c.Connection, "connection")
 			if h == nil {
 				return nil
@@ -48,6 +52,9 @@ func init() {
 			return nil
 		},
 		Open: func(rc *core.RunContext, c *TableOutputConfig) (core.Runner, error) {
+			if c.Truncate && rc.Copies > 1 {
+				return nil, fmt.Errorf("「开始前清空表」不能与并行副本（%d）同时使用", rc.Copies)
+			}
 			return core.RunnerFunc(func(ctx context.Context) error {
 				w, err := newTableWriter(ctx, rc, c.Connection, c.Schema, c.Table, c.Fields, c.CommitSize)
 				if err != nil {

@@ -139,17 +139,12 @@ func init() {
 				return nil, err
 			}
 			return core.RunnerFunc(func(ctx context.Context) error {
-				out := rc.Out(core.PortMain)
+				// 已发送的批次归下游所有（不可变批次规则）：攒批交给 Emitter，
+				// 它每次发送后另分配缓冲，不能复用底层数组。
+				em := rc.Emitter(core.PortMain)
 				ref, cmp := &rowCursor{p: refIn}, &rowCursor{p: cmpIn}
-				batch := make([]core.Row, 0, rc.BatchSize)
 				emit := func(r core.Row, flag string) error {
-					batch = append(batch, append(r.Clone(), flag))
-					if len(batch) == rc.BatchSize {
-						err := out.Send(ctx, core.Batch{Schema: out.Schema, Rows: batch})
-						batch = batch[:0]
-						return err
-					}
-					return nil
+					return em.Emit(ctx, append(r.Clone(), flag))
 				}
 				for {
 					rr, rOk, err := ref.peek(ctx)
@@ -205,10 +200,7 @@ func init() {
 						cmp.advance()
 					}
 				}
-				if len(batch) > 0 {
-					return out.Send(ctx, core.Batch{Schema: out.Schema, Rows: batch})
-				}
-				return nil
+				return em.Flush(ctx)
 			}), nil
 		},
 	}))

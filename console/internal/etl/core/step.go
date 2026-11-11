@@ -122,8 +122,12 @@ type InferContext struct {
 	VarKinds map[string]Kind // 可见变量及其类型（转换参数 + 内置变量）
 	// VarSamples 是设计期变量样例值（参数默认值或按类型的样例），用于探测 SQL 字段；可为 nil。
 	VarSamples map[string]any
+	// Copies 是本节点的并行副本数（编译器填写，≥1；运行期重建的 InferContext 为 0）。
+	// 副本各自独立执行 Open/Run：对共享外部资源做「一次性」动作（清表、覆盖文件）的步骤
+	// 应在 Copies>1 时报错，而不是让各副本互相覆盖。
+	Copies int
 
-	inputs    map[string]*Schema
+	inputs   map[string]*Schema
 	outputs   map[string]*Schema
 	errorBase *Schema
 	problems  Problems

@@ -73,6 +73,21 @@ func isNumeric(v any) bool {
 }
 
 func compareNumeric(a, b any) int {
+	// int64 与 int64/decimal 的组合精确比较：转 float64 会在 |x|>2^53 时丢精度，
+	// 把相邻大整数（如雪花 ID）判为相等，进而被去重/合并吞行。
+	if ia, ok := a.(int64); ok {
+		switch y := b.(type) {
+		case int64:
+			return cmpInt(ia, y)
+		case decimal.Decimal:
+			return decimal.NewFromInt(ia).Cmp(y)
+		}
+	}
+	if ib, ok := b.(int64); ok {
+		if x, ok := a.(decimal.Decimal); ok {
+			return x.Cmp(decimal.NewFromInt(ib))
+		}
+	}
 	da, oka := a.(decimal.Decimal)
 	db, okb := b.(decimal.Decimal)
 	if oka && okb {
@@ -93,6 +108,16 @@ func compareNumeric(a, b any) int {
 	case fa < fb:
 		return -1
 	case fa > fb:
+		return 1
+	}
+	return 0
+}
+
+func cmpInt(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
 		return 1
 	}
 	return 0

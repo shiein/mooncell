@@ -97,3 +97,22 @@ func TestCompareValues(t *testing.T) {
 		t.Error("desc 排序应反向")
 	}
 }
+
+// int64 与 int64/decimal 混合比较须精确：> 2^53 的相邻整数不能因转 float64 判等。
+func TestCompareNumericExactBigInt(t *testing.T) {
+	a, b := int64(9007199254740992), int64(9007199254740993)
+	dec := func(s string) decimal.Decimal { return decimal.RequireFromString(s) }
+	for _, c := range []struct {
+		x, y any
+		want int
+	}{
+		{a, b, -1}, {b, a, 1}, {b, b, 0},
+		{b, dec("9007199254740992"), 1}, {dec("9007199254740992"), b, -1},
+		{a, dec("9007199254740992.5"), -1}, {dec("9007199254740993"), b, 0},
+		{int64(1), 1.5, -1}, {2.0, int64(2), 0}, // 浮点路径保持原语义
+	} {
+		if got := compareValues(c.x, c.y); got != c.want {
+			t.Fatalf("compareValues(%v, %v) = %d，期望 %d", c.x, c.y, got, c.want)
+		}
+	}
+}

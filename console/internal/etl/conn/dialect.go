@@ -371,3 +371,7 @@ func EffectiveSchema(c Config, schema string) string {
 	}
 	return ""
 }
+
+// HasTimeZone 报告原生列类型是否带时区：带时区列按时刻比较，无时区列按墙上时钟比较
+// （各驱动按墙上时钟绑定、读回时按连接时区解释，见 normalizeCommon）。
+func HasTimeZone(native string) bool { return hasTimeZone(native) }

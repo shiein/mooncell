@@ -57,8 +57,13 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 		var cfg struct {
 			Connection string `json:"connection"`
 			SQL        string `json:"sql"`
+			MaxRows    int64  `json:"maxRows"`
 		}
 		if json.Unmarshal(pn.Node.Config, &cfg) != nil || strings.TrimSpace(cfg.SQL) == "" || cfg.Connection == "" {
+			continue
+		}
+		if cfg.MaxRows > 0 {
+			// 源端限行作用于「过滤前」的前 N 行；条件并入 SQL 后会变成「过滤后」的前 N 行，结果不等价。
 			continue
 		}
 		h, err := pool.Get(ctx, cfg.Connection)
@@ -116,6 +121,11 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 			if next == nil || removed[next.Node.ID] {
 				break
 			}
+			if next.Node.Copies > 1 && next.Node.CopiesDistribution == core.DistCopy {
+				// 显式 copy 的多副本：每个副本各收全量、各自输出一份，并入源后行数会变少。
+				// 须先于条件翻译检查，避免登记孤儿参数。
+				goto chainEnd
+			}
 			switch next.Node.Type {
 			case "filter_rows":
 				var fc struct {
@@ -150,12 +160,20 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 				if !ok {
 					goto chainEnd
 				}
+				// 字段选择的出边会改接到源的 main 端口，按源的分发方式发送；
+				// 多条出边且两者分发方式不同（copy/distribute）时，下游行数会变 → 不并入。
+				// 错误端口被使用则不并入：并入后出边统一改接源的 main，错误分支会收到全部行。
+				// 无下游（如只作预览观察点）也不并入：链尾回退为 cur 会留下指向已删节点的连线。
+				if len(next.OutHops[core.PortError]) > 0 || len(next.OutHops[core.PortMain]) == 0 {
+					goto chainEnd
+				}
+				if n := len(next.OutHops[core.PortMain]); n > 1 && distOf(next.Node, core.PortMain) != distOf(pn.Node, core.PortMain) {
+					goto chainEnd
+				}
 				selectCols = cols
 				chain = append(chain, next.Node.ID)
 				names = append(names, next.Node.Name)
-				for _, hs := range next.OutHops {
-					endHops = append(endHops, hs...)
-				}
+				endHops = append(endHops, next.OutHops[core.PortMain]...)
 				goto chainEnd
 			default:
 				goto chainEnd
@@ -238,6 +256,14 @@ func Pushdown(ctx context.Context, def *Definition, plan *Plan, env core.Env) (*
 		return def, nil
 	}
 	return out, notes
+}
+
+// distOf 返回节点输出端口的有效分发方式（缺省 copy，同 core.NewOutPort）。
+func distOf(n Node, port string) core.Distribution {
+	if d := n.Distribution[port]; d != "" {
+		return d
+	}
+	return core.DistCopy
 }
 
 // pushableSelect 判定字段选择是否可折叠为 SELECT 列：只保留列出的字段、无类型/格式转换。

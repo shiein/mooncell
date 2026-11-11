@@ -229,6 +229,39 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 		}
 	}
 
+	// 信息端口（Info，如流查询的参照）须整流读完，步骤才开始读其他输入。若信息端口与
+	// 其他输入有共同上游，该上游向两路交替发送：另一路通道写满后它阻塞，信息端口永远
+	// 读不完 → 互等卡死。是否触发取决于数据量与通道容量，小数据测试发现不了，故编译期拒绝。
+	for _, pn := range p.ByID {
+		if pn.Type == nil {
+			continue
+		}
+		for _, port := range pn.Type.Meta().Inputs {
+			if !port.Info || len(pn.InHops[port.Name]) == 0 {
+				continue
+			}
+			infoUp := upstreamOf(p, pn.InHops[port.Name])
+			var otherHops []Hop
+			for name, hops := range pn.InHops {
+				if name != port.Name {
+					otherHops = append(otherHops, hops...)
+				}
+			}
+			otherUp := upstreamOf(p, otherHops)
+			var shared []string
+			for id := range infoUp {
+				if otherUp[id] {
+					shared = append(shared, id)
+				}
+			}
+			if len(shared) == 0 {
+				continue
+			}
+			sort.Slice(shared, func(i, j int) bool { return p.ByID[shared[i]].Node.Name < p.ByID[shared[j]].Node.Name })
+			errf(pn.Node.ID, "", "info_shared_upstream", "「%s」的「%s」输入与其他输入共用上游「%s」：参照流须读完才开始处理主流，共用上游会在数据量超过通道缓冲时互相等待而卡死；请为「%s」使用独立的输入步骤", pn.Node.Name, port.Label, p.ByID[shared[0]].Node.Name, port.Label)
+		}
+	}
+
 	// R1-B3：多副本节点的下游若存在要求有序输入的步骤（unique_sorted、merge_rows 等），
 	// 各副本分片汇流后行序被打乱 → 告警。sort_rows 重建全序，不再向下游传播。
 	for _, pn := range p.ByID {
@@ -307,6 +340,7 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 		}
 		ic := core.NewInferContext(ctx, pn.Node.ID, opts.Env, p.VarKinds, pn.Inputs)
 		ic.VarSamples = samples
+		ic.Copies = max(1, pn.Node.Copies)
 		if err := pn.Type.Infer(ic, pn.Config); err != nil {
 			ic.Errorf("", "infer", "%s", err.Error())
 		}
@@ -348,6 +382,31 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 	}
 	sort.SliceStable(p.Problems, func(i, j int) bool { return p.Problems[i].Severity < p.Problems[j].Severity })
 	return p
+}
+
+// upstreamOf 返回经给定连线可回溯到的全部上游节点 ID（含连线起点；容忍环）。
+func upstreamOf(p *Plan, hops []Hop) map[string]bool {
+	seen := map[string]bool{}
+	stack := make([]string, 0, len(hops))
+	for _, h := range hops {
+		stack = append(stack, h.From)
+	}
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if pn := p.ByID[id]; pn != nil {
+			for _, hs := range pn.InHops {
+				for _, h := range hs {
+					stack = append(stack, h.From)
+				}
+			}
+		}
+	}
+	return seen
 }
 
 // topo 返回拓扑序（按定义中的出现顺序稳定）与环上节点。

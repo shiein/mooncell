@@ -98,7 +98,7 @@ func (w *keyWriter) add(ctx context.Context, r core.Row) error {
 		}
 		return err
 	}
-	row.key = string(rowKey(nil, row.keyVals, seq(len(row.keyVals))))
+	row.key = dbKey(row.keyVals, w.plan.keys)
 	w.pending = append(w.pending, row)
 	return nil
 }
@@ -140,11 +140,19 @@ func (w *keyWriter) flush(ctx context.Context, out *core.OutPort) error {
 		return err
 	}
 	var matched []keyRow
-	canErr := w.rc.HasOutput(core.PortError)
-	var skipped int
 	for _, r := range uniq {
 		if found[r.key] {
 			matched = append(matched, r)
+		}
+	}
+	// 每个输入行只进一个端口：命中键的行（含同键重复行）→ 主输出「已处理」；
+	// 未命中键的行全部 → 错误输出（未连接时跳过），不能再出现在「已处理」里。
+	var processed []core.Row
+	canErr := w.rc.HasOutput(core.PortError)
+	var skipped int
+	for _, r := range rows {
+		if found[r.key] {
+			processed = append(processed, r.src)
 			continue
 		}
 		if canErr {
@@ -173,7 +181,7 @@ func (w *keyWriter) flush(ctx context.Context, out *core.OutPort) error {
 		w.rc.Log.Info("%d 行关键字在 %s 未匹配，已跳过", skipped, w.table)
 	}
 	w.rc.Log.Debug("提交：%s %d 行", w.op, len(matched))
-	return out.Send(ctx, core.Batch{Schema: out.Schema, Rows: keySrcRows(rows)})
+	return out.Send(ctx, core.Batch{Schema: out.Schema, Rows: processed})
 }
 
 func keySrcRows(rows []keyRow) []core.Row {
@@ -230,7 +238,7 @@ func (w *keyWriter) lookup(ctx context.Context, tx conn.Querier, rows []keyRow) 
 				}
 				keyVals[i] = v
 			}
-			found[string(rowKey(nil, keyVals, seq(nk)))] = true
+			found[dbKey(keyVals, w.plan.keys)] = true
 		}
 		batch = batch[:0]
 		return res.Err()

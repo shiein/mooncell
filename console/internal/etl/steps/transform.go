@@ -6,8 +6,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
+	"time"
 
+	"mooncell/console/internal/etl/conn"
 	"mooncell/console/internal/etl/core"
 	"mooncell/console/internal/etl/expr"
 )
@@ -388,6 +391,8 @@ func init() {
 }
 
 // rowKey 把键字段编码为无歧义字节串：每个值 = 类型标记 + 长度 + 文本。
+// 时间值按时刻（Unix 秒 + 纳秒）编码，与 compareValues 的 time.Compare 同一相等语义；
+// 不能用展示文本（只到秒），否则同一秒内的不同时刻会被当成同一个键。
 func rowKey(buf []byte, r core.Row, idx []int) []byte {
 	var lenBuf [binary.MaxVarintLen64]byte
 	for _, i := range idx {
@@ -396,7 +401,12 @@ func rowKey(buf []byte, r core.Row, idx []int) []byte {
 			buf = append(buf, 0)
 			continue
 		}
-		s := core.FormatValue(v)
+		var s string
+		if t, ok := v.(time.Time); ok {
+			s = strconv.FormatInt(t.Unix(), 10) + "." + strconv.Itoa(t.Nanosecond())
+		} else {
+			s = core.FormatValue(v)
+		}
 		buf = append(buf, byte(len(core.KindOf(v))))
 		buf = append(buf, core.KindOf(v)...)
 		n := binary.PutUvarint(lenBuf[:], uint64(len(s)))
@@ -404,6 +414,28 @@ func rowKey(buf []byte, r core.Row, idx []int) []byte {
 		buf = append(buf, s...)
 	}
 	return buf
+}
+
+// dbKey 是按键写库步骤（更新/删除/插入更新）的匹配键：流侧已转换的键值与
+// 目标表读回并 Normalize 的键值经它得到同一编码，才能判断「目标表里是否已有」。
+// 时间键按目标库的比较语义规整：
+//   - 无时区列：驱动按墙上时钟绑定、读回时按连接时区解释 → 只比墙上时钟（忽略标注时区）；
+//   - 带时区列：按时刻比较；
+//   - 两侧都舍入到微秒：PG/MySQL/达梦的时间精度上限为微秒，纳秒级流值写入后即被舍入。
+func dbKey(vals []any, cols []boundColumn) string {
+	canon := make(core.Row, len(vals))
+	for i, v := range vals {
+		t, ok := v.(time.Time)
+		if !ok {
+			canon[i] = v
+			continue
+		}
+		if !conn.HasTimeZone(cols[i].target.NativeType) {
+			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
+		}
+		canon[i] = t.Round(time.Microsecond)
+	}
+	return string(rowKey(nil, canon, seq(len(canon))))
 }
 
 // ---------------------------------------------------------------- 空操作
