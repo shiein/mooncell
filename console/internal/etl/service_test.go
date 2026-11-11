@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1190,5 +1191,193 @@ func TestDuplicateNotifySecretRekey(t *testing.T) {
 	}
 	if r := waitRun(evil.ID); r.Status == store.RunSucceeded {
 		t.Fatal("aadSuffix 与运行中定义不符应拒绝开密")
+	}
+}
+
+// R1-m4 授权边界：
+//  1. force 删除被引用定义：非管理员须对所有引用方持 edit，否则 403；
+//  2. 保存作业引用的定义须至少 use 授权，否则 403；
+//  3. overview 对非管理员只回授权范围 active/统计，connections 归零；
+//  4. 取消/续跑写审计并记操作人。
+func TestGrantBoundaries(t *testing.T) {
+	h := newHarness(t)
+	var mu sync.Mutex
+	var audits []string
+	h.s.SetAuditFunc(func(u, action, target, result string) {
+		mu.Lock()
+		defer mu.Unlock()
+		audits = append(audits, u+"|"+action+"|"+target)
+	})
+	hasAudit := func(sub string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, a := range audits {
+			if strings.Contains(a, sub) {
+				return true
+			}
+		}
+		return false
+	}
+
+	plDoc, _ := json.Marshal(map[string]any{
+		"kind": "pipeline", "params": []any{},
+		"nodes": []map[string]any{{"id": "g", "type": "generate_rows", "name": "g", "config": map[string]any{"limit": 1}}},
+	})
+	p, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "被引转换", Doc: plDoc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkWf := func(name string) store.Definition {
+		doc, _ := json.Marshal(map[string]any{
+			"kind": "workflow", "params": []any{},
+			"nodes": []map[string]any{
+				{"id": "start", "type": "start", "name": "开始", "config": map[string]any{}},
+				{"id": "t", "type": "pipeline", "name": "转换", "config": map[string]any{"pipeline": p.ID}},
+			},
+			"hops": []map[string]any{{"id": "h", "from": "start", "fromPort": "success", "to": "t", "toPort": "main"}},
+		})
+		d, err := h.s.st.CreateDefinition(store.Definition{Kind: "workflow", Name: name, Doc: doc}, "admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	w1, w2 := mkWf("引用方一"), mkWf("引用方二")
+	wfDocOf := func(id string) map[string]any {
+		var got store.Definition
+		if code := h.call("GET", "/api/etl/definitions/"+id, nil, &got); code != 200 {
+			t.Fatalf("读取定义失败：%d", code)
+		}
+		var doc map[string]any
+		_ = json.Unmarshal(got.Doc, &doc)
+		return doc
+	}
+	grant := func(uid, defID, mode string) {
+		g, _ := h.s.st.GrantedModes(uid)
+		g[defID] = mode
+		modes := []store.DefinitionGrant{}
+		for id, m := range g {
+			modes = append(modes, store.DefinitionGrant{DefinitionID: id, AccessMode: m})
+		}
+		if err := store.SetUserGrants(h.db, uid, modes, "admin"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h.user, h.role = "u1", "user"
+	// u1：edit P + edit W1 + use W2（w2 只有 use → force 删除应 403）
+	grant("u1", p.ID, store.ModeEdit)
+	grant("u1", w1.ID, store.ModeEdit)
+	grant("u1", w2.ID, store.ModeUse)
+
+	// ① force 删除：w2 只持 use → 403
+	if code := h.call("DELETE", "/api/etl/definitions/"+p.ID+"?force=1", nil, nil); code != 403 {
+		t.Fatalf("引用方授权不足时 force 删除应 403：%d", code)
+	}
+	grant("u1", w2.ID, store.ModeEdit)
+	if code := h.call("DELETE", "/api/etl/definitions/"+p.ID+"?force=1", nil, nil); code != 200 {
+		t.Fatalf("全部引用方持 edit 后 force 删除应 200：%d", code)
+	}
+
+	// ② 保存作业引用未授权定义 → 403
+	p2, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "未授权转换", Doc: plDoc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w3doc := mkWf("引用方三")
+	grant("u1", w3doc.ID, store.ModeEdit)
+	doc := wfDocOf(w3doc.ID)
+	doc["nodes"].([]any)[1].(map[string]any)["config"].(map[string]any)["pipeline"] = p2.ID // 改成引用未授权的 p2
+	var w3 store.Definition
+	h.call("GET", "/api/etl/definitions/"+w3doc.ID, nil, &w3)
+	if code := h.call("PUT", "/api/etl/definitions/"+w3doc.ID, map[string]any{"doc": doc, "revision": w3.Revision}, nil); code != 403 {
+		t.Fatalf("引用未授权定义应 403：%d", code)
+	}
+	grant("u1", p2.ID, store.ModeUse)
+	if code := h.call("PUT", "/api/etl/definitions/"+w3doc.ID, map[string]any{"doc": doc, "revision": w3.Revision}, nil); code != 200 {
+		t.Fatalf("补 use 授权后保存应 200：%d", code)
+	}
+
+	// ③ overview：非管理员 connections=0，active 只含授权定义的运行
+	other, _ := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "他人作业", Doc: plDoc}, "admin")
+	h.s.runs.mu.Lock()
+	h.s.runs.active["fake1"] = &activeRun{run: store.Run{ID: "fake1", DefinitionID: w3doc.ID, DefinitionName: "引用方三"}}
+	h.s.runs.active["fake2"] = &activeRun{run: store.Run{ID: "fake2", DefinitionID: other.ID, DefinitionName: "他人作业"}}
+	h.s.runs.mu.Unlock()
+	var ov map[string]any
+	if code := h.call("GET", "/api/etl/overview", nil, &ov); code != 200 {
+		t.Fatalf("overview 失败：%d", code)
+	}
+	if ov["connections"] != float64(0) {
+		t.Fatalf("非管理员 overview 不应暴露连接数：%v", ov["connections"])
+	}
+	active, _ := ov["active"].([]any)
+	if len(active) != 1 || active[0] != "引用方三" {
+		t.Fatalf("active 应只含授权定义的运行：%v", active)
+	}
+	h.s.runs.mu.Lock()
+	delete(h.s.runs.active, "fake1")
+	delete(h.s.runs.active, "fake2")
+	h.s.runs.mu.Unlock()
+
+	// ④ 取消/续跑审计：起一条长运行再取消、续跑
+	// 续跑仅支持作业：start → wait(3600s)，可稳定取消
+	slowDoc, _ := json.Marshal(map[string]any{
+		"kind": "workflow", "params": []any{},
+		"nodes": []map[string]any{
+			{"id": "start", "type": "start", "name": "开始", "config": map[string]any{}},
+			{"id": "w", "type": "wait", "name": "等待", "config": map[string]any{"seconds": 3600}},
+		},
+		"hops": []map[string]any{{"id": "h", "from": "start", "fromPort": "success", "to": "w", "toPort": "main"}},
+	})
+	slow, err := h.s.st.CreateDefinition(store.Definition{Kind: "workflow", Name: "慢作业", Doc: slowDoc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant("u1", slow.ID, store.ModeUse)
+	var run store.Run
+	if code := h.call("POST", "/api/etl/definitions/"+slow.ID+"/run", map[string]any{}, &run); code != 200 {
+		t.Fatalf("触发运行失败：%d", code)
+	}
+	// 等运行进入 running（排队期 active 表还没有它，取消会 400）
+	for i := 0; i < 200; i++ {
+		r, _ := h.s.st.GetRun(run.ID)
+		if r.Status == store.RunRunning {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if code := h.call("POST", "/api/etl/runs/"+run.ID+"/cancel", nil, nil); code != 200 {
+		t.Fatalf("取消失败：%d", code)
+	}
+	if !hasAudit("u1|取消运行") {
+		t.Fatalf("取消运行未写审计：%v", audits)
+	}
+	// 等取消落到终态（Trigger 校验 prev.Status 必须是 failed/interrupted/canceled）
+	var prev store.Run
+	for i := 0; i < 200; i++ {
+		prev, _ = h.s.st.GetRun(run.ID)
+		if prev.Status != store.RunQueued && prev.Status != store.RunRunning {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	var resumed store.Run
+	var rerr map[string]any
+	if code := h.call("POST", "/api/etl/runs/"+run.ID+"/resume", nil, &resumed); code != 200 {
+		h.call("POST", "/api/etl/runs/"+run.ID+"/resume", nil, &rerr)
+		t.Fatalf("续跑失败：%d（原运行状态=%s 错误=%v）", code, prev.Status, rerr)
+	}
+	if !hasAudit("u1|续跑") {
+		t.Fatalf("续跑未写审计：%v", audits)
+	}
+	// 收尾：取消续跑（wait 3600s），等它落终态，避免测试间泄漏
+	h.s.Cancel(resumed.ID, "u1")
+	for i := 0; i < 200; i++ {
+		r, _ := h.s.st.GetRun(resumed.ID)
+		if r.Status != store.RunQueued && r.Status != store.RunRunning {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
 	}
 }

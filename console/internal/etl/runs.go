@@ -75,12 +75,26 @@ func (m *runManager) get(id string) *activeRun {
 	return m.active[id]
 }
 
-func (m *runManager) activeNames() []string {
+// activeSummary 是在途运行的轻量视图（授权过滤用）。
+type activeSummary struct {
+	DefinitionID   string
+	DefinitionName string
+}
+
+func (m *runManager) activeSummaries() []activeSummary {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var names []string
+	out := make([]activeSummary, 0, len(m.active))
 	for _, a := range m.active {
-		names = append(names, a.run.DefinitionName)
+		out = append(out, activeSummary{a.run.DefinitionID, a.run.DefinitionName})
+	}
+	return out
+}
+
+func (m *runManager) activeNames() []string {
+	var names []string
+	for _, a := range m.activeSummaries() {
+		names = append(names, a.DefinitionName)
 	}
 	sort.Strings(names)
 	return names

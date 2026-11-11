@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -181,12 +182,27 @@ func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
 			workflows++
 		}
 	}
+	// 在途运行同样按授权过滤（R1-m4）：非管理员只见授权定义的活动运行
+	active := []string{}
+	for _, a := range h.s.runs.activeSummaries() {
+		if scope != nil {
+			if _, ok := scope[a.DefinitionID]; !ok {
+				continue
+			}
+		}
+		active = append(active, a.DefinitionName)
+	}
+	sort.Strings(active)
+	connCount := len(conns)
+	if scope != nil {
+		connCount = 0 // 连接清单是管理员面，非管理员不暴露数量
+	}
 	if len(recent24) > 12 {
 		recent24 = recent24[:12]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"pipelines": pipelines, "workflows": workflows, "connections": len(conns), "schedulesEnabled": enabled,
-		"runs24h": byStatus, "rowsWritten24h": rows, "active": h.s.runs.activeNames(), "recentRuns": recent24, "upcoming": upcoming,
+		"pipelines": pipelines, "workflows": workflows, "connections": connCount, "schedulesEnabled": enabled,
+		"runs24h": byStatus, "rowsWritten24h": rows, "active": active, "recentRuns": recent24, "upcoming": upcoming,
 	})
 }
 
@@ -704,6 +720,14 @@ func (h *handlers) updateDefinition(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	// 非管理员保存作业：引用的转换/子作业须至少持 use（R1-m4），
+	// 否则可借保存把未授权定义拉进自己的作业执行。
+	if cur.Kind == "workflow" && !isAdmin(r) {
+		if missing := h.ungrantedRefs(r, in.Doc); len(missing) > 0 {
+			fail(w, http.StatusForbidden, "forbidden", "作业引用了未授权定义："+strings.Join(missing, "、"))
+			return
+		}
+	}
 	doc, err := h.sealDocSecrets(cur.ID, cur.Kind, in.Doc)
 	if err != nil {
 		failErr(w, err)
@@ -716,6 +740,26 @@ func (h *handlers) updateDefinition(w http.ResponseWriter, r *http.Request) {
 	}
 	h.s.audit(userOf(r), "修改"+kindLabel(d.Kind), "数据集成·"+d.Name, "成功")
 	writeJSON(w, http.StatusOK, d)
+}
+
+// ungrantedRefs 返回作业文档中引用的、当前用户不持任何授权的定义名。
+// 解码失败返回 nil（checkDoc 已拦下格式问题，此处尽力而为）。
+func (h *handlers) ungrantedRefs(r *http.Request, doc json.RawMessage) []string {
+	def, err := workflow.Decode(doc)
+	if err != nil {
+		return nil
+	}
+	var missing []string
+	for _, ref := range workflow.CollectRefs(def) {
+		if modeRank(h.defMode(r, ref.ID)) < modeRank(store.ModeUse) {
+			name := ref.ID
+			if d, err := h.s.st.GetDefinition(ref.ID); err == nil {
+				name = d.Name
+			}
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }
 
 func (h *handlers) deleteDefinition(w http.ResponseWriter, r *http.Request) {
@@ -731,6 +775,17 @@ func (h *handlers) deleteDefinition(w http.ResponseWriter, r *http.Request) {
 	if uses, _ := h.s.st.References(id); len(uses) > 0 && r.URL.Query().Get("force") != "1" {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "仍被作业引用：" + strings.Join(uses, "、"), "code": "in_use", "usages": uses})
 		return
+	}
+	// force 删除会连带影响全部引用方：非管理员须对每个引用方都持 edit（R1-m4）
+	if r.URL.Query().Get("force") == "1" && !isAdmin(r) {
+		if refIDs, err := h.s.st.ReferenceIDs(id); err == nil {
+			for _, refID := range refIDs {
+				if modeRank(h.defMode(r, refID)) < modeRank(store.ModeEdit) {
+					fail(w, http.StatusForbidden, "forbidden", "该定义仍被引用，需对全部引用方持有编辑授权")
+					return
+				}
+			}
+		}
 	}
 	if err := h.s.st.DeleteDefinition(id); err != nil {
 		failErr(w, err)
@@ -1105,6 +1160,9 @@ func (h *handlers) cancelRun(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	if run, err := h.s.st.GetRun(r.PathValue("id")); err == nil {
+		h.s.audit(userOf(r), "取消运行", "数据集成·"+run.DefinitionName, "成功")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -1122,6 +1180,7 @@ func (h *handlers) resumeRun(w http.ResponseWriter, r *http.Request) {
 		failErr(w, err)
 		return
 	}
+	h.s.audit(userOf(r), "续跑运行", "数据集成·"+run.DefinitionName, "成功")
 	writeJSON(w, http.StatusOK, run)
 }
 

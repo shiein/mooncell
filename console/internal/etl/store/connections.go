@@ -134,7 +134,16 @@ func (s *Store) DeleteConnection(id string) error {
 
 // References 返回文档中引用了该 ID（连接或转换）的定义名，删除前提示用。按 JSON 文本匹配。
 func (s *Store) References(id string) ([]string, error) {
-	rows, err := s.db.Query(`SELECT name FROM etl_definitions WHERE doc_json LIKE ? ORDER BY name`, `%"`+strings.ReplaceAll(id, `%`, ``)+`"%`)
+	return s.referenceCol(id, "name")
+}
+
+// ReferenceIDs 返回引用方定义 ID（force 删除的授权校验用）。
+func (s *Store) ReferenceIDs(id string) ([]string, error) {
+	return s.referenceCol(id, "id")
+}
+
+func (s *Store) referenceCol(id, col string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT `+col+` FROM etl_definitions WHERE doc_json LIKE ? ORDER BY name`, `%"`+strings.ReplaceAll(id, `%`, ``)+`"%`)
 	if err != nil {
 		return nil, err
 	}
