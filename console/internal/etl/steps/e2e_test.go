@@ -393,6 +393,62 @@ func TestUpdateDeleteSteps(t *testing.T) {
 	}
 }
 
+// 合并记录 + 数据同步：参照（目标）与对比（源）归并出标志，同步含插入/更新/删除/不变。
+func TestMergeRowsSyncAfterMerge(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE old (id INTEGER, v TEXT)`) // 目标表现状（参照）
+	mustExec(t, db, `CREATE TABLE new (id INTEGER, v TEXT)`) // 源侧（对比）
+	mustExec(t, db, `INSERT INTO old VALUES (1,'a'),(2,'b'),(3,'c')`)
+	mustExec(t, db, `INSERT INTO new VALUES (1,'a'),(2,'b2'),(4,'d')`)
+	side := func(id, table string) []pipeline.Node {
+		return []pipeline.Node{
+			node(id+"_in", "table_input", map[string]any{"connection": "db", "sql": "select id, v from " + table}),
+			node(id+"_s", "sort_rows", map[string]any{"fields": []map[string]any{{"name": "id"}}}),
+		}
+	}
+	def := &pipeline.Definition{
+		Nodes: append(append(side("r", "old"), side("c", "new")...),
+			node("m", "merge_rows", map[string]any{"keys": []string{"id"}, "values": []string{"v"}}),
+			node("sync", "sync_after_merge", map[string]any{
+				"connection": "db", "table": "old",
+				"keys": []map[string]any{{"stream": "id", "column": "id"}},
+			})),
+		Hops: []pipeline.Hop{
+			hop("r_in", "main", "r_s"), hop("r_s", "main", "m"),
+			hop("c_in", "main", "c_s"), {ID: "ci", From: "c_s", FromPort: "main", To: "m", ToPort: "info"},
+			hop("m", "main", "sync"),
+		},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	// 期望：1 不变、2 更新为 b2、3 删除、4 插入
+	var v2 string
+	db.QueryRow(`SELECT v FROM old WHERE id = 2`).Scan(&v2)
+	checks := []struct {
+		q    string
+		want int64
+	}{
+		{`SELECT count(*) FROM old`, 3},
+		{`SELECT count(*) FROM old WHERE id = 1 AND v = 'a'`, 1},
+		{`SELECT count(*) FROM old WHERE id = 3`, 0},
+		{`SELECT count(*) FROM old WHERE id = 4 AND v = 'd'`, 1},
+	}
+	for _, c := range checks {
+		if n := count(t, db, c.q); n != c.want {
+			t.Fatalf("校验失败 %s：实际 %d 期望 %d", c.q, n, c.want)
+		}
+	}
+	if v2 != "b2" {
+		t.Fatalf("id=2 应更新为 b2，实际 %s", v2)
+	}
+	m := res.Metrics["sync"]
+	if m.Output != 1 || m.Updated != 2 {
+		t.Fatalf("度量应为 Output=1(插入)/Updated=2(更新+删除)：%+v", m)
+	}
+}
+
 // 表输出连接错误端口：批次内混入唯一约束冲突行 → 批量失败后退化逐行写入，
 // 坏行进错误输出、好行照常提交、步骤成功；未连接错误端口则整步失败。
 func TestTableOutputErrorRowDegrade(t *testing.T) {

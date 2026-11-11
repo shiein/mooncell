@@ -394,7 +394,7 @@ registerForm('pipeline', 'insert_update', ({ cfg, set, ctx }) => {
   );
 });
 
-function KeyedWriteForm({ cfg, set, ctx, withFields }) {
+function KeyedWriteForm({ cfg, set, ctx, withFields, keyHint, fieldsTitle, fieldsHint, fieldsEmpty }) {
   const { cols, indexes, error } = useTargetColumns(cfg);
   const keys = cfg.keys || [];
   const keyCols = keys.map((k) => (k.column || '').toLowerCase());
@@ -404,7 +404,7 @@ function KeyedWriteForm({ cfg, set, ctx, withFields }) {
       <Field label="数据库连接"><ConnectionSelect value={cfg.connection} onChange={(connection) => set({ connection })} /></Field>
       <TablePicker connection={cfg.connection} schema={cfg.schema} table={cfg.table} onChange={(t) => set(t)} />
       {error ? <div className="field-hint" style={{ color: 'var(--error)' }}>{error}</div> : null}
-      <Section title="查询关键字" hint="命中则处理，未命中的行进错误输出">
+      <Section title="查询关键字" hint={keyHint || '命中则处理，未命中的行进错误输出'}>
         <ListEditor
           columns={[{ label: '流字段' }, { label: '表字段' }]}
           rows={keys} onChange={(k) => set({ keys: k })}
@@ -422,12 +422,12 @@ function KeyedWriteForm({ cfg, set, ctx, withFields }) {
         {cols && keys.length && !indexed ? <div className="field-hint" style={{ color: 'var(--warn)' }}>关键字段上没有索引，大表查找会很慢。建议在目标表建立索引。</div> : null}
       </Section>
       {withFields ? (
-        <Section title="更新字段">
+        <Section title={fieldsTitle || '更新字段'} hint={fieldsHint}>
           <ListEditor
             columns={[{ label: '流字段' }, { label: '表字段' }]}
             rows={cfg.fields || []} onChange={(fields) => set({ fields })}
             onAdd={() => set({ fields: [...(cfg.fields || []), { stream: '', column: '' }] })}
-            empty="至少需要一个更新字段"
+            empty={fieldsEmpty || '至少需要一个更新字段'}
             extraActions={<Btn variant="ghost" size="sm" disabled={!cols} onClick={() => {
               const ks = new Set(keys.map((k) => (k.column || '').toLowerCase()));
               set({ fields: autoMap(ctx.input, cols).filter((m) => !ks.has(m.column.toLowerCase())) });
@@ -447,6 +447,55 @@ function KeyedWriteForm({ cfg, set, ctx, withFields }) {
 
 registerForm('pipeline', 'update', (p) => <KeyedWriteForm {...p} withFields />);
 registerForm('pipeline', 'delete', (p) => <KeyedWriteForm {...p} />);
+
+registerForm('pipeline', 'merge_rows', ({ cfg, set, ctx }) => {
+  const keys = cfg.keys || [];
+  const values = cfg.values || [];
+  const input = ctx.input || [];
+  return (
+    <React.Fragment>
+      <Section title="合并键" hint="参照/对比两路输入都必须已按键升序排序（各前置「排序记录」）">
+        <ListEditor
+          columns={[{ label: '字段' }]}
+          rows={keys.map((k) => ({ name: k }))}
+          onChange={(rows) => set({ keys: rows.map((r) => r.name).filter(Boolean) })}
+          onAdd={() => set({ keys: [...keys, (input.find((f) => !keys.includes(f.name)) || {}).name || ''] })}
+          empty="至少一个合并键"
+          renderRow={(r, up) => <FieldSelect fields={input} value={r.name} onChange={(name) => up({ name })} />} />
+      </Section>
+      <Section title="比较字段" hint="不选 = 全部非键字段">
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {input.map((f) => {
+            const on = values.includes(f.name);
+            return (
+              <button key={f.name} type="button" onClick={() => set({ values: on ? values.filter((k) => k !== f.name) : [...values, f.name] })}
+                className="etl-field-chip" style={{ cursor: 'pointer', border: `1px solid ${on ? 'var(--primary)' : 'transparent'}`, background: on ? 'var(--primary-soft)' : 'var(--muted)', color: on ? 'var(--primary)' : undefined }}>
+                {on ? <Icon name="check" size={11} /> : null}{f.name}
+              </button>
+            );
+          })}
+          {!input.length ? <span className="etl-muted">连接上游后可选择字段</span> : null}
+        </div>
+      </Section>
+      <Field label="标志字段" hint="键同、值异为 changed；只在对比流为 new；只在参照流为 deleted；全同为 identical">
+        <input className="input" value={cfg.flagField || 'flag'} onChange={(e) => set({ flagField: e.target.value })} />
+      </Field>
+      <div className="field-hint">连线时：现有/旧数据接「参照」，新数据接「对比」。输出 = 对比流字段 + 标志字段，一般接「数据同步」把差异写入目标表。</div>
+    </React.Fragment>
+  );
+});
+
+registerForm('pipeline', 'sync_after_merge', ({ cfg, set, ctx }) => (
+  <React.Fragment>
+    <Field label="标志字段" hint="含 identical/changed/new/deleted 的字段（一般来自「合并记录」）">
+      <input className="input" value={cfg.flagField || 'flag'} onChange={(e) => set({ flagField: e.target.value })} />
+    </Field>
+    <KeyedWriteForm cfg={cfg} set={set} ctx={ctx} withFields
+      keyHint="new 按它插入、changed/deleted 按它定位行"
+      fieldsTitle="写入字段" fieldsHint="插入/更新共用；键所在列自动并入插入"
+      fieldsEmpty="留空 = 除键和标志字段外的全部字段" />
+  </React.Fragment>
+));
 
 // ---------------------------------------------------------------- 作业项
 

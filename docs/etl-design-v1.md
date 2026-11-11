@@ -334,13 +334,24 @@ type Dialect interface {
 | 流程 | `dummy` | 空操作 | 已实现 |
 | 输出 | `table_output` | 表输出（裁剪表 / 提交记录数 / 批量；连 error 端口时批失败退化逐行定位坏行） | 已实现 |
 | 输出 | `insert_update` | 插入 / 更新（原生 upsert / 派生行集连接更新） | 已实现 |
-| 输出 | `update` / `delete` | 更新 / 删除 | TODO |
-| 转换 | `sort_rows` | 排序（外部排序溢写） | TODO |
-| 转换 | `unique_sorted` | 去除重复记录（要求有序） | TODO |
-| 转换 | `value_mapper` | 值映射 | TODO |
-| 连接 | `merge_rows` / `sync_after_merge` | 合并记录 / 数据同步（含删除） | TODO |
+| 输出 | `update` / `delete` | 更新 / 删除（未命中行进错误输出，未连则跳过） | 已实现 |
+| 转换 | `sort_rows` | 排序（外部排序溢写） | 已实现 |
+| 转换 | `unique_sorted` | 去除重复记录（要求有序） | 已实现 |
+| 转换 | `value_mapper` | 值映射 | 已实现 |
+| 连接 | `merge_rows` / `sync_after_merge` | 合并记录 / 数据同步（含删除） | 已实现 |
 | 查询 | `stream_lookup` / `db_lookup` | 流查询 / 数据库查询 | TODO |
 | 输入 | `http_input` / `csv_input` | HTTP / CSV | TODO |
+
+**合并/同步语义**（与 Kettle Merge rows (diff) + Synchronize after merge 对齐）：
+
+* `merge_rows` 两个输入端口：`main`=参照（现有/旧数据）、`info`=对比（新数据），
+  两路字段布局必须一致且都已按合并键升序排序（各前置 `sort_rows`）。
+  输出 = 对比流字段 + 标志字段：`identical`（键值全同）/ `changed`（键同值异，发对比行）/
+  `new`（只在对比流）/ `deleted`（只在参照流，发参照行）。
+* `sync_after_merge` 按标志分流写目标表：`new`→插入、`changed`→更新、`deleted`→删除、
+  `identical`→原样透传不写库；一批一事务；标志缺失/未知、键为 NULL 的行进错误输出；
+  写库失败整批回滚、步骤失败（与 `update`/`delete` 一致）。
+  字段映射留空时自动映射除键与标志字段外的全部字段。
 
 ---
 
