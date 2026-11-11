@@ -497,7 +497,7 @@ type Dialect interface {
 * 密文格式 `v1:` + base64(nonce‖ciphertext)，AAD 绑定连接 ID，防止密文被挪到别的连接复用。
 * 密码永不回显前端；编辑时留空表示不改。
 * 作业 `notify` 凭据：保存时 `sealDocSecrets` 把明文 `secret` Seal 为 `secretCipher`，AAD = `etl/notify/` + 定义 ID + "/" + 节点 ID（后缀写回 `aadSuffix` 字段）。**运行时开密的 AAD 由运行中的定义 ID 推导**（`actions.DefIDEntry` 注入 Env，子作业绑子作业自身 ID），与文档 `aadSuffix` 不一致即拒绝——文档后缀只是兼容信息，不被信任。**复制定义时 `rekeyDocSecrets` 把密文按源 ID 解密、按副本 ID 重密封**（无密钥箱时剥离凭据，与导出行为一致）；导出包直接剥离 `secretCipher`/`aadSuffix`。
-* `install.sh`：`upgrade` 停机后自动快照 `mooncell.db`(含 WAL/SHM)+`mooncell-etl.key`+`config.toml` 到 `$PREFIX/backups/pre-upgrade-<ts>/`；`backup` 子命令可手工快照（从 `[database].path`/`[etl].key_file` 解析实际路径，自定义路径同样覆盖）。**数据库文件缺失时 `backup_console_data` 报警并返回非零**——`backup` 直接失败，`upgrade` 先 `systemctl start` 恢复已停服务再中止退出，不留停机现场。
+* `install.sh`：`upgrade` 停机后自动快照 `mooncell.db`(含 WAL/SHM)+`mooncell-etl.key`+`config.toml` 到 `$PREFIX/backups/pre-upgrade-<ts>/`；`backup` 子命令可手工快照（从 `[database].path`/`[etl].key_file` 解析实际路径，自定义路径同样覆盖）。**任何一步失败（数据库文件缺失、备份目录建不出、拷贝失败如磁盘写满）`backup_console_data` 都报警并返回非零**——`backup` 直接失败；`upgrade` 删除本次新建的残缺快照、先 `systemctl start` 恢复已停服务再中止退出，不留停机现场，也不带着残缺快照继续换二进制。函数会在 `if !` 条件里调用，bash 此时对函数体禁用 `set -e`，故每条命令显式检查返回值。
 
 ---
 

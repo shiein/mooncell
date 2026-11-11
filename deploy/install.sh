@@ -165,22 +165,29 @@ etl_key_path() {
 
 # backup_console_data 快照 Console 数据库(WAL/SHM 一并拷)与凭据密钥。
 # mooncell-etl.key 与数据库必须成对保管:密钥丢失后库内已保存的连接密码全部无法解密。
-# 数据库文件缺失时报警并返回非零(调用方据此中止,不把缺库的快照当成功备份)。
+# 任何一步失败(数据库缺失、目录建不出、拷贝失败如磁盘写满)都报警并返回非零,
+# 调用方据此中止——不把残缺快照当成功备份。
+# 注意:本函数会在 `if !` / `||` 条件里被调用,此时 bash 对函数体禁用 set -e,
+# 因此每条命令都必须显式检查返回值,不能依赖 errexit。
 backup_console_data() {
   local dest="$1" db key_file; db="$(console_db_path)"; key_file="$(etl_key_path)"
   if [ ! -f "$db" ]; then
     warn "数据库文件不存在:$db —— 备份不完整,已中止"
     return 1
   fi
-  mkdir -p "$dest"
+  mkdir -p "$dest" || { warn "无法创建备份目录:$dest"; return 1; }
   local f
   for f in "$db" "$db-wal" "$db-shm"; do
-    if [ -f "$f" ]; then cp -p "$f" "$dest/"; fi
+    if [ -f "$f" ]; then
+      cp -p "$f" "$dest/" || { warn "拷贝失败:$f → $dest(磁盘空间/权限?)"; return 1; }
+    fi
   done
-  cp -p "$CONSOLE_DIR/config.toml" "$dest/" 2>/dev/null || true
+  if [ -f "$CONSOLE_DIR/config.toml" ]; then
+    cp -p "$CONSOLE_DIR/config.toml" "$dest/" || { warn "拷贝失败:$CONSOLE_DIR/config.toml → $dest"; return 1; }
+  fi
   if [ -f "$key_file" ]; then
-    cp -p "$key_file" "$dest/mooncell-etl.key"
-    chmod 0600 "$dest/mooncell-etl.key" 2>/dev/null || true
+    cp -p "$key_file" "$dest/mooncell-etl.key" || { warn "拷贝凭据密钥失败:$key_file → $dest"; return 1; }
+    chmod 0600 "$dest/mooncell-etl.key" || { warn "无法收紧密钥副本权限:$dest/mooncell-etl.key"; return 1; }
   else
     warn "未发现凭据密钥 $key_file(数据集成尚未初始化);若已在用,请自行确认密钥随库备份"
   fi
@@ -192,7 +199,7 @@ do_backup() {
   local dest="${1:-$PREFIX/backups/$(date +%Y%m%d-%H%M%S)}"
   log "备份数据库与凭据密钥到 $dest"
   warn "运行中复制为近似快照;要求强一致请先 systemctl stop mooncell-console"
-  backup_console_data "$dest" || die "备份失败:数据库文件缺失,未生成快照"
+  backup_console_data "$dest" || die "备份失败(见上方原因),$dest 下的内容不完整,不可作为恢复依据"
   log "备份完成:$dest —— mooncell-etl.key 丢失则库内连接密码无法解密,请随库一同保管"
 }
 
@@ -204,8 +211,10 @@ do_upgrade() {
   systemctl stop mooncell-agent mooncell-console || true
   local snap="$PREFIX/backups/pre-upgrade-$(date +%Y%m%d-%H%M%S)"
   if ! backup_console_data "$snap"; then
-    # 快照失败不继续升级:先恢复已停掉的服务再退出,避免停机离场
-    warn "升级前快照失败,恢复服务后中止升级"
+    # 快照失败不继续升级:删掉本次新建的残缺快照(避免被误当成可用备份,磁盘写满时也顺带释放空间),
+    # 恢复已停掉的服务再退出,避免停机离场
+    warn "升级前快照失败,清理残缺快照并恢复服务后中止升级"
+    rm -rf "$snap"
     systemctl start mooncell-agent mooncell-console || true
     exit 1
   fi
