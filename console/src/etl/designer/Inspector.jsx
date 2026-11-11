@@ -193,6 +193,10 @@ function DefinitionInspector({ d }) {
           <textarea className="textarea" rows={2} value={d.meta.description || ''} placeholder="这个定义做什么、数据从哪来到哪去"
             onChange={(e) => d.setMeta({ description: e.target.value })} />
         </Field>
+        <Field label="文件夹" hint="工程列表按文件夹分组/筛选">
+          <input className="input" value={d.meta.folder || ''} placeholder="留空为未分组"
+            onChange={(e) => d.setMeta({ folder: e.target.value })} />
+        </Field>
         <div className="etl-insp-section">
           <div className="etl-insp-section-title">参数<span className="hint">{kind === 'workflow' ? '运行或调度时可覆盖' : '由作业传入，或手动运行时填写'}</span></div>
           <ListEditor

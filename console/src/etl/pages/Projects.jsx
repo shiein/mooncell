@@ -1,6 +1,6 @@
 // 工程：作业与转换列表、概览指标、新建/复制/删除/运行。
 import React from 'react';
-import { Icon, Btn, Seg, Spinner, Dialog, Field, toast, confirmDialog } from '../../components/primitives.jsx';
+import { Icon, Btn, Seg, Select, Spinner, Dialog, Field, toast, confirmDialog } from '../../components/primitives.jsx';
 import { etlApi } from '../api.js';
 import { RunStatus, Popover, usePopover, MenuItem } from '../components.jsx';
 import { fmtAgo, fmtCompact, fmtDateTime } from '../util.js';
@@ -44,6 +44,8 @@ export function ProjectsPage({ go }) {
   const [err, setErr] = React.useState('');
   const [filter, setFilter] = React.useState('all');
   const [kw, setKw] = React.useState('');
+  const [folderFilter, setFolderFilter] = React.useState(''); // '' 全部 / '__none__' 未分组 / 文件夹名
+  const [runSort, setRunSort] = React.useState(null); // null 默认 | 'bad' 失败优先 | 'good' 成功优先
   const [creating, setCreating] = React.useState(null); // 'workflow' | 'pipeline'
   const newMenu = usePopover();
   const load = React.useCallback(() => {
@@ -51,8 +53,32 @@ export function ProjectsPage({ go }) {
   }, []);
   React.useEffect(() => { load(); }, [load]);
 
-  const shown = (list || []).filter((d) => (filter === 'all' || d.kind === filter)
-    && (!kw || (d.name + d.description + d.folder).toLowerCase().includes(kw.toLowerCase())));
+  const folders = React.useMemo(() => {
+    const s = new Set();
+    (list || []).forEach((d) => { if (d.folder) s.add(d.folder); });
+    return [...s].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  }, [list]);
+
+  // 最近运行状态严重度：失败 > 中断 > 取消 > 运行中 > 排队 > 成功 > 从未运行
+  const runRank = (d) => ({ failed: 0, interrupted: 1, canceled: 2, running: 3, queued: 4, succeeded: 5 }[d.lastRunStatus] ?? 6);
+
+  const shown = React.useMemo(() => {
+    const rows = (list || []).filter((d) => (filter === 'all' || d.kind === filter)
+      && (folderFilter === '' || (folderFilter === '__none__' ? !d.folder : d.folder === folderFilter))
+      && (!kw || (d.name + d.description + d.folder).toLowerCase().includes(kw.toLowerCase())));
+    if (runSort) {
+      // 未运行始终垫底；bad 失败在前、good 成功在前，同级按运行时间倒序
+      const key = (d) => (!d.lastRunStatus ? 6 : runSort === 'bad' ? runRank(d) : 5 - runRank(d));
+      rows.sort((a, b) => (key(a) - key(b)) || (b.lastRunAt || 0) - (a.lastRunAt || 0));
+      return [{ folder: null, rows }];
+    }
+    // 默认：按文件夹分组（组内保持接口的 updated_at desc），空文件夹排最后
+    const by = new Map();
+    rows.forEach((d) => { const k = d.folder || ''; if (!by.has(k)) by.set(k, []); by.get(k).push(d); });
+    return [...by.entries()].sort((a, b) => (a[0] === '') - (b[0] === '') || a[0].localeCompare(b[0], 'zh-Hans-CN'))
+      .map(([folder, rs]) => ({ folder, rows: rs }));
+  }, [list, filter, kw, folderFilter, runSort]);
+  const shownCount = shown.reduce((a, g) => a + g.rows.length, 0);
 
   const run = async (d, e) => {
     e.stopPropagation();
@@ -68,6 +94,12 @@ export function ProjectsPage({ go }) {
       <Stats ov={ov} />
       <div className="etl-toolbar">
         <Seg value={filter} onChange={setFilter} options={[{ value: 'all', label: '全部' }, { value: 'workflow', label: '作业' }, { value: 'pipeline', label: '转换' }]} />
+        {folders.length ? (
+          <div style={{ width: 150 }}>
+            <Select value={folderFilter} onChange={setFolderFilter}
+              options={[{ value: '', label: '全部文件夹' }, { value: '__none__', label: '未分组' }, ...folders.map((f) => ({ value: f, label: f }))]} />
+          </div>
+        ) : null}
         <div className="etl-search">
           <Icon name="search" size={14} />
           <input className="input" placeholder="搜索名称或描述" value={kw} onChange={(e) => setKw(e.target.value)} />
@@ -88,11 +120,22 @@ export function ProjectsPage({ go }) {
           <table className="table etl-table">
             <thead>
               <tr>
-                <th>名称</th><th style={{ width: 90 }}>组件</th><th style={{ width: 170 }}>最近运行</th><th style={{ width: 150 }}>下次调度</th><th style={{ width: 150 }}>修改</th><th style={{ width: 120 }}></th>
+                <th>名称</th><th style={{ width: 90 }}>组件</th>
+                <th className="etl-sort-th" style={{ width: 170 }} title="点击按最近运行状态排序：失败优先 ↔ 成功优先"
+                  onClick={() => setRunSort((s) => (s === null ? 'bad' : s === 'bad' ? 'good' : null))}>
+                  最近运行
+                  <Icon name="chevronD" size={12}
+                    style={{ marginLeft: 4, verticalAlign: -1, opacity: runSort ? 1 : .35, transform: runSort === 'good' ? 'rotate(180deg)' : 'none', display: 'inline-block' }} />
+                </th>
+                <th style={{ width: 150 }}>下次调度</th><th style={{ width: 150 }}>修改</th><th style={{ width: 120 }}></th>
               </tr>
             </thead>
-            <tbody>
-              {shown.map((d) => (
+            {shown.map((g) => (
+            <tbody key={g.folder === null ? 'sorted' : g.folder || '__none__'}>
+              {g.folder !== null ? (
+                <tr className="etl-group"><td colSpan={6}><Icon name="folder" size={13} />{g.folder || '未分组'}<span className="etl-muted" style={{ marginLeft: 8, fontWeight: 400 }}>{g.rows.length}</span></td></tr>
+              ) : null}
+              {g.rows.map((d) => (
                 <tr key={d.id} className="etl-row" onClick={() => go.designer(d.id)}>
                   <td>
                     <div className="etl-name">
@@ -125,9 +168,10 @@ export function ProjectsPage({ go }) {
                 </tr>
               ))}
             </tbody>
+            ))}
           </table>
         ) : null}
-        {list && list.length && !shown.length ? <div className="etl-list-empty">没有匹配的项</div> : null}
+        {list && list.length && !shownCount ? <div className="etl-list-empty">没有匹配的项</div> : null}
       </div>
       {creating ? <CreateDialog kind={creating} onClose={() => setCreating(null)} onCreated={(d) => { setCreating(null); go.designer(d.id); }} /> : null}
     </div>
