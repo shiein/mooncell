@@ -1096,6 +1096,42 @@ func TestNodeCopies(t *testing.T) {
 	}
 }
 
+// R1 兼容：不含 copiesDistribution / settings.pushdown 的旧定义文档能解码，
+// 且行为符合新默认语义（副本轮询分发、下推关闭）。
+func TestNodeCopiesOldDocCompat(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE copied_old (seq INTEGER)`)
+	// 模拟存量定义：节点无 copiesDistribution、settings 无 pushdown 键
+	doc := []byte(`{
+		"format": 1, "kind": "pipeline",
+		"nodes": [
+			{"id": "gen", "type": "generate_rows", "name": "g", "config": {"limit": 999, "sequenceField": "seq"}},
+			{"id": "out", "type": "table_output", "name": "o", "copies": 3,
+			 "config": {"connection": "db", "table": "copied_old", "commitSize": 128,
+				"fields": [{"stream": "seq", "column": "seq"}]}}
+		],
+		"hops": [{"id": "h", "from": "gen", "fromPort": "main", "to": "out", "toPort": "main"}],
+		"settings": {"memoryBudgetMB": 64}
+	}`)
+	def, err := pipeline.Decode(doc)
+	if err != nil {
+		t.Fatalf("旧定义文档解码失败：%v", err)
+	}
+	if def.Settings.Pushdown {
+		t.Fatal("旧文档缺省 pushdown 应为关闭")
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if n := count(t, db, `SELECT count(*) FROM copied_old`); n != 999 {
+		t.Fatalf("旧文档缺省应按轮询分发写 999 行，实际 %d", n)
+	}
+	if n := count(t, db, `SELECT count(DISTINCT seq) FROM copied_old`); n != 999 {
+		t.Fatalf("seq 不应重复，实际 %d 个不同值", n)
+	}
+}
+
 // P3.18 副本编译校验：源步骤/越界拒绝，有状态步骤告警。
 func TestNodeCopiesValidation(t *testing.T) {
 	e, _ := env(t)
