@@ -279,6 +279,17 @@ async function hydrateData(seed) {
   }
 }
 
+// listApps:只拉当前用户可见的应用(轻量,供周期刷新);失败返回 null(调用方保留现有列表)。
+async function listApps() {
+  try {
+    const r = await fetch('/api/apps', { credentials: 'same-origin' });
+    if (!r.ok) return null;
+    return (await r.json()).apps || [];
+  } catch (e) {
+    return null;
+  }
+}
+
 // 审计倒序分页:hydrate 只带最近一窗(auditHydrateLimit),更早记录经此端点「加载更多」。
 // 返回 { items, total };后端不可达返回 null(调用方回退到 hydrate 已加载的 store.audit)。
 async function listAuditPage(offset, limit) {
@@ -535,7 +546,7 @@ export {
   listAgentBinaries, uploadAgentBinary, updateAgentNode,
   uploadCabinetFile, removeCabinetFile, setCabinetFilePublic, getPubLimits,
   getAgentCapabilities, getAgentSystem, getAgentPing, getAgentMetrics, precheckApp, getAppStatus, setAppLifecycle,
-  hydrateData, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
+  hydrateData, listApps, listAuditPage, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, deployViaAgentStream,
   listAgentBackups, restoreViaAgentStream, streamAppLogs,
   getConsoleInfo, consoleSelfUpdate,
 };

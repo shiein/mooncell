@@ -49,6 +49,29 @@ test('登录态在刷新后保持(httpOnly 会话)', async ({ page }) => {
   await expect(page.getByRole('button', { name: '总览', exact: true })).toBeVisible();
 });
 
+// 回归：会话检查 effect 曾因依赖 features 形成死循环（每秒上千次 /api/session）。
+test('登录与刷新后 /api/session 不会循环请求', async ({ page }) => {
+  let n = 0;
+  page.on('request', (r) => { if (new URL(r.url()).pathname === '/api/session') n += 1; });
+  await login(page);
+  n = 0;
+  await page.waitForTimeout(3000);
+  expect(n).toBeLessThanOrEqual(2);
+  await page.reload();
+  await expect(page.getByRole('button', { name: '总览', exact: true })).toBeVisible();
+  n = 0;
+  await page.waitForTimeout(3000);
+  expect(n).toBeLessThanOrEqual(2);
+});
+
+// Agent 信息不得出现示例数据（曾写死 v1.4.2 / 192.168.10.21:9100）
+test('侧栏 Agent 卡片显示真实地址而非示例数据', async ({ page }) => {
+  await login(page);
+  await expect(page.getByText('192.168.10.21:9100')).toHaveCount(0);
+  await expect(page.getByText('v1.4.2')).toHaveCount(0);
+  await expect(page.locator('aside').getByText(/127\.0\.0\.1:9111/)).toBeVisible({ timeout: 8000 });
+});
+
 test('Agent token 错误不会被误判为 Console 会话过期', async ({ page }) => {
   await login(page);
   const created = await page.request.post('/api/agents', {

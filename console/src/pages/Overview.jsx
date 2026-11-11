@@ -1,6 +1,6 @@
 // Mooncell — 总览(系统监控)/ 文件柜 / 审计日志
 import React from 'react';
-import { useMC, AGENT, genSeries, timeAgo, fmtTime, fmtBytes, fmtMB, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
+import { useMC, auditTone, timeAgo, fmtTime, fmtBytes, fmtMB, tsDir, MC_NOW, MC_DAY } from '../lib/data.js';
 import { Btn, Icon, Badge, Progress, Sparkline, Switch, CopyChip, copyText, EmptyState, Select, Spinner, toast } from '../components/primitives.jsx';
 import { PageHead } from '../components/Shell.jsx';
 import { useAgents } from '../lib/agent.js';
@@ -20,47 +20,40 @@ function StatCard({ label, value, unit, series, color, extra }) {
 }
 
 // AgentBlock — 单台 Agent 的分区块:资源水位(CPU/内存/磁盘)+ 能力清单 + 该机名下应用健康。
-// 每块自管 CPU/内存曲线:有真实读数则追加,离线/探测中维持模拟动画(纯前端 dev 也有动效)。
+// 只展示真实读数:曲线来自巡检留存的历史 + 实时轮询追加;Agent 不可达时显示最后一次真实读数及其时间,
+// 没有任何读数则显示「—」。绝不生成随机曲线或示例数值。
 function AgentBlock({ agent, apps }) {
   const store = useMC();
   const { name, addr, system, caps, online } = agent;
-  const [cpuS, setCpuS] = React.useState(() => genSeries(AGENT.cpu, 9));
-  const [memS, setMemS] = React.useState(() => genSeries(AGENT.mem, 4));
+  const [hist, setHist] = React.useState([]); // [{ts, cpu, mem, disk}]
 
-  // 用巡检留存的真实历史初始化曲线(取最近 40 点);无数据则保持 mock 动画。之后由 system 轮询继续追加。
   React.useEffect(() => {
     let alive = true;
     getAgentMetrics(agent.id, 60).then((pts) => {
       if (!alive || !pts || !pts.length) return;
-      const last = pts.slice(-40);
-      setCpuS(last.map((p) => Math.round(p.cpu)));
-      setMemS(last.map((p) => Math.round(p.mem)));
+      setHist((cur) => (cur.length ? cur : pts.slice(-40)));
     });
     return () => { alive = false; };
   }, [agent.id]);
 
   React.useEffect(() => {
     if (!system) return;
-    setCpuS((s) => [...s.slice(1), Math.round(system.cpuPercent)]);
-    setMemS((s) => [...s.slice(1), Math.round(system.memPercent)]);
+    setHist((h) => [...h.slice(-39), {
+      ts: Date.now(), cpu: system.cpuPercent, mem: system.memPercent, disk: system.diskPercent,
+    }]);
   }, [system]);
 
-  React.useEffect(() => {
-    if (online) return;
-    const iv = setInterval(() => {
-      setCpuS((s) => [...s.slice(1), Math.max(3, Math.min(95, s[s.length - 1] + (Math.random() - 0.5) * 14)) | 0]);
-      setMemS((s) => [...s.slice(1), Math.max(20, Math.min(92, s[s.length - 1] + (Math.random() - 0.5) * 5)) | 0]);
-    }, 2000);
-    return () => clearInterval(iv);
-  }, [online]);
-
-  const cpu = cpuS[cpuS.length - 1], mem = memS[memS.length - 1];
-  const disk = system ? Math.round(system.diskPercent) : AGENT.disk;
-  const diskUsed = system ? system.diskUsedGB : AGENT.diskDetail.used;
-  const diskTotal = system ? system.diskTotalGB : AGENT.diskDetail.total;
-  const memLabel = system
+  const last = hist.length ? hist[hist.length - 1] : null;
+  const live = online === true && !!system;
+  const cpuS = hist.map((p) => Math.round(p.cpu));
+  const memS = hist.map((p) => Math.round(p.mem));
+  const cpu = last ? Math.round(last.cpu) : "—";
+  const mem = last ? Math.round(last.mem) : "—";
+  const disk = live ? Math.round(system.diskPercent) : (last && last.disk != null ? Math.round(last.disk) : null);
+  const diskDetail = live && system.diskTotalGB ? ` · ${system.diskUsedGB}/${system.diskTotalGB} GB` : "";
+  const memLabel = live
     ? `${(system.memUsedMB / 1024).toFixed(1)} GB / ${Math.round(system.memTotalMB / 1024)} GB`
-    : "—";
+    : last ? `最后读数 ${timeAgo(last.ts)}` : "暂无读数";
   const failed = apps.filter((a) => a.status === "failed");
   const running = apps.filter((a) => a.status === "running" || a.status === "static").length;
   const stopped = apps.filter((a) => a.status === "stopped").length;
@@ -71,23 +64,27 @@ function AgentBlock({ agent, apps }) {
         <Icon name="server" size={15} style={{ color: "var(--primary)" }} />
         <span style={{ fontSize: 14, fontWeight: 700 }}>{name}</span>
         {addr ? <span className="mono" style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{addr}</span> : null}
-        {online === false ? <Badge tone="error" dot style={{ marginLeft: "auto" }}>离线 · 显示缓存</Badge>
+        {online === false ? <Badge tone="error" dot style={{ marginLeft: "auto" }}>{last ? `不可达 · 显示 ${timeAgo(last.ts)}的读数` : "不可达 · 无读数"}</Badge>
           : online ? <Badge tone="success" dot style={{ marginLeft: "auto" }}>在线</Badge>
             : <span style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted-fg)" }}>探测中…</span>}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-        <StatCard label="CPU" value={cpu} unit="%" series={cpuS} color="var(--info)" />
-        <StatCard label="内存" value={mem} unit="%" series={memS} color="var(--cyan)"
+        <StatCard label="CPU" value={cpu} unit={last ? "%" : ""} series={cpuS} color="var(--info)" />
+        <StatCard label="内存" value={mem} unit={last ? "%" : ""} series={memS} color="var(--cyan)"
           extra={<div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>{memLabel}</div>} />
         <div className="card card-pad" style={{ display: "flex", flexDirection: "column", gap: 8, boxShadow: "none" }}>
           <div style={{ display: "flex", alignItems: "center" }}>
             <span style={{ fontSize: 12.5, color: "var(--muted-fg)", fontWeight: 500 }}>磁盘水位</span>
-            {disk > 85 ? <Badge tone="error" style={{ marginLeft: "auto" }}>禁止部署</Badge> :
-              disk > 70 ? <Badge tone="warn" style={{ marginLeft: "auto" }}>接近阈值</Badge> : null}
+            {disk != null && disk > 85 ? <Badge tone="error" style={{ marginLeft: "auto" }}>禁止部署</Badge> :
+              disk != null && disk > 70 ? <Badge tone="warn" style={{ marginLeft: "auto" }}>接近阈值</Badge> : null}
           </div>
-          <div className="stat-num">{disk}<span style={{ fontSize: 14, color: "var(--muted-fg)", fontWeight: 500 }}> % · {diskUsed}/{diskTotal} GB</span></div>
-          <Progress value={disk} height={7} color={disk > 85 ? "var(--error)" : disk > 70 ? "var(--warn)" : "var(--success)"} />
+          {disk != null ? (
+            <React.Fragment>
+              <div className="stat-num">{disk}<span style={{ fontSize: 14, color: "var(--muted-fg)", fontWeight: 500 }}> %{diskDetail}</span></div>
+              <Progress value={disk} height={7} color={disk > 85 ? "var(--error)" : disk > 70 ? "var(--warn)" : "var(--success)"} />
+            </React.Fragment>
+          ) : <div className="stat-num" style={{ color: "var(--muted-fg)" }}>—</div>}
         </div>
       </div>
 
@@ -96,7 +93,12 @@ function AgentBlock({ agent, apps }) {
         <div>
           <div style={{ fontSize: 12.5, color: "var(--muted-fg)", fontWeight: 600, marginBottom: 8 }}>能力清单</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
-            {caps.map((c) => (
+            {!caps ? (
+              <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--muted-fg)" }}>
+                {online === false ? "Agent 不可达，能力未知" : "正在读取能力清单…"}
+              </div>
+            ) : null}
+            {(caps || []).map((c) => (
               <div key={c.key} className="card" style={{ padding: "6px 9px", boxShadow: "none", background: c.ok ? "var(--bg)" : "var(--muted)", opacity: c.ok ? 1 : .55 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600 }}>
                   <Icon name={c.ok ? "check" : "x"} size={11} style={{ color: c.ok ? "var(--success)" : "var(--muted-fg)" }} />{c.label}
@@ -191,7 +193,7 @@ function OverviewPage() {
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "none" }}>
                   <span style={{
                     width: 8, height: 8, borderRadius: "50%", marginTop: 5,
-                    background: a.result.includes("失败") ? "var(--error)" : "var(--success)",
+                    background: `var(--${auditTone(a.result)})`,
                   }}></span>
                   {i < 6 ? <span style={{ width: 1.5, flex: 1, background: "var(--border)", marginTop: 4 }}></span> : null}
                 </div>
@@ -289,14 +291,14 @@ function CabinetPage() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10 }}>
-          <span style={{ fontSize: 12.5, color: "var(--muted-fg)" }}>存储期限</span>
-          <Select
+          <span style={{ fontSize: 12.5, color: "var(--muted-fg)", whiteSpace: "nowrap", flex: "none" }}>存储期限</span>
+          <div style={{ width: 220, flex: "none" }}><Select
             aria-label="存储期限"
             value={expireDays}
             onChange={setExpireDays}
             disabled={!canWrite || uploading}
             options={CABINET_EXPIRY_OPTIONS}
-          />
+          /></div>
         </div>
         {zone}
         <div className="card" style={{ overflow: "hidden" }}>
@@ -397,7 +399,7 @@ function AuditPage() {
                 <td style={{ fontSize: 12.5, fontWeight: 600 }}>{a.user}</td>
                 <td><Badge tone={a.action === "部署" ? "primary" : a.action.includes("删除") ? "error" : a.action === "回滚" || a.action.includes("还原") ? "warn" : "default"}>{a.action}</Badge></td>
                 <td style={{ fontSize: 12.5 }}>{a.target}</td>
-                <td><Badge tone={a.result.includes("失败") ? "error" : "success"} dot>{a.result}</Badge></td>
+                <td><Badge tone={auditTone(a.result)} dot>{a.result}</Badge></td>
                 <td><span className="mono" style={{ fontSize: 12, color: "var(--muted-fg)" }}>{a.ip || "—"}</span></td>
               </tr>
             ))}

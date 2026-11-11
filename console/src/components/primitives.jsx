@@ -220,6 +220,8 @@ function Progress({ value, color, height = 8 }) {
 }
 
 function Sparkline({ data, color = "var(--primary)", width = 120, height = 32 }) {
+  // 少于 2 个点画不出线（且会除零产生 NaN）：留出占位，不编造数据
+  if (!data || data.length < 2) return <svg width={width} height={height} style={{ display: "block" }} aria-hidden="true" />;
   const max = 100;
   const pts = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - (v / max) * height}`).join(" ");
   return (

@@ -1,8 +1,7 @@
 // Mooncell — 布局 Shell:侧边栏 + 顶栏
 import React from 'react';
 import { Icon, Btn, Badge, Progress } from './primitives.jsx';
-import { AGENT } from '../lib/data.js';
-import { useAgent } from '../lib/agent.js';
+import { useAgent, useAgentNode } from '../lib/agent.js';
 
 const NAV_ITEMS = [
   { id: "overview", label: "总览", en: "Overview", icon: "gauge", adminOnly: true },
@@ -49,6 +48,8 @@ function Sidebar({ page, onNav, user, role, onLogout, agent, features }) {
   const online = agent ? agent.online : null;
   const dotColor = online === false ? "var(--error)" : online === null ? "var(--muted-fg)" : "var(--success)";
   const disk = agent && agent.system ? Math.round(agent.system.diskPercent) : null;
+  // 名称/地址取自 /api/agents 的内置默认行（Console 配置的真实地址），版本取自 Agent ping；取不到显示 —
+  const agentNode = useAgentNode("default", role === "admin");
   return (
     <aside className="sidebar">
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 8px 14px" }}>
@@ -79,10 +80,11 @@ function Sidebar({ page, onNav, user, role, onLogout, agent, features }) {
       {role === "admin" ? <div className="card" style={{ padding: "10px 12px", marginBottom: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7, whiteSpace: "nowrap" }}>
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, flex: "none" }} className={online ? "pulse-dot" : ""}></span>
-          <span style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{AGENT.name}</span>
-          <span style={{ fontSize: 10.5, color: "var(--muted-fg)", marginLeft: "auto" }} className="mono">{AGENT.version}</span>
+          <span style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{agentNode?.name || "本机 Agent"}</span>
+          <span style={{ fontSize: 10.5, color: "var(--muted-fg)", marginLeft: "auto" }} className="mono">{agent?.ping?.version || "—"}</span>
         </div>
-        <div className="mono" style={{ fontSize: 10.5, color: "var(--muted-fg)", marginBottom: 8 }}>{AGENT.host}</div>
+        <div className="mono" style={{ fontSize: 10.5, color: "var(--muted-fg)", marginBottom: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          title={agentNode?.addr || ""}>{agentNode?.addr || "—"}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
           <span style={{ fontSize: 10.5, color: "var(--muted-fg)", flex: "none" }}>磁盘</span>
           {disk === null ? (

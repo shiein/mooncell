@@ -1,6 +1,6 @@
 // Mooncell — 部署流水线:计划构建 + 模拟引擎 + 视图 + 部署/还原对话框
 import React from 'react';
-import { useMC, tsDir, DEPLOY_TYPES, artifactNameOK, isProcessType, isRealType, nextVersion, randSha, fmtClock, fmtTime } from '../lib/data.js';
+import { useMC, tsDir, DEPLOY_TYPES, artifactNameOK, isProcessType, isRealType, nextVersion, randSha, fmtClock, fmtTime, fmtBytes } from '../lib/data.js';
 import { Dialog, Btn, Field, Switch, Progress, Badge, Icon, Spinner, toast } from './primitives.jsx';
 import { deployViaAgentStream, restoreViaAgentStream } from '../lib/api.js';
 
@@ -318,6 +318,28 @@ function useUploadSim() {
   return { phase, prog, speed, file, begin, reset };
 }
 
+// 与 lib/api.js 的 CHUNK_THRESHOLD 一致：超过即分块上传并回报进度
+const CHUNK_THRESHOLD_BYTES = 16 * 1024 * 1024;
+
+// 真实上传进度：分块上传有逐块回报；小文件随表单一次提交，浏览器不回报进度，只显示「上传中」。
+function UploadProgress({ upload }) {
+  const pct = upload.total ? Math.min(100, (upload.sent / upload.total) * 100) : 0;
+  return (
+    <div className="card" style={{ padding: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
+        <Spinner size={14} />
+        <span style={{ fontWeight: 600 }}>正在上传制品到 Console</span>
+        <span className="mono" style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted-fg)" }}>
+          {upload.chunked
+            ? `${fmtBytes(upload.sent)} / ${fmtBytes(upload.total)}${upload.speed > 0 ? ` · ${fmtBytes(Math.round(upload.speed))}/s` : ""}`
+            : `${fmtBytes(upload.total)} · 上传中`}
+        </span>
+      </div>
+      {upload.chunked ? <div style={{ marginTop: 10 }}><Progress value={pct} height={6} /></div> : null}
+    </div>
+  );
+}
+
 // ---------- 部署对话框 ----------
 function DeployDialog({ app, open, onClose }) {
   const store = useMC();
@@ -357,25 +379,46 @@ function DeployDialog({ app, open, onClose }) {
       toast(`「${f.name}」不是 ${DEPLOY_TYPES[app.type].label} 支持的制品类型(需 ${DEPLOY_TYPES[app.type].accepts.join(" / ")})`, { tone: "error", icon: "alert" });
       return;
     }
+    // 真实文件不播放模拟上传：真正的上传在「开始部署」后进行，进度由 onUpload 实时回报。
     setRealFile(f);
-    const mb = Math.max(1, f.size / 1048576);
-    up.begin({ name: f.name, sizeMB: mb, size: mb < 1024 ? mb.toFixed(1) + " MB" : (mb / 1024).toFixed(2) + " GB" });
   };
 
   const startDeploy = async () => {
     if (realTypeApp && !realFile) return; // 真实应用必须有真实文件,绝不走模拟持久化假状态
     if (isReal) {
-      setStage("pipeline"); setReal({ streaming: true, steps: [] });
+      const started = Date.now();
+      const chunked = realFile.size > CHUNK_THRESHOLD_BYTES;
+      setStage("pipeline");
+      setReal({ streaming: true, steps: [], upload: { sent: 0, total: realFile.size, speed: 0, chunked, done: false } });
       // 前端只提交 制品 + version + releaseId;Agent 配置由 Console 据已存应用配置服务端生成。
       const releaseId = (crypto.randomUUID && crypto.randomUUID()) || ("rel-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+      let lastAt = Date.now();
+      let lastSent = 0;
+      const onUpload = (sent, total) => {
+        const now = Date.now();
+        const dt = (now - lastAt) / 1000;
+        const speed = dt > 0 ? (sent - lastSent) / dt : 0; // 真实增量计算，不估算
+        lastAt = now;
+        lastSent = sent;
+        setReal((prev) => (prev && prev.streaming ? { ...prev, upload: { ...prev.upload, sent, total, speed, done: sent >= total } } : prev));
+      };
       const res = await deployViaAgentStream(app.id, version, releaseId, realFile, (type, data) => {
-        if (type === "step") setReal((prev) => ({ streaming: true, steps: [...((prev && prev.steps) || []), data] }));
-      });
+        if (type === "step") {
+          setReal((prev) => ({
+            ...(prev || {}), streaming: true,
+            upload: prev && prev.upload ? { ...prev.upload, done: true } : prev && prev.upload,
+            steps: [...((prev && prev.steps) || []), data],
+          }));
+        }
+      }, onUpload);
       // Agent 可能已在部署前生成备份；无论最终成功、回滚还是流失败，都重新读取权威列表。
       store.refreshBackups(app.id);
       if (res.error) { setReal({ error: res.error }); return; }
       setReal(res);
-      store.finishDeploy(app, { version: res.version || version, size: up.file ? up.file.size : "—", result: res.result || "failed", real: true });
+      store.finishDeploy(app, {
+        version: res.version || version, size: fmtBytes(realFile.size), result: res.result || "failed", real: true,
+        duration: `${Math.max(1, Math.round((Date.now() - started) / 1000))}s`,
+      });
       return;
     }
     const plan = makeDeployPlan(app, { fileName: up.file.name, size: up.file.size, sha, simulateFail });
@@ -399,7 +442,7 @@ function DeployDialog({ app, open, onClose }) {
       foot={stage === "upload" ? (
         <React.Fragment>
           <Btn variant="ghost" onClick={onClose}>取消</Btn>
-          <Btn variant="primary" icon="zap" disabled={up.phase !== "ready" || (realTypeApp && !realFile)} onClick={startDeploy}>{isReal ? "开始部署(真机)" : "开始部署"}</Btn>
+          <Btn variant="primary" icon="zap" disabled={realTypeApp ? !realFile : up.phase !== "ready"} onClick={startDeploy}>{isReal ? "开始部署(真机)" : "开始部署"}</Btn>
         </React.Fragment>
       ) : (
         <React.Fragment>
@@ -410,7 +453,7 @@ function DeployDialog({ app, open, onClose }) {
 
       {stage === "upload" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {up.phase === "idle" ? (
+          {up.phase === "idle" && !realFile ? (
             <div className="upload-zone" data-drag={String(drag)}
               onClick={() => inputRef.current && inputRef.current.click()}
               onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
@@ -433,7 +476,22 @@ function DeployDialog({ app, open, onClose }) {
             </div>
           ) : null}
 
-          {up.phase !== "idle" ? (
+          {realFile ? (
+            <div className="card" style={{ padding: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Icon name="fileText" size={18} style={{ color: "var(--primary)" }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{realFile.name}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted-fg)" }}>
+                    {fmtBytes(realFile.size)} · {realFile.size > CHUNK_THRESHOLD_BYTES ? "分块上传，可断点续传" : "单次上传"} · 开始部署后上传，sha256 由服务端校验
+                  </div>
+                </div>
+                <Btn size="sm" variant="ghost" onClick={() => setRealFile(null)}>重新选择</Btn>
+              </div>
+            </div>
+          ) : null}
+
+          {!realFile && up.phase !== "idle" ? (
             <div className="card" style={{ padding: 14 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <Icon name="fileText" size={18} style={{ color: "var(--primary)" }} />
@@ -506,6 +564,7 @@ function DeployDialog({ app, open, onClose }) {
                   </div>
                 </div>
               ) : null}
+              {real.upload && !real.upload.done ? <UploadProgress upload={real.upload} /> : null}
               <PipelineView pipe={realToPipe(real)} />
             </React.Fragment>
           )}

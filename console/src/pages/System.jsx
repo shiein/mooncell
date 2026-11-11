@@ -133,7 +133,9 @@ function ConsoleUpgradeCard({ info, version, setVersion, fileRef, busy, onSubmit
             <input ref={fileRef} type="file" className="input" style={{ fontSize: 12, paddingTop: 6 }} />
           </Field>
         </div>
-        <Btn variant="primary" icon="upload" disabled={busy} onClick={onSubmit}>{busy ? <Spinner size={12} /> : "上传并升级"}</Btn>
+        <Btn variant="primary" icon="upload" disabled={busy || !!(info && info.os && !info.os.startsWith("linux/"))}
+          title={info && info.os && !info.os.startsWith("linux/") ? "非 Linux 环境不支持自更新" : undefined}
+          onClick={onSubmit}>{busy ? <Spinner size={12} /> : "上传并升级"}</Btn>
       </div>
 
       <div style={{ fontSize: 11.5, color: "var(--muted-fg)", marginTop: 10, lineHeight: 1.6 }}>

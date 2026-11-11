@@ -42,6 +42,14 @@ const isProcessType = (t) => PROCESS_TYPES.includes(t);
 const REAL_TYPES = [...PROCESS_TYPES, "static-nginx", "tomcat-war", "tongweb-war"];
 const isRealType = (t) => REAL_TYPES.includes(t);
 
+// auditTone 审计结果 → 徽章色调。被拒绝/失败/错误/锁定都不是「成功」，不能显示绿色。
+function auditTone(result) {
+  const s = String(result || "");
+  if (/失败|拒绝|错误|异常|锁定|不可达|鉴权|DENIED|ERROR|READ_ONLY|DANGEROUS/i.test(s)) return "error";
+  if (/回滚|未确认|取消|CANCELED|超时/i.test(s)) return "warn";
+  return "success";
+}
+
 // fmtBytes 把字节数格式化为人类可读;非数字原样返回(兼容旧的字符串 size)。
 function fmtBytes(n) {
   if (typeof n !== "number") return n || "—";
@@ -238,30 +246,6 @@ const INITIAL_AUDIT = [
   { id: "a12", time: ago(8 * DAY), user: "li.na", action: "部署", target: "数据查询平台后端 v2.3.8", result: "失败·已自动回滚", ip: "192.168.10.88" },
 ];
 
-const AGENT = {
-  name: "本机 Agent", host: "192.168.10.21:9100", version: "v1.4.2",
-  os: "UOS Server 20 · arm64", uptime: "37d 14h", token: "mc_ag_7f3e····9d21",
-  caps: [
-    { key: "systemd", label: "systemd", ok: true, ver: "249" },
-    { key: "java", label: "Java", ok: true, ver: "11.0.21" },
-    { key: "pm2", label: "pm2", ok: true, ver: "5.3.0" },
-    { key: "nginx", label: "nginx", ok: true, ver: "1.24.0" },
-    { key: "python", label: "Python", ok: true, ver: "3.9.6" },
-    { key: "node", label: "Node", ok: true, ver: "18.19.0" },
-    { key: "tomcat", label: "Tomcat", ok: false, ver: "未检测到" },
-  ],
-  cpu: 23, mem: 58, disk: 64,
-  diskDetail: { used: 318, total: 500, backups: 42, cabinet: 18, logs: 36 },
-};
-
-function genSeries(base, jitter, n = 40) {
-  const arr = []; let v = base;
-  for (let i = 0; i < n; i++) {
-    v = Math.max(2, Math.min(96, v + (Math.random() - 0.5) * jitter * 2));
-    arr.push(Math.round(v));
-  }
-  return arr;
-}
 
 // ---------- 运行日志生成 ----------
 const LOG_GEN = {
@@ -351,8 +335,8 @@ function nextVersion(v) {
 }
 
 export {
-  MCStore, useMC, DEPLOY_TYPES, artifactNameOK, isProcessType, isRealType, fmtBytes, fmtMB, APP_STATUS, REL_STATUS, STAGES, stageOf,
+  MCStore, useMC, auditTone, DEPLOY_TYPES, artifactNameOK, isProcessType, isRealType, fmtBytes, fmtMB, APP_STATUS, REL_STATUS, STAGES, stageOf,
   INITIAL_APPS, INITIAL_RELEASES, INITIAL_BACKUPS, INITIAL_CABINET, INITIAL_AUDIT,
-  AGENT, genSeries, genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
+  genLogLine, fmtTime, fmtClock, timeAgo, randSha, nextVersion, tsDir,
   NOW as MC_NOW, MIN as MC_MIN, HOUR as MC_HOUR, DAY as MC_DAY,
 };

@@ -1,73 +1,133 @@
 // Mooncell — 实时 Agent 状态 hook
-// 经 Console 代理拉取真实 Agent 的能力清单与资源水位;任一失败即回退到 mock 并标记离线,
-// 保证 Agent 未运行 / 纯前端 dev 时页面仍 1:1 可用。
+//
+// 每台 Agent 只有一个共享轮询器（按 id 引用计数）：侧栏、总览等多个组件订阅同一台 Agent 时
+// 不会各自发请求。页面隐藏时暂停，重新可见时立即补拉一次。
+//
+// 取不到就是取不到：caps/system/ping 默认 null，界面显示「未知 / 不可达」，绝不回退示例数据。
 import React from 'react';
-import { AGENT } from './data.js';
 import { getAgentCapabilities, getAgentSystem, getAgentPing, listAgentNodes } from './api.js';
 
-function useAgent(enabled = true) {
-  const [caps, setCaps] = React.useState(AGENT.caps); // 默认 mock,取到真实后覆盖
-  const [system, setSystem] = React.useState(null);   // {cpuPercent, memPercent, disk...}
-  const [online, setOnline] = React.useState(null);   // null=探测中, true/false
+const POLL_MS = 2500;
+const pollers = new Map(); // id -> { subs:Set, state, timer, inflight }
 
+function emptyState() {
+  return { system: null, online: null, caps: null, ping: null, lastOkAt: 0 };
+}
+
+function setState(p, patch) {
+  p.state = { ...p.state, ...patch };
+  for (const cb of p.subs) cb(p.state);
+}
+
+async function refreshMeta(id, p) {
+  const [ping, c] = await Promise.all([getAgentPing(id), getAgentCapabilities(id)]);
+  if (pollers.get(id) !== p) return;
+  setState(p, {
+    ping: ping && ping.ok ? { version: ping.version || '', os: ping.os || '', host: ping.agent || '' } : p.state.ping,
+    caps: c && c.capabilities ? c.capabilities : p.state.caps,
+    online: ping ? !!ping.ok : false,
+  });
+}
+
+async function pollOnce(id, p) {
+  if (p.inflight || (typeof document !== 'undefined' && document.hidden)) return;
+  p.inflight = true;
+  try {
+    const s = await getAgentSystem(id);
+    if (pollers.get(id) !== p) return;
+    const wasOffline = p.state.online === false;
+    if (s) {
+      setState(p, { system: s, online: true, lastOkAt: Date.now() });
+      // 从离线恢复：版本/能力可能已变（例如刚自更新），补拉一次
+      if (wasOffline || !p.state.caps) refreshMeta(id, p);
+    } else {
+      setState(p, { online: false });
+    }
+  } finally {
+    p.inflight = false;
+  }
+}
+
+function subscribe(id, cb) {
+  let p = pollers.get(id);
+  if (!p) {
+    p = { subs: new Set(), state: emptyState(), timer: null, inflight: false };
+    pollers.set(id, p);
+    refreshMeta(id, p);
+    pollOnce(id, p);
+    p.timer = setInterval(() => pollOnce(id, p), POLL_MS);
+  }
+  p.subs.add(cb);
+  cb(p.state);
+  return () => {
+    p.subs.delete(cb);
+    if (p.subs.size === 0) {
+      clearInterval(p.timer);
+      pollers.delete(id);
+    }
+  };
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    for (const [id, p] of pollers) pollOnce(id, p);
+  });
+}
+
+// useAgent — 内置默认 Agent 的状态（侧栏/顶栏）。enabled=false 时不发任何请求（普通用户）。
+function useAgent(enabled = true) {
+  const [state, setLocal] = React.useState(emptyState);
   React.useEffect(() => {
     if (!enabled) {
-      setSystem(null);
-      setOnline(null);
-      return;
+      setLocal(emptyState());
+      return undefined;
     }
-    let alive = true;
-    Promise.all([getAgentPing(), getAgentCapabilities()]).then(([ping, c]) => {
-      if (!alive) return;
-      setOnline(!!ping);
-      if (c && c.capabilities) setCaps(c.capabilities);
-    });
-    const poll = () => getAgentSystem().then((s) => {
-      if (!alive) return;
-      if (s) { setSystem(s); setOnline(true); } else setOnline(false);
-    });
-    poll();
-    const iv = setInterval(poll, 2500);
-    return () => { alive = false; clearInterval(iv); };
+    return subscribe('default', setLocal);
   }, [enabled]);
-
-  return { caps, system, online };
+  return state;
 }
 
-// useAgents — 多 Agent 总览:拉取已注册的全部 Agent,对每台并发轮询资源水位 + 能力 + 在线状态。
-// 返回 null(加载中)或 [{ id, name, addr, system, caps, online }]。任一台失败只标记该台 online=false,
-// 不拖累其它(各自独立 fetch)。Agent 列表拉不到时退化为内置 default 一台,保证纯前端 dev 仍可用。
+// useAgents — 多 Agent 总览：拉取已注册的全部 Agent，逐台订阅共享轮询器。
+// 返回 null（加载中）或 [{ id, name, addr, system, caps, online, ping, lastOkAt }]。
+// 列表拉不到时以内置 default 一台展示其真实状态，并标记 listError。
 function useAgents() {
-  const [agents, setAgents] = React.useState(null);
-
+  const [nodes, setNodes] = React.useState(null);
+  const [states, setStates] = React.useState({});
   React.useEffect(() => {
     let alive = true;
-    let iv = null;
-    const patch = (id, p) => setAgents((prev) => prev ? prev.map((a) => a.id === id ? { ...a, ...p } : a) : prev);
-
-    listAgentNodes().then((nodes) => {
+    const unsubs = [];
+    listAgentNodes().then((list) => {
       if (!alive) return;
-      const list = (nodes && nodes.length) ? nodes : [{ id: 'default', name: '本机 Agent' }];
-      setAgents(list.map((n) => ({ id: n.id, name: n.name, addr: n.addr || '', system: null, caps: AGENT.caps, online: null })));
-
-      // 能力清单只需拉一次(不随资源轮询)
-      list.forEach((n) => getAgentCapabilities(n.id).then((c) => {
-        if (alive && c && c.capabilities) patch(n.id, { caps: c.capabilities });
-      }));
-
-      const poll = () => list.forEach((n) => getAgentSystem(n.id).then((s) => {
-        if (!alive) return;
-        if (s) patch(n.id, { system: s, online: true });
-        else patch(n.id, { online: false });
-      }));
-      poll();
-      iv = setInterval(poll, 2500);
+      const ns = list && list.length ? list : [{ id: 'default', name: '本机 Agent', addr: '', listError: !list }];
+      setNodes(ns);
+      for (const n of ns) {
+        unsubs.push(subscribe(n.id, (st) => setStates((prev) => ({ ...prev, [n.id]: st }))));
+      }
     });
-
-    return () => { alive = false; if (iv) clearInterval(iv); };
+    return () => {
+      alive = false;
+      unsubs.forEach((u) => u());
+    };
   }, []);
-
-  return agents;
+  if (!nodes) return null;
+  return nodes.map((n) => ({
+    id: n.id, name: n.name, addr: n.addr || '', listError: !!n.listError, ...(states[n.id] || emptyState()),
+  }));
 }
 
-export { useAgent, useAgents };
+// useAgentNode — 单台 Agent 的注册信息（名称/地址），侧栏展示用；只在 enabled 时请求一次。
+function useAgentNode(id, enabled) {
+  const [node, setNode] = React.useState(null);
+  React.useEffect(() => {
+    if (!enabled) return undefined;
+    let alive = true;
+    listAgentNodes().then((list) => {
+      if (alive && list) setNode(list.find((n) => n.id === id) || null);
+    });
+    return () => { alive = false; };
+  }, [id, enabled]);
+  return node;
+}
+
+export { useAgent, useAgents, useAgentNode };

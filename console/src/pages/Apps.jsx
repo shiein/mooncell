@@ -482,7 +482,11 @@ function AppsPage() {
             ))}
           </tbody>
         </table>
-        {list.length === 0 ? <EmptyState icon="search" title="没有匹配的应用" desc="换个关键字或清空筛选条件试试" /> : null}
+        {list.length === 0 && apps.length === 0 ? (
+          <EmptyState icon="box" title="还没有应用"
+            desc={store.can("manage") ? "点击右上角「新建应用」登记第一个应用" : "管理员尚未为你授权任何应用"} />
+        ) : null}
+        {list.length === 0 && apps.length > 0 ? <EmptyState icon="search" title="没有匹配的应用" desc="换个关键字或清空筛选条件试试" /> : null}
       </div>
 
       <CreateAppDialog open={creating} onClose={() => setCreating(false)} />

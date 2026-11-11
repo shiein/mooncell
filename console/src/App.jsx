@@ -18,7 +18,7 @@ import { DataResourcesPage } from './pages/DataResources.jsx';
 import { DataWorkspacePage } from './pages/DataWorkspace.jsx';
 import { ServerResourcesPage } from './pages/ServerResources.jsx';
 import { ServerWorkspacePage } from './pages/ServerWorkspace.jsx';
-import { logout as apiLogout, getSession, touchSession, hydrateData, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setCabinetFilePublic, setAppLifecycle } from './lib/api.js';
+import { logout as apiLogout, getSession, touchSession, hydrateData, listApps, putEntity, saveAppConfig, deleteEntity, appDelete, setUnauthorizedHandler, removeCabinetFile, setCabinetFilePublic, setAppLifecycle } from './lib/api.js';
 
 const TWEAK_DEFAULTS = {
   "dark": false,
@@ -101,6 +101,11 @@ function App() {
     try { localStorage.setItem("mc_route", JSON.stringify(next)); } catch (e) {}
   }, []);
 
+  // 挂载时只查一次登录态。不得依赖 clampRoute：clampRoute 依赖 features，而这里每次都会
+  // setFeatures(新对象) → clampRoute 变化 → effect 重跑 → 再查会话，形成每秒上千次的死循环。
+  // clampRoute 调用时显式传入 feat，不读闭包里的 features，用 ref 取最新函数即可。
+  const clampRouteRef = React.useRef(clampRoute);
+  clampRouteRef.current = clampRoute;
   React.useEffect(() => {
     let alive = true;
     getSession().then((s) => {
@@ -110,12 +115,12 @@ function App() {
         setSession(s.user);
         setRole(r);
         setFeatures(feat);
-        setRoute((cur) => clampRoute(cur, r, feat));
+        setRoute((cur) => clampRouteRef.current(cur, r, feat));
         setView("console");
       }
     });
     return () => { alive = false; };
-  }, [clampRoute]);
+  }, []);
 
   // 会话失效统一回登录页:任何请求 401(闲置 1h 超时 / 关浏览器后 cookie 失效)→ 清状态并提示重新登录。
   // 角色数据必须同步清空,否则同一浏览器切换账号时会短暂看到上一账号的应用/审计等缓存。
@@ -197,15 +202,22 @@ function App() {
   // 周期性重拉应用列表:后台巡检更新的 status/pid、其他用户的增改删都会反映,不必重新登录。
   // 只覆盖 apps(不动 releases/audit 等视图,避免打断浏览);AppDetail 编辑用独立 draft,不受影响。
   // 落库均为"await 服务端确认后才更新本地",故此刷新读到的已是含本次改动的权威态,不会回退。
+  // 用轻量 GET /api/apps（只回可见应用），不再每 5 秒全量 hydrate；页面隐藏时暂停，重新可见立即补拉。
   React.useEffect(() => {
-    if (!session) return;
-    const iv = setInterval(() => {
-      hydrateData({
-        apps: INITIAL_APPS, releases: INITIAL_RELEASES, backups: INITIAL_BACKUPS,
-        cabinet: INITIAL_CABINET, audit: INITIAL_AUDIT,
-      }).then((data) => { if (data && data.apps) setApps(data.apps); });
-    }, 5000);
-    return () => clearInterval(iv);
+    if (!session) return undefined;
+    let alive = true;
+    const tick = () => {
+      if (document.hidden) return;
+      listApps().then((list) => { if (alive && list) setApps(list); });
+    };
+    const iv = setInterval(tick, 5000);
+    const onVis = () => { if (!document.hidden) tick(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      alive = false;
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [session, role]);
 
   // 镜像写:乐观更新已在前端完成,这里把结果落库(失败仅 console 告警,不打断 UI)。
@@ -224,7 +236,8 @@ function App() {
   // 审计为服务端只追加(真实操作经 Agent 时由 Console 权威 appendAudit;后端已禁止前端写 kind=audit)。
   // 前端 addAudit 只做乐观显示,不落库——演示/模拟操作的审计仅当次可见,刷新后以服务端权威记录为准。
   const addAudit = (action, target, result) => {
-    const a = { id: "a" + Date.now() + Math.random(), time: Date.now(), user, action, target, result, ip: "192.168.10.2" };
+    // 乐观显示：IP 由服务端权威记录，这里不编造
+    const a = { id: "a" + Date.now() + Math.random(), time: Date.now(), user, action, target, result, ip: "" };
     setAudit((s) => [a, ...s]);
   };
   const patchApp = (id, patch) => setApps((s) => s.map((a) => {
@@ -251,10 +264,10 @@ function App() {
 
     // real:经 Agent 的真机部署。其审计由 Console 服务端权威落库;前端 addAudit 只乐观显示不落库。
     // 三态:success / rolledback(失败已回滚到旧版本)/ failed(失败且未能回滚)——不坍缩。
-    finishDeploy(app, { version, size, result, real }) {
+    finishDeploy(app, { version, size, result, real, duration }) {
       const now = Date.now();
       const backup = { id: "b" + now, appId: app.id, version: app.version, time: now, size: size || "—", auto: true, operator: user, dir: tsDir(now), note: "" };
-      const release = { id: "r" + now, appId: app.id, version, status: result, time: now, operator: user, duration: (30 + Math.random() * 45 | 0) + "s", size: size || "—" };
+      const release = { id: "r" + now, appId: app.id, version, status: result, time: now, operator: user, duration: duration || "—", size: size || "—" };
       // 真实部署:release 由 Console 服务端权威落库、backup 在 Agent 真实生成;前端只乐观显示不落库。
       if (!real) { setBackups((s) => [backup, ...s]); persist("backup", backup); }
       setReleases((s) => [release, ...s]); // release 服务端权威,前端不落库(刷新读服务端记录)

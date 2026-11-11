@@ -32,7 +32,7 @@ function OverviewTab({ app, releases }) {
       else { setLiveErr(true); } // 失败:保留上次成功 live(若有)作 stale,不回退 stored running
     });
     tick();
-    const iv = setInterval(tick, 10000);
+    const iv = setInterval(() => { if (!document.hidden) tick(); }, 10000);
     return () => { alive = false; clearInterval(iv); };
   }, [app.id, real]);
   // 容器/软链托管(tomcat/tongweb/static):真实类型但平台不托管进程,不能显示「未运行」误导。

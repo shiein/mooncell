@@ -61,16 +61,10 @@ func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
 	}
 	user, role, _ := a.currentUser(r)
 	// 普通用户:仅下发授权应用;审计/文件柜/备份 mock 不下发(真实备份走 Agent API)。
-	allowed := map[string]bool{}
-	if !isAdmin(role) {
-		ids, err := a.store.userAppIDs(user)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取授权失败"})
-			return
-		}
-		for _, id := range ids {
-			allowed[id] = true
-		}
+	allowed, err := a.allowedAppSet(user, role)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取授权失败"})
+		return
 	}
 	out := map[string][]json.RawMessage{
 		"apps": {}, "releases": {}, "backups": {}, "cabinet": {}, "audit": {},
@@ -90,13 +84,58 @@ func (a *api) hydrate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if kind == "app" {
-			for i := range arr {
-				arr[i] = redactAppSecrets(arr[i]) // secret 明文不经读路径外泄给任何角色
-			}
+			arr = redactApps(arr)
 		}
 		out[key] = arr
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// allowedAppSet 返回非管理员可见的应用 id 集合；管理员返回 nil（不过滤）。
+func (a *api) allowedAppSet(user, role string) (map[string]bool, error) {
+	if isAdmin(role) {
+		return nil, nil
+	}
+	ids, err := a.store.userAppIDs(user)
+	if err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{}
+	for _, id := range ids {
+		allowed[id] = true
+	}
+	return allowed, nil
+}
+
+// redactApps 对应用实体逐条脱敏：secret 明文不经任何读路径外泄。hydrate 与 listApps 共用。
+func redactApps(arr []json.RawMessage) []json.RawMessage {
+	for i := range arr {
+		arr[i] = redactAppSecrets(arr[i])
+	}
+	return arr
+}
+
+// listApps 处理 GET /api/apps：只返回当前用户可见的应用（脱敏）。
+// 前端周期刷新应用状态用它，避免每 5 秒全量 hydrate（上传种子 + 下发全部发布/备份/文件柜/审计）。
+func (a *api) listApps(w http.ResponseWriter, r *http.Request) {
+	user, role, _ := a.currentUser(r)
+	allowed, err := a.allowedAppSet(user, role)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取授权失败"})
+		return
+	}
+	arr, err := a.store.appsRaw()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取应用失败"})
+		return
+	}
+	if arr == nil {
+		arr = []json.RawMessage{}
+	}
+	if allowed != nil {
+		arr = filterByAppAccess(arr, allowed, "app")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"apps": redactApps(arr)})
 }
 
 // filterByAppAccess 按授权 app id 过滤实体;app 看 id,release 看 appId。

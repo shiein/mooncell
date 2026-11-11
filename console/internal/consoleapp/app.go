@@ -208,6 +208,7 @@ func Run(distFS fs.FS, version string, args []string) {
 
 	// 业务数据:hydrate 按角色过滤应用;写配置/实体限 admin。
 	mux.HandleFunc("POST /api/data", anyLogin(a.hydrate))
+	mux.HandleFunc("GET /api/apps", anyLogin(a.listApps))
 	mux.HandleFunc("GET /api/audit", adminOnly(a.listAudit))
 	mux.HandleFunc("PUT /api/apps/{id}/config", adminOnly(a.putAppConfig))
 	mux.HandleFunc("PUT /api/data/{kind}/{id}", adminOnly(a.putEntity))
