@@ -77,7 +77,7 @@ func (a *api) addAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "注册失败"})
 		return
 	}
-	a.store.appendAudit(a.sessionUser(r), "注册 Agent", body.Name+"("+body.Addr+")", "成功")
+	a.store.appendAuditIP(a.sessionUser(r), "注册 Agent", body.Name+"("+body.Addr+")", "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
 }
 
@@ -108,7 +108,7 @@ func (a *api) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	a.clientsMu.Lock()
 	delete(a.clients, id)
 	a.clientsMu.Unlock()
-	a.store.appendAudit(a.sessionUser(r), "移除 Agent", id, "成功")
+	a.store.appendAuditIP(a.sessionUser(r), "移除 Agent", id, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

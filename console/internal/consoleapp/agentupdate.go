@@ -141,7 +141,7 @@ func (a *api) uploadAgentBinary(w http.ResponseWriter, r *http.Request) {
 	meta := agentBinMeta{Arch: arch, Version: version, Sha256: hex.EncodeToString(h.Sum(nil)), Size: size, Time: time.Now().UnixMilli()}
 	b, _ := json.Marshal(meta)
 	os.WriteFile(a.agentBinMetaPath(arch), b, 0o644)
-	a.store.appendAudit(a.sessionUser(r), "上传 Agent 包", "linux/"+arch+" "+version, "成功")
+	a.store.appendAuditIP(a.sessionUser(r), "上传 Agent 包", "linux/"+arch+" "+version, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, meta)
 }
 
@@ -200,7 +200,7 @@ func (a *api) updateAgent(w http.ResponseWriter, r *http.Request) {
 	st, rb, perr := cl.post("/api/self-update", ct, pr)
 	user := a.sessionUser(r)
 	if perr != nil || st >= 400 {
-		a.store.appendAudit(user, "更新 Agent", id+" → "+meta.Version, "失败")
+		a.store.appendAuditIP(user, "更新 Agent", id+" → "+meta.Version, "失败", clientIP(r))
 		relayAgent(w, st, rb, perr)
 		return
 	}
@@ -208,11 +208,11 @@ func (a *api) updateAgent(w http.ResponseWriter, r *http.Request) {
 	// 必须回探 /api/ping 确认 Agent 以新版本重新上线,才能记"成功"——否则可能升挂了还记成功(nohup 无监管)。
 	ok, gotVer := a.waitAgentVersion(cl, meta.Version, 30*time.Second)
 	if ok {
-		a.store.appendAudit(user, "更新 Agent", id+" "+p.Version+" → "+meta.Version, "成功")
+		a.store.appendAuditIP(user, "更新 Agent", id+" "+p.Version+" → "+meta.Version, "成功", clientIP(r))
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "confirmed": true, "version": gotVer})
 		return
 	}
-	a.store.appendAudit(user, "更新 Agent", id+" → "+meta.Version, "重启未确认")
+	a.store.appendAuditIP(user, "更新 Agent", id+" → "+meta.Version, "重启未确认", clientIP(r))
 	writeJSON(w, http.StatusBadGateway, map[string]any{
 		"ok": false, "confirmed": false,
 		"error": "已推送并替换二进制,但 30s 内未确认 Agent 以新版本重新上线(回探到版本: " + gotVer + ")。" +

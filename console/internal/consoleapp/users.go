@@ -56,7 +56,7 @@ func (a *api) createUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "创建失败:用户名可能已存在或授权无效"})
 		return
 	}
-	a.store.appendAudit(a.sessionUser(r), "创建用户", body.Username, "成功")
+	a.store.appendAuditIP(a.sessionUser(r), "创建用户", body.Username, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -146,7 +146,7 @@ func (a *api) updateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		a.store.deleteUserSessions(target)
 	}
-	a.store.appendAudit(actor, "更新用户", target, "成功")
+	a.store.appendAuditIP(actor, "更新用户", target, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -180,7 +180,7 @@ func (a *api) deleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "并发删除:已是最后一个管理员或用户不存在,拒绝删除"})
 		return
 	}
-	a.store.appendAudit(me, "删除用户", target, "成功")
+	a.store.appendAuditIP(me, "删除用户", target, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

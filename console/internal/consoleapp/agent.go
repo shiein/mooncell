@@ -228,13 +228,13 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 		op = "restore"
 	}
 	if err != nil {
-		a.store.appendAudit(user, action, appID, "失败·Agent不可达")
+		a.store.appendAuditIP(user, action, appID, "失败·Agent不可达", clientIP(r))
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "Agent 不可达", "detail": err.Error(), "online": false})
 		return "", ""
 	}
 	defer resp.Body.Close()
 	if rejectAgentUnauthorized(w, resp.StatusCode) {
-		a.store.appendAudit(user, action, appID, "失败·Agent鉴权")
+		a.store.appendAuditIP(user, action, appID, "失败·Agent鉴权", clientIP(r))
 		return "", ""
 	}
 
@@ -287,7 +287,7 @@ func (a *api) streamAndAudit(w http.ResponseWriter, r *http.Request, cl *agentCl
 	if version != "" {
 		target += " " + version
 	}
-	a.store.appendAudit(user, action, target, auditResultText(result))
+	a.store.appendAuditIP(user, action, target, auditResultText(result), clientIP(r))
 	if result != "" {
 		a.store.appendRelease(appID, version, result, user) // 服务端权威发布记录(真实结果,前端不再伪造)
 	}
@@ -652,9 +652,9 @@ func (a *api) agentLifecycle(w http.ResponseWriter, r *http.Request) {
 	user := a.sessionUser(r)
 	verb := map[string]string{"start": "启动服务", "stop": "停止服务"}[action]
 	if err != nil || status >= 400 {
-		a.store.appendAudit(user, verb, id, "失败")
+		a.store.appendAuditIP(user, verb, id, "失败", clientIP(r))
 	} else {
-		a.store.appendAudit(user, verb, id, "成功")
+		a.store.appendAuditIP(user, verb, id, "成功", clientIP(r))
 		a.applyLifecycleState(id, body) // 服务端权威更新 status/pid(据 Agent 返回的真实状态)
 	}
 	relayAgent(w, status, body, err)
@@ -764,7 +764,7 @@ func (a *api) appDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	// 1. 下线目标机服务;失败则中止、不删元数据(否则留孤儿服务且丢失管理入口)。
 	if status, body, err := cl.del(a.undeployPath(id, runner)); err != nil || status >= 300 {
-		a.store.appendAudit(a.sessionUser(r), "删除应用", id, "下线失败")
+		a.store.appendAuditIP(a.sessionUser(r), "删除应用", id, "下线失败", clientIP(r))
 		relayAgent(w, status, body, err)
 		return
 	}
@@ -778,6 +778,6 @@ func (a *api) appDelete(w http.ResponseWriter, r *http.Request) {
 		// 元数据已删,授权清理失败只记日志,不回滚删除(否则 Agent 已下线但 Console 又留半残 app)。
 		log.Printf("[appDelete] 清理 user_apps 失败 app=%s: %v", id, err)
 	}
-	a.store.appendAudit(a.sessionUser(r), "删除应用", id, "成功")
+	a.store.appendAuditIP(a.sessionUser(r), "删除应用", id, "成功", clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

@@ -69,6 +69,9 @@ func openDB(cfg *Config) *Store {
 			data TEXT NOT NULL,
 			UNIQUE(kind, id)
 		);
+		-- 文件柜提取码查找（免登录接口）用的部分表达式索引；只增不改，可随时 DROP 回退
+		CREATE INDEX IF NOT EXISTS idx_entities_cabinet_code
+			ON entities(upper(json_extract(data, '$.code'))) WHERE kind = 'cabinet';
 		CREATE TABLE IF NOT EXISTS agents (
 			id         TEXT    PRIMARY KEY,
 			name       TEXT    NOT NULL,

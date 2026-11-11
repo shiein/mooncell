@@ -257,13 +257,20 @@ func (s *Store) expiredCabinet(nowMs int64) []string {
 	return ids
 }
 
-// cabinetByCode 按提取码查找文件柜元数据(全表扫 cabinet 实体,数量小可接受)。
+// cabinetByCode 按提取码查找文件柜元数据。走 idx_entities_cabinet_code 表达式索引，
+// 不再全表扫描 + 逐条解析 JSON（该接口免登录，全表扫描会被用来拖慢单连接 SQLite）。
 func (s *Store) cabinetByCode(code string) (map[string]any, bool) {
-	rows, err := s.db.Query("SELECT data FROM entities WHERE kind = 'cabinet'")
+	code = strings.TrimSpace(code)
+	if code == "" || len(code) > 32 {
+		return nil, false
+	}
+	rows, err := s.db.Query(
+		`SELECT data FROM entities WHERE kind = 'cabinet' AND upper(json_extract(data, '$.code')) = upper(?)`, code)
 	if err != nil {
 		return nil, false
 	}
 	defer rows.Close()
+	now := time.Now().UnixMilli()
 	for rows.Next() {
 		var data string
 		if rows.Scan(&data) != nil {
@@ -273,12 +280,10 @@ func (s *Store) cabinetByCode(code string) (map[string]any, bool) {
 		if json.Unmarshal([]byte(data), &m) != nil {
 			continue
 		}
-		if c, _ := m["code"].(string); strings.EqualFold(c, code) {
-			if cabinetExpired(m, time.Now().UnixMilli()) {
-				continue
-			}
-			return m, true
+		if cabinetExpired(m, now) {
+			continue
 		}
+		return m, true
 	}
 	return nil, false
 }
@@ -299,11 +304,16 @@ func (s *Store) appendRelease(appID, version, status, operator string) error {
 // appendAudit 服务端权威写一条审计实体:真实操作(经 Agent 的部署/还原)由 Console 据会话与
 // Agent 实际结果落库,不依赖前端乐观上报。source=agent 标识其为权威记录(区别于前端模拟操作)。
 func (s *Store) appendAudit(user, action, target, result string) error {
+	return s.appendAuditIP(user, action, target, result, "")
+}
+
+// appendAuditIP 同 appendAudit，并记录请求来源 IP（由 HTTP 处理器传入 clientIP(r)；后台任务传空）。
+func (s *Store) appendAuditIP(user, action, target, result, ip string) error {
 	id := fmt.Sprintf("a%d", time.Now().UnixNano())
 	rec := map[string]any{
 		"id": id, "time": time.Now().UnixMilli(),
 		"user": user, "action": action, "target": target,
-		"result": result, "ip": "", "source": "agent",
+		"result": result, "ip": ip, "source": "agent",
 	}
 	b, _ := json.Marshal(rec)
 	return s.putEntity("audit", id, b)
