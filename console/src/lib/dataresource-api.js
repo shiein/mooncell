@@ -265,3 +265,39 @@ export async function deleteImport(resourceId, importId) {
     { method: 'DELETE' },
   );
 }
+
+/** 按需统计查询总行数（执行时不再自动 COUNT） */
+export async function countWorkspaceSQL(resourceId, workspaceId, sql, signal) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/count`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql }),
+      signal,
+    },
+  );
+}
+
+/** 清空工作台记录的会话设置（SET search_path / time_zone 等） */
+export async function resetSessionSettings(resourceId, workspaceId) {
+  return jsonFetch(
+    `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}/session-settings`,
+    { method: 'DELETE' },
+  );
+}
+
+/** 补全元数据：表/视图清单（列按需经 metadataStructure 懒加载） */
+export async function metadataCompletion(resourceId) {
+  return jsonFetch(`/api/data-resources/${encodeURIComponent(resourceId)}/metadata/completion`);
+}
+
+/** 页面卸载时尽力释放工作台（keepalive，不等待结果） */
+export function releaseWorkspaceOnUnload(resourceId, workspaceId) {
+  try {
+    fetch(
+      `/api/data-resources/${encodeURIComponent(resourceId)}/workspaces/${encodeURIComponent(workspaceId)}`,
+      { method: 'DELETE', credentials: 'same-origin', keepalive: true },
+    ).catch(() => {});
+  } catch (e) { /* 浏览器不支持 keepalive 时由服务端空闲回收 */ }
+}

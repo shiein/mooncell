@@ -542,7 +542,9 @@ function App() {
               <DataWorkspacePage resource={route.resource} initialWorkspace={route.workspace} onBack={() => nav("data-resources")} />
             ) : null}
             {route.page === "data-workspace" && !route.resource ? (
-              <DataResourcesPage onOpenWorkspace={(res, workspace) => nav("data-workspace", { resourceId: res.id, resource: res, workspace })} />
+              // 刷新后路由里只剩 resourceId：自动重连（密码仍在本登录会话内存中则无感，否则弹密码框）
+              <DataResourcesPage autoOpenId={route.resourceId}
+                onOpenWorkspace={(res, workspace) => nav("data-workspace", { resourceId: res.id, resource: res, workspace })} />
             ) : null}
             {route.page === "server-operations" ? <ServerResourcesPage /> : null}
             {route.page === "cabinet" ? <CabinetPage /> : null}

@@ -11,7 +11,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "dist": "vite build && go build -o mooncell .",
-    "test:e2e": "sh e2e/run-e2e.sh"
+    "test:e2e": "sh e2e/run-e2e.sh",
+    "test:unit": "node --test src/lib/sql-split.test.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
