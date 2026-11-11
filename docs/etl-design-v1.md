@@ -497,7 +497,7 @@ type Dialect interface {
 * 密文格式 `v1:` + base64(nonce‖ciphertext)，AAD 绑定连接 ID，防止密文被挪到别的连接复用。
 * 密码永不回显前端；编辑时留空表示不改。
 * 作业 `notify` 凭据：保存时 `sealDocSecrets` 把明文 `secret` Seal 为 `secretCipher`，AAD = `etl/notify/` + 定义 ID + "/" + 节点 ID（后缀写回 `aadSuffix` 字段）。**运行时开密的 AAD 由运行中的定义 ID 推导**（`actions.DefIDEntry` 注入 Env，子作业绑子作业自身 ID），与文档 `aadSuffix` 不一致即拒绝——文档后缀只是兼容信息，不被信任。**复制定义时 `rekeyDocSecrets` 把密文按源 ID 解密、按副本 ID 重密封**（无密钥箱时剥离凭据，与导出行为一致）；导出包直接剥离 `secretCipher`/`aadSuffix`。
-* `install.sh`：`upgrade` 停机后自动快照 `mooncell.db`(含 WAL/SHM)+`mooncell-etl.key`+`config.toml` 到 `$PREFIX/backups/pre-upgrade-<ts>/`；`backup` 子命令可手工快照（从 `[database].path`/`[etl].key_file` 解析实际路径，自定义路径同样覆盖）。
+* `install.sh`：`upgrade` 停机后自动快照 `mooncell.db`(含 WAL/SHM)+`mooncell-etl.key`+`config.toml` 到 `$PREFIX/backups/pre-upgrade-<ts>/`；`backup` 子命令可手工快照（从 `[database].path`/`[etl].key_file` 解析实际路径，自定义路径同样覆盖）。**数据库文件缺失时 `backup_console_data` 报警并返回非零**——`backup` 直接失败，`upgrade` 先 `systemctl start` 恢复已停服务再中止退出，不留停机现场。
 
 ---
 
@@ -546,7 +546,7 @@ src/etl/
 * **设计器**：左组件面板（搜索 + 分类，拖入画布）/ 中画布（网格、吸附、框选、小地图、键盘快捷键）/ 右属性检查器 /
   底部抽屉（校验问题 · 数据预览 · 运行度量 · 日志）。端口有清晰的语义色与标签，连线上显示 schema 字段数与运行时行数。
 * **扩展一个步骤的前端成本**：在 `forms/` 写一个表单组件并 `registerForm('type', Component)`；未注册时退化为 JSON 编辑。
-* 浏览器下限 Chrome 92（与 Console 一致）。
+* 浏览器下限 Chrome 92（与 Console 一致）。`pnpm build` 挂 `scripts/check-compat.mjs` 扫描 `dist/assets`：产物含 `color-mix`、`:has(`、`structuredClone`、`Object.hasOwn(` 即失败（依赖中的 `structuredClone` 经 vite `define` 重写为 `__mcStructuredClone`，由 `index.html` 内联 polyfill 提供）。
 
 ---
 
@@ -558,11 +558,12 @@ src/etl/
   * 列表接口只回授权项；单条操作未授权统一 `403`。撤销授权即时生效（下次请求即拒绝，会话不缓存）。
   * 用户管理页按定义下发授权（`etlGrants` 随用户创建/编辑同事务提交；删除用户/定义级联清理）。`features.etl` 仅对 admin 或持有任一授权的普通用户下发 `true`，导航与路由据此 fail-closed。
   * 非管理员复制定义得到的副本自动授予本人 `edit`（否则复制完立刻无权查看）；新建与导入仍为 admin 专属。
+  * **引用授权边界（R1-m4）**：`DELETE definitions/{id}?force=1` 删除仍被引用的定义时，非管理员必须对**每一个**引用方持有 `edit`，缺一即 403 且不删；保存作业定义时解码 `CollectRefs`，非管理员引用的每条 pipeline/workflow 须 ≥`use`，防止把未授权定义偷渡进执行路径。概览（overview）对非管理员：definitions/recent runs/active 全部按授权过滤（recent 在 SQL 层、LIMIT 之前过滤），`connections` 恒为 0；取消与续跑运行均写审计（含操作人与定义名）。
 * **连接凭据**：`SecretCipher` 永不出 API（`json:"-"`），`hasPassword` 布尔代替；连接的新建/修改/删除/测试 admin 专属；schemas/tables/columns 活库元数据浏览对任一授权用户开放（只读，供设计器选择器用）。
 * SQL 由管理员编写、在管理员配置的连接上执行——这是产品能力而非注入面；但**变量值进入 SQL 一律走绑定参数**，文本替换仅限白名单格式。
 * **文件根边界（R1-B1）**：`[etl] file_root` 是文件类步骤的唯一可访问目录，默认 `<数据库目录>/etl-files`，启动时创建为 `0750`。`csv_input`/`csv_output` 的 `path` 一律解释为 `file_root` 下的相对路径：绝对路径、含 `..` 越界、解析符号链接后落在根外（对 output 校验父目录与已存在的目标文件本身）——编译期与运行期双重拒绝，对管理员同样生效；运行环境缺 `file_root` 时文件步骤 fail-closed。由此普通用户即使持有 `edit` 也只能读写这一受控目录，无法经预览/运行读写 `mooncell-etl.key` 等任意文件。
 * **HTTP 出方向防护（R1-m3）**：`http_input`、`http`、`notify` 走 `core.GuardedHTTPClient`——`DialContext` 先解析主机、逐个校验 IP，再复查连接对端地址，默认拒绝回环（127.0.0.0/8、::1）、链路本地（169.254.0.0/16、fe80::/10）与未指定地址（0.0.0.0/::），防 DNS 重绑定与 302 跳转绕过；私有网段放行（内网接口调用是正当场景）。`[etl] http_allow_loopback = true` 可放开回环，供确有需要的部署。
-* 审计：连接增删改、定义保存/删除/复制/导入导出/恢复版本、手动运行/取消、调度增删改写入现有审计日志（`数据集成·…`）；授权变更走用户管理的创建/编辑审计。
+* 审计：连接增删改、定义保存/删除/复制/导入导出/恢复版本、手动运行/取消/续跑、调度增删改写入现有审计日志（`数据集成·…`）；授权变更走用户管理的创建/编辑审计。
 * 日志与错误信息中不得出现密码；DSN 不入日志。
 
 ## 17. 进程与自更新

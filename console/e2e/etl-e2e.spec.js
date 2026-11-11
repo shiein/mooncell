@@ -7,6 +7,8 @@ import fs from 'node:fs';
 //    无需连接的「生成记录 → CSV 输出」，落盘文件即真实结果）。
 // ② 作业条件分支运行 + 调度保存与 cron 预览。
 const ADMIN = { user: 'admin', pass: '1qaz@WSX' };
+// csv 文件步骤的 path 相对 Console 的 file_root（e2e 配置为 /tmp/mc-e2e-etlroot）。
+const FILE_ROOT = '/tmp/mc-e2e-etlroot';
 const usernameInput = (page) => page.locator('input[autocomplete="username"]');
 
 async function login(page) {
@@ -40,7 +42,7 @@ async function connect(page, fromName, toName) {
 test('转换全链路：连接→拖步骤→连线→校验→预览→保存→运行→详情成功', async ({ page }) => {
   await login(page);
   const tag = `e2e-${Date.now() % 100000}`;
-  const csvPath = `/tmp/mc-${tag}.csv`;
+  const csvPath = `mc-e2e-${tag}.csv`; // 相对 file_root；绝对路径已被 R1-B1 拒绝
 
   // ---- 新建连接（UI 表单流程；保存不强制连通性，测试连接是独立按钮）
   await nav(page, '数据集成');
@@ -108,8 +110,8 @@ test('转换全链路：连接→拖步骤→连线→校验→预览→保存�
   await expect(page.locator('.etl-run-head')).toContainText('成功');
 
   // ---- 产物：csv 落盘且内容正确（表头 seq + 10 行）
-  expect(fs.existsSync(csvPath)).toBeTruthy();
-  const body = fs.readFileSync(csvPath, 'utf8');
+  expect(fs.existsSync(`${FILE_ROOT}/${csvPath}`)).toBeTruthy();
+  const body = fs.readFileSync(`${FILE_ROOT}/${csvPath}`, 'utf8');
   expect(body).toContain('seq');
   expect(body.trim().split('\n').length).toBe(11);
 });
