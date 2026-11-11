@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
@@ -391,8 +390,9 @@ func init() {
 }
 
 // rowKey 把键字段编码为无歧义字节串：每个值 = 类型标记 + 长度 + 文本。
-// 时间值按时刻（Unix 秒 + 纳秒）编码，与 compareValues 的 time.Compare 同一相等语义；
-// 不能用展示文本（只到秒），否则同一秒内的不同时刻会被当成同一个键。
+// 时间值按「值自身时区的墙上时钟 + 纳秒」编码：不能用展示文本（只到秒），否则同一秒内的
+// 不同时刻会被当成同一个键；也不按时刻编码——无时区文本（CSV 等）按进程时区解释、库里
+// 无时区列按连接时区解释，两者墙上时钟相同而时刻不同，按时刻会让原本能匹配的键失配。
 func rowKey(buf []byte, r core.Row, idx []int) []byte {
 	var lenBuf [binary.MaxVarintLen64]byte
 	for _, i := range idx {
@@ -403,7 +403,7 @@ func rowKey(buf []byte, r core.Row, idx []int) []byte {
 		}
 		var s string
 		if t, ok := v.(time.Time); ok {
-			s = strconv.FormatInt(t.Unix(), 10) + "." + strconv.Itoa(t.Nanosecond())
+			s = t.Format("2006-01-02T15:04:05.000000000")
 		} else {
 			s = core.FormatValue(v)
 		}
@@ -430,7 +430,9 @@ func dbKey(vals []any, cols []boundColumn) string {
 			canon[i] = v
 			continue
 		}
-		if !conn.HasTimeZone(cols[i].target.NativeType) {
+		if conn.HasTimeZone(cols[i].target.NativeType) {
+			t = t.UTC() // 带时区列按时刻比较：统一到 UTC 后墙上时钟即时刻
+		} else {
 			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
 		}
 		canon[i] = t.Round(time.Microsecond)

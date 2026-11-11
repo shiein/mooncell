@@ -240,14 +240,16 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 			if !port.Info || len(pn.InHops[port.Name]) == 0 {
 				continue
 			}
-			infoUp := upstreamOf(p, pn.InHops[port.Name])
+			infoUp := upstreamOf(p, pn.InHops[port.Name], "")
 			var otherHops []Hop
 			for name, hops := range pn.InHops {
 				if name != port.Name {
 					otherHops = append(otherHops, hops...)
 				}
 			}
-			otherUp := upstreamOf(p, otherHops)
+			// 主流一侧经过「排序记录」时，排序会先读完全部输入再输出，共同上游不会被它阻塞
+			// → 主流侧回溯到排序节点为止（排序节点本身若同时供给两路仍算共用）。
+			otherUp := upstreamOf(p, otherHops, "sort_rows")
 			var shared []string
 			for id := range infoUp {
 				if otherUp[id] {
@@ -385,7 +387,8 @@ func Compile(ctx context.Context, def *Definition, opts CompileOptions) *Plan {
 }
 
 // upstreamOf 返回经给定连线可回溯到的全部上游节点 ID（含连线起点；容忍环）。
-func upstreamOf(p *Plan, hops []Hop) map[string]bool {
+// stopType 非空时，回溯到该类型节点即止（记入节点本身，不再继续向上）。
+func upstreamOf(p *Plan, hops []Hop, stopType string) map[string]bool {
 	seen := map[string]bool{}
 	stack := make([]string, 0, len(hops))
 	for _, h := range hops {
@@ -398,7 +401,7 @@ func upstreamOf(p *Plan, hops []Hop) map[string]bool {
 			continue
 		}
 		seen[id] = true
-		if pn := p.ByID[id]; pn != nil {
+		if pn := p.ByID[id]; pn != nil && (stopType == "" || pn.Node.Type != stopType) {
 			for _, hs := range pn.InHops {
 				for _, h := range hs {
 					stack = append(stack, h.From)

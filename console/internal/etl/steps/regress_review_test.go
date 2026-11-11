@@ -483,3 +483,66 @@ func TestRegressStreamLookupSharedUpstream(t *testing.T) {
 		t.Fatalf("独立参照源应正常读完两路各 200 行：err=%v metrics=%+v", res.Err, res.Metrics["lk"])
 	}
 }
+
+// 流侧哈希键沿用「自身时区墙上时钟」语义：无时区 CSV 时间（按进程时区解释）与库里无时区列
+// （按连接时区解释）墙上时钟相同即匹配。进程时区固定为 UTC、连接时区为东八区，复现服务器场景。
+func TestRegressStreamLookupWallClockAcrossZones(t *testing.T) {
+	saved := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = saved })
+
+	dir := t.TempDir()
+	cfg := conn.Config{ID: "db", DBType: "sqlite", Database: filepath.Join(dir, "z.db"), Options: conn.Options{TimeZone: "Asia/Shanghai"}}
+	pool := conn.NewPool(func(ctx context.Context, id string) (conn.Config, string, error) { return cfg, "", nil })
+	t.Cleanup(pool.Close)
+	h, err := pool.Get(context.Background(), "db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, pv := pool.EnvEntry()
+	e := withFileRoot(core.MapEnv{pk: pv}, dir)
+	mustExec(t, h.DB, `CREATE TABLE ref (ts TIMESTAMP, d DATE, label TEXT)`)
+	mustExec(t, h.DB, `INSERT INTO ref VALUES ('2026-01-01 00:00:01.5', '2026-01-01', 'half'), ('2026-01-01 00:00:01.9', '2026-01-02', 'nine')`)
+	if err := os.WriteFile(filepath.Join(dir, "m.csv"), []byte("ts,d\n2026-01-01 00:00:01.5,2026-01-01\n2026-01-01 00:00:01.9,2026-01-02\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"ts": "[half nine]", "d": "[half nine]"} {
+		def := &pipeline.Definition{Nodes: []pipeline.Node{
+			node("m", "csv_input", map[string]any{"path": "m.csv", "hasHeader": true, "fields": []map[string]string{{"name": "ts", "kind": "timestamp"}, {"name": "d", "kind": "date"}}}),
+			node("r", "table_input", map[string]any{"connection": "db", "sql": "SELECT ts, d, label FROM ref"}),
+			node("lk", "stream_lookup", map[string]any{"keys": []map[string]string{{"stream": key, "column": key}}, "returns": []map[string]string{{"column": "label"}}}),
+		}, Hops: []pipeline.Hop{hop("m", "main", "lk"), {ID: "ri", From: "r", FromPort: "main", To: "lk", ToPort: "info"}}}
+		var got []string
+		for _, r := range previewOf(t, e, def, "lk").Ports["main"].Rows {
+			got = append(got, r[2])
+		}
+		if fmt.Sprint(got) != want {
+			t.Fatalf("按 %s 关联应命中 %s，实际 %v", key, want, got)
+		}
+	}
+}
+
+// 主流侧经「排序记录」时共用上游不会卡死（排序先读完全部输入）：不应编译报错，且能跑完。
+func TestRegressStreamLookupSharedUpstreamViaSort(t *testing.T) {
+	e, _ := env(t)
+	lk := node("lk", "stream_lookup", map[string]any{"keys": []map[string]string{{"stream": "id", "column": "id"}}, "returns": []map[string]string{{"column": "id", "name": "x"}}})
+	def := &pipeline.Definition{Settings: pipeline.Settings{BatchSize: 1, ChannelBatches: 2}, Nodes: []pipeline.Node{
+		node("src", "generate_rows", map[string]any{"sequenceField": "id", "limit": 500}),
+		node("s", "sort_rows", map[string]any{"fields": []map[string]any{{"name": "id"}}}), lk},
+		Hops: []pipeline.Hop{hop("src", "main", "s"), hop("s", "main", "lk"), {ID: "si", From: "src", FromPort: "main", To: "lk", ToPort: "info"}}}
+	plan := pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	if plan.Problems.HasErrors() {
+		t.Fatalf("主流经排序的共用上游不应报错：%+v", plan.Problems)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if res := pipeline.Run(ctx, plan, pipeline.RunOptions{Env: e}); res.Err != nil || res.Metrics["lk"].Read != 1000 {
+		t.Fatalf("应正常读完两路各 500 行：err=%v read=%d", res.Err, res.Metrics["lk"].Read)
+	}
+	// 排序节点本身同时供给两路仍会卡死 → 仍报错
+	def.Hops = []pipeline.Hop{hop("src", "main", "s"), hop("s", "main", "lk"), {ID: "si", From: "s", FromPort: "main", To: "lk", ToPort: "info"}}
+	plan = pipeline.Compile(context.Background(), def, pipeline.CompileOptions{Env: e})
+	if !problemCodes(plan.Problems, core.SeverityError)["info_shared_upstream"] {
+		t.Fatalf("排序节点同时供给主流与参照应报错：%+v", plan.Problems)
+	}
+}
