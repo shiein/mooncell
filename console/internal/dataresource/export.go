@@ -88,12 +88,12 @@ func normalizeCSVWriteError(err error) error {
 }
 
 // prepareExportSQL 校验导出 SQL：单语句且必须为只读查询。
-func prepareExportSQL(sqlText string) error {
-	if err := ValidateSingleStatement(sqlText); err != nil {
+func prepareExportSQL(sqlText string, d sqlDialect) error {
+	if err := validateSingleStatementFor(sqlText, d); err != nil {
 		return err
 	}
-	if !ClassifySQL(sqlText).IsReadOnly() {
-		return fmt.Errorf("仅支持导出 SELECT 查询结果")
+	if an := analyzeSQL(sqlText, d); !an.Type.IsReadOnly() || an.Reject != "" {
+		return fmt.Errorf("仅支持导出 SELECT/SHOW/EXPLAIN 等只读查询结果")
 	}
 	return nil
 }
@@ -101,7 +101,7 @@ func prepareExportSQL(sqlText string) error {
 // ExportCSV 先写入临时文件，确认未超限后再发送响应。
 // 超限时返回 ErrExportLimit 且不写 HTTP 体，避免 200 + 截断文件被当成成功下载。
 func ExportCSV(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
-	if err := prepareExportSQL(sqlText); err != nil {
+	if err := prepareExportSQL(sqlText, dialectOf(adapter)); err != nil {
 		return err
 	}
 	select {

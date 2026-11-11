@@ -12,6 +12,7 @@ const (
 	keyUser ctxKey = iota
 	keyRole
 	keyLoginSession
+	keyClientIP
 )
 
 // WithSession 将用户名、角色和不可作为 Bearer 使用的登录会话标识注入 context。
@@ -40,4 +41,17 @@ func userFromCtx(r *http.Request) (string, string, bool) {
 func loginSessionFromCtx(r *http.Request) (string, bool) {
 	id, ok := r.Context().Value(keyLoginSession).(string)
 	return id, ok && id != ""
+}
+
+// WithClientIP 注入请求来源 IP（由 consoleapp 中间件解析），仅用于审计记录。
+func WithClientIP(r *http.Request, ip string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), keyClientIP, ip))
+}
+
+func clientIPFromCtx(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	ip, _ := r.Context().Value(keyClientIP).(string)
+	return ip
 }

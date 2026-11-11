@@ -245,3 +245,75 @@ func writeJSONBodyError(w http.ResponseWriter, err error) bool {
 	writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
 	return true
 }
+
+// 补全元数据上限：避免超大库一次性拉取过多对象。
+const (
+	completionMaxSchemas = 64
+	completionMaxObjects = 5000
+)
+
+// completionObject 是 SQL 补全用的表/视图条目；列按需经 metadata/structure 懒加载。
+type completionObject struct {
+	Schema string           `json:"schema"`
+	Name   string           `json:"name"`
+	Kind   MetadataNodeKind `json:"kind"`
+	ID     string           `json:"id"`
+}
+
+// MetadataCompletion 处理 GET /api/data-resources/{id}/metadata/completion
+// 复用元数据树的 Children 遍历：根 → schema → 表/视图分组 → 对象。
+func (s *Service) MetadataCompletion(w http.ResponseWriter, r *http.Request) {
+	adapter, _, release, ok := s.getAdapterForOperation(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), MetadataTimeout)
+	defer cancel()
+	objects, schemas, truncated, err := collectCompletion(ctx, adapter)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "METADATA_ERROR", sanitizeErrMsg(err.Error()))
+		return
+	}
+	writeOK(w, map[string]any{"objects": objects, "schemas": schemas, "truncated": truncated})
+}
+
+func collectCompletion(ctx context.Context, adapter DataSourceAdapter) ([]completionObject, []string, bool, error) {
+	roots, err := adapter.Children(ctx, MetadataNode{Kind: NodeRoot})
+	if err != nil {
+		return nil, nil, false, err
+	}
+	objects := []completionObject{}
+	schemas := []string{}
+	truncated := false
+	for _, sn := range roots {
+		if sn.Kind != NodeSchema {
+			continue
+		}
+		if len(schemas) >= completionMaxSchemas {
+			truncated = true
+			break
+		}
+		schemas = append(schemas, sn.Name)
+		groups, err := adapter.Children(ctx, sn)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		for _, g := range groups {
+			if g.Kind != NodeTablesFolder && g.Kind != NodeViewsFolder {
+				continue
+			}
+			items, err := adapter.Children(ctx, g)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			for _, it := range items {
+				if len(objects) >= completionMaxObjects {
+					return objects, schemas, true, nil
+				}
+				objects = append(objects, completionObject{Schema: it.Schema, Name: it.Name, Kind: it.Kind, ID: it.ID})
+			}
+		}
+	}
+	return objects, schemas, truncated, nil
+}

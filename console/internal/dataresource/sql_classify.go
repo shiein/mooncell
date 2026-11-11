@@ -11,7 +11,6 @@
 package dataresource
 
 import (
-	"errors"
 	"strings"
 	"unicode"
 )
@@ -33,6 +32,7 @@ const (
 	StmtCommit    StatementType = "COMMIT"
 	StmtRollback  StatementType = "ROLLBACK"
 	StmtSavepoint StatementType = "SAVEPOINT"
+	StmtSession   StatementType = "SET" // 会话设置（SET/RESET 白名单），记录后在每个事务开头重放
 	StmtUnknown   StatementType = "UNKNOWN"
 )
 
@@ -319,92 +319,17 @@ func classifyWithCTE(sql string) StatementType {
 	return StmtSelect
 }
 
-// ClassifySQL 分析 SQL 文本，返回语句类型。
-// 先去除前导注释和空白，再取首个关键字。
+// ClassifySQL 分析 SQL 文本，返回语句类型（方言无关的保守规则）。
+// 执行路径请用 analyzeSQL(sql, dialectOf(adapter))，它额外给出直通/事务外/会话设置/拒绝原因。
 func ClassifySQL(sql string) StatementType {
-	s := stripLeadingCommentsAndWhitespace(sql)
-	if s == "" {
-		return StmtUnknown
-	}
-	first := firstWord(s)
-	upper := strings.ToUpper(first)
-
-	switch upper {
-	case "SELECT", "VALUES", "TABLE":
-		return StmtSelect
-	case "WITH":
-		return classifyWithCTE(s)
-	case "INSERT":
-		return StmtInsert
-	case "UPDATE":
-		return StmtUpdate
-	case "DELETE":
-		return StmtDelete
-	case "MERGE":
-		return StmtMerge
-	case "TRUNCATE":
-		return StmtTruncate
-	case "CREATE", "ALTER", "DROP", "RENAME", "COMMENT":
-		return StmtDDL
-	case "GRANT", "REVOKE":
-		return StmtDCL
-	case "CALL", "EXECUTE", "EXEC":
-		return StmtCall
-	case "BEGIN", "START":
-		return StmtBegin
-	case "COMMIT", "END":
-		// PostgreSQL END ≡ COMMIT
-		return StmtCommit
-	case "ROLLBACK", "ABORT":
-		// PostgreSQL ABORT ≡ ROLLBACK
-		return StmtRollback
-	case "SAVEPOINT":
-		return StmtSavepoint
-	}
-	return StmtUnknown
+	return analyzeSQL(sql, dialectGeneric).Type
 }
 
 // ValidateSingleStatement 校验 SQL 是否为单条语句（不含分号分隔的多语句）。
 // 设计文档：一次请求只允许一条 SQL；服务端独立识别引号、注释和 PostgreSQL dollar quote。
 // 另识别 MySQL 反引号标识符（`col` / “ `a;b` “），避免合法标识符被误判为多语句。
 func ValidateSingleStatement(sql string) error {
-	sql = strings.TrimSpace(sql)
-	if sql == "" {
-		return errors.New("SQL 不能为空")
-	}
-	// 扫描：跳过字符串字面量、注释、dollar quote、反引号，检测语句外的分号。
-	rune := []rune(sql)
-	i := 0
-	for i < len(rune) {
-		c := rune[i]
-		switch {
-		case c == '\'': // 单引号字符串
-			i = skipSingleQuote(rune, i)
-		case c == '"': // 双引号标识符
-			i = skipDoubleQuote(rune, i)
-		case c == '`': // MySQL 反引号标识符
-			i = skipBacktick(rune, i)
-		case c == '-' && i+1 < len(rune) && rune[i+1] == '-': // 行注释
-			i = skipLineComment(rune, i)
-		case c == '/' && i+1 < len(rune) && rune[i+1] == '*': // 块注释
-			i = skipBlockComment(rune, i)
-		case c == '$': // PG dollar quote：$tag$...$tag$（含 $$）
-			if ni, ok := trySkipDollarQuote(rune, i); ok {
-				i = ni
-				continue
-			}
-			// 非 dollar quote（如 $1 参数）正常前进
-		case c == ';': // 语句外分号
-			// 分号后允许仅空白/注释（如 SELECT 1; -- note），有实质内容则视为多语句
-			rest := stripLeadingCommentsAndWhitespace(string(rune[i+1:]))
-			if rest != "" {
-				return errors.New("一次请求只允许一条 SQL，检测到多语句")
-			}
-			return nil
-		}
-		i++
-	}
-	return nil
+	return validateSingleStatementFor(sql, dialectGeneric)
 }
 
 func stripLeadingCommentsAndWhitespace(sql string) string {

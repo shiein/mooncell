@@ -20,7 +20,7 @@ var exportXLSXSem = make(chan struct{}, 2)
 
 // ExportXLSX 在内存构建工作簿后写出；超限时返回明确错误且不写出半截文件。
 func ExportXLSX(ctx context.Context, adapter DataSourceAdapter, sqlText string, w http.ResponseWriter) error {
-	if err := prepareExportSQL(sqlText); err != nil {
+	if err := prepareExportSQL(sqlText, dialectOf(adapter)); err != nil {
 		return err
 	}
 	select {

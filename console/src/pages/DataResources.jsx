@@ -122,7 +122,7 @@ function catalogColumn(r) {
   return r.databaseName || '—';
 }
 
-function DataResourcesPage({ onOpenWorkspace }) {
+function DataResourcesPage({ onOpenWorkspace, autoOpenId }) {
   const store = useMC();
   const isAdmin = store.can('admin');
   const { data: resources, error, loading, retry } = useAsync(listDataResources, []);
@@ -151,6 +151,16 @@ function DataResourcesPage({ onOpenWorkspace }) {
   React.useEffect(() => {
     listDrivers().then(setDrivers).catch(() => setDrivers([]));
   }, []);
+
+  // 工作台页刷新后自动重连一次（只尝试一次，失败留在列表页）
+  const autoOpenedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!autoOpenId || autoOpenedRef.current || !resources) return;
+    autoOpenedRef.current = true;
+    const r = resources.find((x) => x.id === autoOpenId);
+    if (r) openResource(r);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenId, resources]);
 
   return (
     <div>

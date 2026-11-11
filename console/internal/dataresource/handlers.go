@@ -27,9 +27,10 @@ import (
 
 // APIError 是统一的错误响应结构。同时实现 error 接口供内部传递。
 type APIError struct {
-	Message string `json:"error"`
-	Code    string `json:"code,omitempty"`
-	TxState string `json:"txState,omitempty"`
+	Message  string `json:"error"`
+	Code     string `json:"code,omitempty"`
+	TxState  string `json:"txState,omitempty"`
+	Position int    `json:"position,omitempty"` // SQL 错误位置（1 起字符序号），供编辑器定位
 }
 
 // Error 实现 error 接口。
@@ -163,7 +164,7 @@ func (s *Service) CreateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "创建资源失败")
 		return
 	}
-	s.auditLog(user, "创建数据资源", res.Name, "成功")
+	s.auditLog(r, user, "创建数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
 
@@ -252,7 +253,7 @@ func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "DB_ERROR", "更新后读取资源失败")
 		return
 	}
-	s.auditLog(user, "更新数据资源", res.Name, "成功")
+	s.auditLog(r, user, "更新数据资源", res.Name, "成功")
 	writeOK(w, toOut(res, "admin"))
 }
 
@@ -304,7 +305,7 @@ func (s *Service) DeleteResource(w http.ResponseWriter, r *http.Request) {
 	// 失效工作台并关闭连接池
 	s.InvalidateResource(id)
 	s.pools.CloseDB(id)
-	s.auditLog(user, "删除数据资源", res.Name, "成功")
+	s.auditLog(r, user, "删除数据资源", res.Name, "成功")
 	writeOK(w, map[string]bool{"ok": true})
 }
 
@@ -432,7 +433,7 @@ func (s *Service) TestExistingConnection(w http.ResponseWriter, r *http.Request)
 		s.InvalidateUserResource(username, id)
 	}
 	user, _, _ := userFromCtx(r)
-	s.auditLog(user, "测试连接", res.Name, status)
+	s.auditLog(r, user, "测试连接", res.Name, status)
 	writeOK(w, testResultResponse(result))
 }
 

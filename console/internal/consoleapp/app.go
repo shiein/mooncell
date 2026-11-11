@@ -90,8 +90,8 @@ func Run(distFS fs.FS, version string, args []string) {
 	})
 	dataResSvc.CleanupOrphanImportsOnStart()
 	// 注入审计回调：复用现有审计系统，数据资源操作也写入审计日志。
-	dataResSvc.SetAuditFunc(func(user, action, target, result string) {
-		a.store.appendAudit(user, action, "数据资源·"+target, result)
+	dataResSvc.SetAuditFunc(func(user, action, target, result, ip string) {
+		a.store.appendAuditIP(user, action, "数据资源·"+target, result, ip)
 	})
 
 	// 文件柜过期清理 + 分块上传残留清理 + 审计保留裁剪:启动即清一次,之后每小时一次。
@@ -243,6 +243,7 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/children", drAuth(dataResSvc.MetadataChildren))
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/structure", drAuth(dataResSvc.MetadataStructure))
 	mux.HandleFunc("GET /api/data-resources/{id}/metadata/ddl", drAuth(dataResSvc.MetadataDDL))
+	mux.HandleFunc("GET /api/data-resources/{id}/metadata/completion", drAuth(dataResSvc.MetadataCompletion))
 	mux.HandleFunc("POST /api/data-resources/{id}/metadata/sql-template", drAuth(dataResSvc.MetadataSQLTemplate))
 
 	// 数据资源工作台：执行/导出仅经 workspace 契约（设计文档第三节），
@@ -251,6 +252,8 @@ func Run(distFS fs.FS, version string, args []string) {
 	mux.HandleFunc("PATCH /api/data-resources/{id}/workspaces/{workspaceId}/auto-commit", drAuth(dataResSvc.PatchAutoCommit))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/execute", drAuth(dataResSvc.ExecuteInWorkspaceHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/cancel", drAuth(dataResSvc.CancelWorkspaceHandler))
+	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/count", drAuth(dataResSvc.CountInWorkspaceHandler))
+	mux.HandleFunc("DELETE /api/data-resources/{id}/workspaces/{workspaceId}/session-settings", drAuth(dataResSvc.ResetSessionSettingsHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/row-edits", drAuth(dataResSvc.ApplyRowEditsHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/commit", drAuth(dataResSvc.CommitWorkspaceHandler))
 	mux.HandleFunc("POST /api/data-resources/{id}/workspaces/{workspaceId}/rollback", drAuth(dataResSvc.RollbackWorkspaceHandler))

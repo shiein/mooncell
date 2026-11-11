@@ -7,13 +7,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"sync"
 )
 
 // AuditFunc 是审计回调类型，由 consoleapp 注入，复用现有审计系统。
 // 设计文档：SQL 审计只保存资源、用户、语句类型、SQL 哈希、结果和耗时，
 // 不保存完整 SQL、参数值或结果数据。
-type AuditFunc func(user, action, target, result string)
+type AuditFunc func(user, action, target, result, ip string)
 
 type SessionValidator func(loginSessionID string) bool
 
@@ -139,11 +140,19 @@ func (s *Service) bumpCredentialGeneration(loginSessionID, resourceID string) {
 	s.generationMu.Unlock()
 }
 
-// auditLog 记录审计（如果回调已设置）。
-func (s *Service) auditLog(user, action, target, result string) {
+// auditLog 记录审计（如果回调已设置），来源 IP 取自请求上下文。
+func (s *Service) auditLog(r *http.Request, user, action, target, result string) {
 	if s.audit != nil {
-		s.audit(user, action, target, result)
+		s.audit(user, action, target, result, clientIPFromCtx(r))
 	}
+}
+
+// resourceLabel 审计里展示资源名称而非随机 ID；资源已删除或查询失败时退回 ID。
+func (s *Service) resourceLabel(id string) string {
+	if res, ok, err := GetDataResource(s.db, id); err == nil && ok && res.Name != "" {
+		return res.Name
+	}
+	return id
 }
 
 // sqlHashShort 返回 SQL 的短哈希（SHA-256 前 8 字节 hex），不保存完整 SQL。
@@ -154,12 +163,12 @@ func sqlHashShort(sqlText string) string {
 
 // auditSQL 记录 SQL 相关审计：target=资源·语句类型·哈希，result 含结果与耗时。
 // 设计：只保存资源、用户、语句类型、SQL 哈希、结果和耗时。
-func (s *Service) auditSQL(user, action, resourceID string, stmtType StatementType, sqlText, result string, durationMs int64) {
-	target := fmt.Sprintf("%s·%s·%s", resourceID, string(stmtType), sqlHashShort(sqlText))
+func (s *Service) auditSQL(r *http.Request, user, action, resourceID string, stmtType StatementType, sqlText, result string, durationMs int64) {
+	target := fmt.Sprintf("%s·%s·SQL#%s", s.resourceLabel(resourceID), string(stmtType), sqlHashShort(sqlText))
 	if durationMs >= 0 {
 		result = fmt.Sprintf("%s·%dms", result, durationMs)
 	}
-	s.auditLog(user, action, target, result)
+	s.auditLog(r, user, action, target, result)
 }
 
 // SetImportMaxMB 设置导入文件大小上限（MB）。
