@@ -142,6 +142,24 @@ export function StartNode({ id, selected }) {
   );
 }
 
+// 注释便签（doc.notes，伪节点：可拖动/选中/删除，不参与编译）
+export function NoteNode({ id, selected }) {
+  const ctx = React.useContext(DesignerContext);
+  const nt = ctx.noteById[id];
+  if (!nt) return null;
+  const rows = Math.min(12, Math.max(2, String(nt.text || '').split('\n').length));
+  return (
+    <div className="etl-note" data-selected={String(!!selected)} style={{ width: nt.w || 200 }}>
+      <div className="etl-note-head" title="拖动移动；右键删除">
+        <Icon name="fileText" size={11} />
+        <button type="button" className="etl-note-x nodrag" title="删除注释" onClick={() => ctx.removeNote(id)}><Icon name="x" size={11} /></button>
+      </div>
+      <textarea className="etl-note-text nodrag" value={nt.text || ''} placeholder="注释…" rows={rows} spellCheck={false}
+        onChange={(e) => ctx.updateNote(id, { text: e.target.value })} />
+    </div>
+  );
+}
+
 // 连线：转换显示字段数 / 运行中行数；作业按端口着色并标注非成功分支。
 export function EtlEdge(props) {
   const { id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, source, target, sourceHandleId, selected } = props;
@@ -186,5 +204,5 @@ export function EtlEdge(props) {
   );
 }
 
-export const nodeTypes = { step: StepNode, action: ActionNode, start: StartNode };
+export const nodeTypes = { step: StepNode, action: ActionNode, start: StartNode, note: NoteNode };
 export const edgeTypes = { etl: EtlEdge };

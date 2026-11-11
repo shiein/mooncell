@@ -17,7 +17,7 @@ export function flowType(kind, n) {
 export function toFlowNodes(doc, kind, prev) {
   const prevById = {};
   (prev || []).forEach((p) => { prevById[p.id] = p; });
-  return (doc.nodes || []).map((n) => {
+  const nodes = (doc.nodes || []).map((n) => {
     const p = prevById[n.id];
     return {
       ...(p || {}),
@@ -27,6 +27,12 @@ export function toFlowNodes(doc, kind, prev) {
       data: {},
     };
   });
+  // 注释作为伪节点渲染（不进 doc.nodes，不参与编译/连线）
+  (doc.notes || []).forEach((nt) => {
+    const p = prevById[nt.id];
+    nodes.push({ ...(p || {}), id: nt.id, type: 'note', position: { x: nt.x || 0, y: nt.y || 0 }, data: {} });
+  });
+  return nodes;
 }
 
 // 连线 → 画布边。转换：sourceHandle=输出端口，targetHandle=输入端口；作业：只有一个输入。

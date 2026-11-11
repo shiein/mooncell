@@ -2,19 +2,20 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ReactFlow, ReactFlowProvider, Background, MiniMap, MarkerType, applyNodeChanges, useReactFlow,
+  ReactFlow, ReactFlowProvider, Background, MiniMap, MarkerType, applyNodeChanges, useReactFlow, SelectionMode,
 } from '@xyflow/react';
 import '@xyflow/react/dist/base.css';
 import { Icon, Btn, Spinner, Dialog, Field, toast, confirmDialog } from '../../components/primitives.jsx';
 import { etlApi, subscribeRun } from '../api.js';
-import { useCatalog, clone, fmtAgo, fmtDateTime, KIND_LABEL, makeValue } from '../util.js';
+import { useCatalog, clone, fmtAgo, fmtDateTime, KIND_LABEL, makeValue, uid, matches } from '../util.js';
 import {
-  normalizeDoc, toFlowNodes, toFlowEdges, newNode, canConnect, makeHop, autoLayout, problemsByNode, NODE_W, GRID,
+  normalizeDoc, toFlowNodes, toFlowEdges, newNode, canConnect, makeHop, autoLayout, problemsByNode, NODE_W, GRID, flowType,
 } from './model.js';
 import { DesignerContext, nodeTypes, edgeTypes } from './nodes.jsx';
 import { Palette, DND_TYPE } from './Palette.jsx';
 import { Inspector } from './Inspector.jsx';
 import { Drawer } from './Drawer.jsx';
+import { MenuItem } from '../components.jsx';
 
 const HISTORY_LIMIT = 80;
 const isTyping = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable || (el.closest && el.closest('.cm-editor')));
@@ -122,6 +123,13 @@ function Designer({ defId, onBack, onOpenRun }) {
     updateDoc((d) => ({ ...d, hops: d.hops.filter((h) => !set.has(h.id)) }));
     setSelection((s) => (s.type === 'edge' && set.has(s.id) ? { type: 'none' } : s));
   }, [updateDoc]);
+
+  // 注释便签索引（doc.notes，伪节点）——需在 onNodesChange 之前定义
+  const noteById = React.useMemo(() => {
+    const m = {};
+    (doc ? doc.notes : []).forEach((n) => { m[n.id] = n; });
+    return m;
+  }, [doc]);
 
   const undo = () => {
     const h = history.current;
@@ -275,21 +283,29 @@ function Designer({ defId, onBack, onOpenRun }) {
   // ---- 画布事件
   const onNodesChange = React.useCallback((changes) => {
     const removed = changes.filter((c) => c.type === 'remove').map((c) => c.id);
+    const noteRemoved = removed.filter((id) => !!noteById[id]);
     const rest = changes.filter((c) => c.type !== 'remove');
     if (rest.length) setRfNodes((nds) => applyNodeChanges(rest, nds));
-    if (removed.length) removeNodes(removed);
+    const nodeRemoved = removed.filter((id) => !noteById[id]);
+    if (nodeRemoved.length) removeNodes(nodeRemoved);
+    if (noteRemoved.length) updateDoc((d) => ({ ...d, notes: (d.notes || []).filter((n) => !noteRemoved.includes(n.id)) }));
     changes.forEach((c) => {
       if (c.type === 'select') {
-        if (c.selected) setSelection({ type: 'node', id: c.id });
-        else setSelection((s) => (s.type === 'node' && s.id === c.id ? { type: 'none' } : s));
+        if (c.selected) setSelection({ type: noteById[c.id] ? 'note' : 'node', id: c.id });
+        else setSelection((s) => ((s.type === 'node' || s.type === 'note') && s.id === c.id ? { type: 'none' } : s));
       }
     });
-  }, [removeNodes]);
+  }, [removeNodes, noteById, updateDoc]);
 
   const onNodeDragStop = React.useCallback((_, __, dragged) => {
+    // dragged 含所有被拖动节点（多选拖动时为整组），位置整体写回
     const pos = {};
     (dragged || []).forEach((n) => { pos[n.id] = n.position; });
-    updateDoc((d) => ({ ...d, nodes: d.nodes.map((n) => (pos[n.id] ? { ...n, ui: { ...(n.ui || {}), x: Math.round(pos[n.id].x), y: Math.round(pos[n.id].y) } } : n)) }));
+    updateDoc((d) => ({
+      ...d,
+      nodes: d.nodes.map((n) => (pos[n.id] ? { ...n, ui: { ...(n.ui || {}), x: Math.round(pos[n.id].x), y: Math.round(pos[n.id].y) } } : n)),
+      notes: (d.notes || []).map((n) => (pos[n.id] ? { ...n, x: Math.round(pos[n.id].x), y: Math.round(pos[n.id].y) } : n)),
+    }));
   }, [updateDoc]);
 
   const onEdgesChange = React.useCallback((changes) => {
@@ -348,9 +364,8 @@ function Designer({ defId, onBack, onOpenRun }) {
     setTimeout(() => rf.fitView({ padding: 0.25, duration: 300, maxZoom: 1 }), 30);
   };
 
-  const duplicateSelected = () => {
-    if (selection.type !== 'node') return;
-    const src = doc.nodes.find((n) => n.id === selection.id);
+  const duplicateNode = (id) => {
+    const src = doc.nodes.find((n) => n.id === id);
     if (!src || src.type === 'start') return;
     const m = catalog.meta(kind, src.type);
     const n = { ...newNode(m || { id: src.type, label: src.name }, { x: src.ui.x + 40, y: src.ui.y + 40 }, doc.nodes), config: clone(src.config), name: `${src.name} 副本` };
@@ -358,10 +373,160 @@ function Designer({ defId, onBack, onOpenRun }) {
     setRfNodes((nds) => [...nds.map((x) => ({ ...x, selected: false })), { id: n.id, type: kind === 'workflow' ? 'action' : 'step', position: n.ui, data: {}, selected: true }]);
     setSelection({ type: 'node', id: n.id });
   };
+  const duplicateSelected = () => { if (selection.type === 'node') duplicateNode(selection.id); };
 
-  // ---- 快捷键
+  // ---- 注释便签（doc.notes，伪节点）
+  const updateNote = React.useCallback((id, patch) => updateDoc((d) => ({ ...d, notes: (d.notes || []).map((n) => (n.id === id ? { ...n, ...patch } : n)) })), [updateDoc]);
+  const addNote = React.useCallback((pos) => {
+    const nt = { id: uid('nt'), x: Math.round(pos.x / GRID) * GRID, y: Math.round(pos.y / GRID) * GRID, w: 200, text: '' };
+    updateDoc((d) => ({ ...d, notes: [...(d.notes || []), nt] }));
+    setRfNodes((nds) => [...nds.map((x) => ({ ...x, selected: false })), { id: nt.id, type: 'note', position: { x: nt.x, y: nt.y }, data: {}, selected: true }]);
+    setSelection({ type: 'note', id: nt.id });
+  }, [updateDoc]);
+  const removeNote = React.useCallback((id) => {
+    updateDoc((d) => ({ ...d, notes: (d.notes || []).filter((n) => n.id !== id) }));
+    setRfNodes((nds) => nds.filter((n) => n.id !== id));
+    setSelection((s) => (s.type === 'note' && s.id === id ? { type: 'none' } : s));
+  }, [updateDoc]);
+
+  // ---- 复制 / 粘贴（localStorage 跨定义/跨窗口可用；系统剪贴板尽力而为）
+  const CLIP_KEY = 'etl.clipboard';
+  const selectedNodeIds = React.useCallback(() => rfNodes.filter((n) => n.selected && n.type !== 'note').map((n) => n.id), [rfNodes]);
+  const copySel = React.useCallback(() => {
+    const ids = selectedNodeIds();
+    if (!ids.length) { toast('先在画布上选中要复制的节点', { tone: 'warn' }); return; }
+    const set = new Set(ids);
+    const payload = {
+      app: 'mooncell-etl', kind,
+      nodes: doc.nodes.filter((n) => set.has(n.id)).map(clone),
+      hops: doc.hops.filter((h) => set.has(h.from) && set.has(h.to)).map(clone),
+    };
+    const text = JSON.stringify(payload);
+    try { localStorage.setItem(CLIP_KEY, text); } catch (e) { /* 隐私模式 */ }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(() => {});
+    toast(`已复制 ${payload.nodes.length} 个节点`);
+  }, [selectedNodeIds, doc, kind]);
+
+  const panePosRef = React.useRef(null);
+  const canvasCenter = React.useCallback(() => {
+    const el = document.querySelector('.etl-canvas');
+    const r = el ? el.getBoundingClientRect() : { left: 0, top: 0, width: 800, height: 500 };
+    return rf.screenToFlowPosition({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  }, [rf]);
+
+  const pasteClipboard = React.useCallback(async (flowPos) => {
+    let raw = null;
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t && t.includes('mooncell-etl')) raw = t;
+    } catch (e) { /* 无权限或为空 */ }
+    if (!raw) { try { raw = localStorage.getItem(CLIP_KEY); } catch (e) {} }
+    let payload = null;
+    try { payload = raw && JSON.parse(raw); } catch (e) {}
+    if (!payload || payload.app !== 'mooncell-etl' || !payload.nodes || !payload.nodes.length) {
+      toast('剪贴板里没有可粘贴的节点', { tone: 'warn' });
+      return;
+    }
+    if (payload.kind !== kind) {
+      toast(`剪贴板里是${payload.kind === 'workflow' ? '作业' : '转换'}节点，不能粘贴到${kind === 'workflow' ? '作业' : '转换'}`, { tone: 'warn' });
+      return;
+    }
+    const at = flowPos || panePosRef.current || canvasCenter();
+    const minX = Math.min(...payload.nodes.map((n) => (n.ui ? n.ui.x : 0)));
+    const minY = Math.min(...payload.nodes.map((n) => (n.ui ? n.ui.y : 0)));
+    const dx = Math.round((at.x - minX) / GRID) * GRID;
+    const dy = Math.round((at.y - minY) / GRID) * GRID;
+    const idMap = {};
+    const taken = new Set(doc.nodes.map((n) => n.name));
+    const newNodes = payload.nodes.map((n) => {
+      const nn = clone(n);
+      const meta = catalog.meta(kind, n.type);
+      const id = uid('n');
+      idMap[n.id] = id;
+      let name = nn.name;
+      if (taken.has(name)) {
+        for (let i = 2; i < 1000; i += 1) { const c = `${nn.name} ${i}`; if (!taken.has(c)) { name = c; break; } }
+      }
+      taken.add(name);
+      return {
+        ...nn, id, name,
+        version: meta ? meta.version || 1 : nn.version,
+        ui: { ...(nn.ui || {}), x: (nn.ui ? nn.ui.x : 0) + dx, y: (nn.ui ? nn.ui.y : 0) + dy },
+      };
+    });
+    const newHops = (payload.hops || []).filter((h) => idMap[h.from] && idMap[h.to])
+      .map((h) => ({ ...clone(h), id: uid('h'), from: idMap[h.from], to: idMap[h.to] }));
+    updateDoc((d) => ({ ...d, nodes: [...d.nodes, ...newNodes], hops: [...d.hops, ...newHops] }));
+    setRfNodes((nds) => [
+      ...nds.map((x) => ({ ...x, selected: false })),
+      ...newNodes.map((n) => ({ id: n.id, type: flowType(kind, n), position: n.ui, data: {}, selected: true })),
+    ]);
+    setSelection({ type: 'node', id: newNodes[newNodes.length - 1].id });
+  }, [kind, doc, catalog, updateDoc, canvasCenter]);
+
+  const selectAll = React.useCallback(() => {
+    setRfNodes((nds) => nds.map((n) => ({ ...n, selected: true })));
+  }, []);
+
+  // ---- 连线插入步骤：from→to 改为 from→新节点→to
+  const insertOnHop = React.useCallback((hopId, m) => {
+    const hop = doc.hops.find((h) => h.id === hopId);
+    if (!hop) return;
+    const srcN = doc.nodes.find((n) => n.id === hop.from);
+    const dstN = doc.nodes.find((n) => n.id === hop.to);
+    const mid = {
+      x: ((srcN && srcN.ui ? srcN.ui.x : 0) + (dstN && dstN.ui ? dstN.ui.x : 0)) / 2 - NODE_W / 2,
+      y: ((srcN && srcN.ui ? srcN.ui.y : 0) + (dstN && dstN.ui ? dstN.ui.y : 0)) / 2 - 30,
+    };
+    const n = newNode(m, mid, doc.nodes);
+    const inPort = (m.inputs && m.inputs[0] && m.inputs[0].name) || 'main';
+    const outPort = ((m.outputs || []).filter((p) => !p.tone || p.tone !== 'error')[0] || {}).name || (kind === 'workflow' ? 'success' : 'main');
+    updateDoc((d) => ({
+      ...d,
+      nodes: [...d.nodes, n],
+      hops: d.hops.flatMap((h) => {
+        if (h.id !== hopId) return [h];
+        const h1 = { ...h, to: n.id };
+        if (kind === 'pipeline') h1.toPort = inPort;
+        const h2 = { id: uid('h'), from: n.id, fromPort: outPort, to: h.to };
+        if (kind === 'pipeline') h2.toPort = h.toPort || 'main';
+        return [h1, h2];
+      }),
+    }));
+    setRfNodes((nds) => [...nds, { id: n.id, type: flowType(kind, n), position: n.ui, data: {} }]);
+  }, [doc, kind, updateDoc]);
+
+  // ---- 右键菜单
+  const [menu, setMenu] = React.useState(null); // { type: 'node'|'edge'|'pane'|'note', id, x, y, flowPos, insert? }
+  const closeMenu = React.useCallback(() => setMenu(null), []); // 稳定身份：CanvasMenu effect 不因渲染重挂监听（否则 Escape 触发的取消选中重渲染会先把监听摘掉，事件到 window 时已丢失）
+  const openMenu = React.useCallback((type, id, e) => {
+    e.preventDefault();
+    const flowPos = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+    panePosRef.current = flowPos;
+    setMenu({ type, id, x: e.clientX, y: e.clientY, flowPos });
+  }, [rf]);
+  const onNodeContextMenu = React.useCallback((e, node) => {
+    e.preventDefault();
+    if (!node.selected) {
+      setRfNodes((nds) => nds.map((x) => ({ ...x, selected: x.id === node.id })));
+      setSelection({ type: noteById[node.id] ? 'note' : 'node', id: node.id });
+    }
+    openMenu(noteById[node.id] ? 'note' : 'node', node.id, e);
+  }, [openMenu, noteById]);
+  const onEdgeContextMenu = React.useCallback((e, edge) => {
+    setSelection({ type: 'edge', id: edge.id });
+    openMenu('edge', edge.id, e);
+  }, [openMenu]);
+  const onPaneContextMenu = React.useCallback((e) => openMenu('pane', null, e), [openMenu]);
+  const onPaneClick = React.useCallback((e) => {
+    panePosRef.current = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+    setSelection({ type: 'none' });
+    setMenu(null);
+  }, [rf]);
+
+  // 快捷键
   const keyRef = React.useRef({});
-  keyRef.current = { save, undo, redo, duplicateSelected };
+  keyRef.current = { save, undo, redo, duplicateSelected, copySel, pasteClipboard, selectAll };
   React.useEffect(() => {
     const onKey = (e) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -372,6 +537,9 @@ function Designer({ defId, onBack, onOpenRun }) {
       if (k === 'z' && !e.shiftKey) { e.preventDefault(); keyRef.current.undo(); }
       else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); keyRef.current.redo(); }
       else if (k === 'd') { e.preventDefault(); keyRef.current.duplicateSelected(); }
+      else if (k === 'c') { e.preventDefault(); keyRef.current.copySel(); }
+      else if (k === 'v') { e.preventDefault(); keyRef.current.pasteClipboard(); }
+      else if (k === 'a') { e.preventDefault(); keyRef.current.selectAll(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -431,7 +599,7 @@ function Designer({ defId, onBack, onOpenRun }) {
   doc.hops.forEach((h) => { if (!h.disabled) inCount[h.to] = (inCount[h.to] || 0) + 1; });
   const ctx = {
     kind, catalog, nodeById, hopById, problems, live, hopFields: validation.hops, inCount,
-    scheduleCount,
+    scheduleCount, noteById, updateNote, removeNote,
   };
   const d = {
     kind, catalog, doc, meta, setMeta, selection, updateDoc, updateNode, updateHop, removeNodes, removeHops,
@@ -487,10 +655,12 @@ function Designer({ defId, onBack, onOpenRun }) {
                 nodes={rfNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
                 onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect}
                 isValidConnection={isValidConnection} onNodeDragStop={onNodeDragStop}
-                onPaneClick={() => setSelection({ type: 'none' })}
+                onPaneClick={onPaneClick} onNodeContextMenu={onNodeContextMenu}
+                onEdgeContextMenu={onEdgeContextMenu} onPaneContextMenu={onPaneContextMenu}
                 snapToGrid snapGrid={[GRID, GRID]} fitView fitViewOptions={{ padding: 0.12, maxZoom: 1, minZoom: 0.6 }}
                 minZoom={0.2} maxZoom={2} deleteKeyCode={['Backspace', 'Delete']} multiSelectionKeyCode={['Meta', 'Shift']}
-                selectionOnDrag={false} panOnScroll zoomOnScroll={false} zoomActivationKeyCode={['Meta', 'Control']}
+                selectionOnDrag selectionMode={SelectionMode.Partial} panOnDrag={false}
+                panOnScroll zoomOnScroll={false} zoomActivationKeyCode={['Meta', 'Control']}
                 proOptions={{ hideAttribution: true }} connectionRadius={28}
               >
                 <Background gap={GRID} size={1.2} color="var(--border-strong)" />
@@ -522,7 +692,93 @@ function Designer({ defId, onBack, onOpenRun }) {
       </div>
       {runDialog ? <RunParamsDialog doc={doc} onClose={() => setRunDialog(false)} onRun={(p) => { setRunDialog(false); startRun(p); }} /> : null}
       {versionsOpen ? <VersionsDialog meta={meta} dirty={dirty} onClose={() => setVersionsOpen(false)} onRestored={() => { setVersionsOpen(false); load(); }} /> : null}
+      {menu ? (
+        <CanvasMenu menu={menu} onClose={closeMenu}>
+          {menu.type === 'pane' ? (
+            <React.Fragment>
+              <MenuItem icon="copy" label="粘贴" sub="⌘V" onClick={() => { pasteClipboard(menu.flowPos); setMenu(null); }} />
+              <MenuItem icon="fileText" label="添加注释" onClick={() => { addNote(menu.flowPos); setMenu(null); }} />
+              <MenuItem icon="check" label="全选" sub="⌘A" onClick={() => { selectAll(); setMenu(null); }} />
+              <MenuItem icon="layout" label="整理布局" onClick={() => { tidy(); setMenu(null); }} />
+            </React.Fragment>
+          ) : null}
+          {menu.type === 'edge' ? (menu.insert ? (
+            <InsertPicker kind={kind} catalog={catalog} onPick={(m) => { insertOnHop(menu.id, m); setMenu(null); }} />
+          ) : (
+            <React.Fragment>
+              <MenuItem icon={hopById[menu.id] && hopById[menu.id].disabled ? 'play' : 'pause'}
+                label={hopById[menu.id] && hopById[menu.id].disabled ? '启用' : '停用'} sub="停用时运行时跳过此连线"
+                onClick={() => { const h = hopById[menu.id]; if (h) updateHop(menu.id, { disabled: !h.disabled }); setMenu(null); }} />
+              <MenuItem icon="plus" label={kind === 'workflow' ? '插入作业项' : '插入步骤'} sub="在此连线上" onClick={() => setMenu({ ...menu, insert: true })} />
+              <MenuItem icon="trash" label="删除连线" danger onClick={() => { removeHops([menu.id]); setMenu(null); }} />
+            </React.Fragment>
+          )) : null}
+          {menu.type === 'note' ? (
+            <MenuItem icon="trash" label="删除注释" danger onClick={() => { removeNote(menu.id); setMenu(null); }} />
+          ) : null}
+          {menu.type === 'node' ? (
+            <React.Fragment>
+              <MenuItem icon="copy" label="复制" sub="⌘C" onClick={() => { copySel(); setMenu(null); }} />
+              <MenuItem icon="plus" label="创建副本" sub="⌘D" disabled={selectedNodeIds().length > 1 || (nodeById[menu.id] && nodeById[menu.id].type === 'start')}
+                onClick={() => { duplicateNode(menu.id); setMenu(null); }} />
+              {kind === 'pipeline' ? (
+                <MenuItem icon="eye" label="预览数据" onClick={() => { setDrawer({ open: true, tab: 'preview' }); runPreview(menu.id); setMenu(null); }} />
+              ) : null}
+              <MenuItem icon="trash" danger label={selectedNodeIds().length > 1 ? `删除 ${selectedNodeIds().length} 个节点` : '删除节点'}
+                onClick={() => { removeNodes(selectedNodeIds().length ? selectedNodeIds() : [menu.id]); setMenu(null); }} />
+            </React.Fragment>
+          ) : null}
+        </CanvasMenu>
+      ) : null}
     </DesignerContext.Provider>
+  );
+}
+
+// 画布右键菜单：视口内避让，点击外部/Esc 关闭。
+function CanvasMenu({ menu, onClose, children }) {
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    const onDown = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const t = setTimeout(() => {
+      window.addEventListener('mousedown', onDown);
+      window.addEventListener('keydown', onKey);
+    }, 0);
+    return () => { clearTimeout(t); window.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+  const w = 216;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const left = Math.max(8, Math.min(menu.x, vw - w - 8));
+  const top = Math.max(8, Math.min(menu.y, vh - 340));
+  return createPortal(
+    <div ref={ref} className="etl-menu" style={{ position: 'fixed', left, top, width: w, maxHeight: 340, overflow: 'auto' }} role="menu">
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+// 连线上插入步骤的组件选择器（可搜索）。
+function InsertPicker({ kind, catalog, onPick }) {
+  const [kw, setKw] = React.useState('');
+  const items = ((kind === 'workflow' ? catalog.actions : catalog.steps) || [])
+    .filter((m) => m.id !== 'start' && m.maturity !== 'planned' && matches(m, kw))
+    .sort((a, b) => (a.order || 99) - (b.order || 99));
+  return (
+    <div style={{ padding: 4 }}>
+      <input className="input input-sm" autoFocus placeholder={kind === 'workflow' ? '插入作业项…' : '插入步骤…'}
+        value={kw} onChange={(e) => setKw(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+      <div style={{ marginTop: 4 }}>
+        {items.slice(0, 30).map((m) => (
+          <button key={m.id} type="button" className="etl-cmenu-item" onClick={() => onPick(m)} title={m.description}>
+            <span className="etl-cmenu-item-label">{m.label}</span>
+            <span className="etl-cmenu-item-sub">{(m.keywords || [])[0] || ''}</span>
+          </button>
+        ))}
+        {!items.length ? <div className="etl-muted" style={{ padding: '8px 10px' }}>没有匹配的组件</div> : null}
+      </div>
+    </div>
   );
 }
 
