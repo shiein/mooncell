@@ -145,16 +145,15 @@ func (h *handlers) overview(w http.ResponseWriter, r *http.Request) {
 	scheds, _ := h.s.st.ListSchedules("")
 	conns, _ := h.s.st.ListConnections()
 	since := time.Now().Add(-24 * time.Hour).UnixMilli()
-	recent, _ := h.s.st.ListRuns(store.RunFilter{Limit: 200})
+	recentFilter := store.RunFilter{Limit: 200}
+	if scope != nil {
+		recentFilter.GrantedUser = userOf(r) // 授权过滤进 SQL、先于 LIMIT（R1-M3）
+	}
+	recent, _ := h.s.st.ListRuns(recentFilter)
 	byStatus := map[string]int{}
 	var rows int64
 	var recent24 []store.Run
 	for _, run := range recent {
-		if scope != nil {
-			if _, ok := scope[run.DefinitionID]; !ok {
-				continue
-			}
-		}
 		if run.QueuedAt >= since {
 			byStatus[run.Status]++
 			rows += run.RowsWritten
@@ -894,19 +893,14 @@ func (h *handlers) listRuns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	before, _ := strconv.ParseInt(q.Get("before"), 10, 64)
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	list, err := h.s.st.ListRuns(store.RunFilter{DefinitionID: q.Get("definitionId"), Status: q.Get("status"), Before: before, Limit: limit})
+	f := store.RunFilter{DefinitionID: q.Get("definitionId"), Status: q.Get("status"), Before: before, Limit: limit}
+	if scope := h.grantScope(r); scope != nil {
+		f.GrantedUser = userOf(r) // 授权过滤进 SQL、先于 LIMIT（R1-M3）
+	}
+	list, err := h.s.st.ListRuns(f)
 	if err != nil {
 		failErr(w, err)
 		return
-	}
-	if scope := h.grantScope(r); scope != nil {
-		out := list[:0]
-		for _, run := range list {
-			if _, ok := scope[run.DefinitionID]; ok {
-				out = append(out, run)
-			}
-		}
-		list = out
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": list})
 }

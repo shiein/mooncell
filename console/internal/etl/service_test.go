@@ -934,6 +934,70 @@ func TestCSVFileRootService(t *testing.T) {
 	}
 }
 
+// R1-M3：运行列表授权过滤必须先于 LIMIT 发生在 SQL 内——他人定义的 200 条
+// 运行排前面时，非管理员第一页仍须看到自己那 1 条（而不是空/残缺页）。
+func TestListRunsGrantScope(t *testing.T) {
+	h := newHarness(t)
+	doc := json.RawMessage(`{"kind":"pipeline","nodes":[],"hops":[]}`)
+	mine, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "我的", Doc: doc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := h.s.st.CreateDefinition(store.Definition{Kind: "pipeline", Name: "他人的", Doc: doc}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkRun := func(id, defID, name string, queuedAt int64) {
+		_, err := h.db.Exec(`INSERT INTO etl_runs (id, kind, definition_id, definition_name, revision, trigger, status, params_json, snapshot_json, refs_json, triggered_by, queued_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			id, "pipeline", defID, name, 1, "manual", "succeeded", "{}", "{}", "{}", "admin", queuedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := time.Now().UnixMilli()
+	for i := 0; i < 200; i++ { // 他人运行占满前 200 条（新→旧）
+		mkRun(fmt.Sprintf("run_o%03d", i), other.ID, "他人的", base+int64(1000-i))
+	}
+	mkRun("run_mine", mine.ID, "我的", base) // 自己的那条最旧
+	if err := store.SetUserGrants(h.db, "u1", []store.DefinitionGrant{{DefinitionID: mine.ID, AccessMode: store.ModeUse}}, "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	h.user, h.role = "u1", "user"
+	var out struct {
+		Runs []store.Run `json:"runs"`
+	}
+	if code := h.call("GET", "/api/etl/runs?limit=50", nil, &out); code != 200 {
+		t.Fatalf("listRuns 应 200：%d", code)
+	}
+	if len(out.Runs) != 1 || out.Runs[0].ID != "run_mine" {
+		t.Fatalf("第一页必须含自己的运行 run_mine，实得 %d 条 %+v", len(out.Runs), out.Runs)
+	}
+
+	// definitionId 参数指向未授权定义时也应被授权过滤拦为空
+	out.Runs = nil
+	if code := h.call("GET", "/api/etl/runs?limit=50&definitionId="+other.ID, nil, &out); code != 200 {
+		t.Fatalf("listRuns 应 200：%d", code)
+	}
+	if len(out.Runs) != 0 {
+		t.Fatalf("未授权定义的运行不应可见，实得 %d 条", len(out.Runs))
+	}
+
+	// overview 近期运行同样只含授权项
+	var ov struct {
+		Recent []store.Run `json:"recentRuns"`
+	}
+	if code := h.call("GET", "/api/etl/overview", nil, &ov); code != 200 {
+		t.Fatalf("overview 应 200：%d", code)
+	}
+	for _, r := range ov.Recent {
+		if r.DefinitionID != mine.ID {
+			t.Fatalf("overview 近期运行含未授权定义 %s", r.DefinitionID)
+		}
+	}
+}
+
 // R1-B2 settings.pushdown 运行期开关：缺省不记任何下推日志；开启后记一条「下推优化」且结果正确。
 func TestPushdownRuntimeGate(t *testing.T) {
 	h := newHarness(t)

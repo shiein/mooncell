@@ -146,6 +146,9 @@ type RunFilter struct {
 	Status       string // 可逗号分隔多个
 	Before       int64  // queued_at < Before（翻页游标）
 	Limit        int
+	// GrantedUser 非空时把 definition_id 限定在该用户的授权集合内（R1-M3）：
+	// 过滤必须在 SQL 内发生、先于 LIMIT，否则他人运行会占满页容量。
+	GrantedUser string
 }
 
 // ListRuns 返回运行（新→旧，不含快照）。
@@ -155,6 +158,10 @@ func (s *Store) ListRuns(f RunFilter) ([]Run, error) {
 	}
 	q := `SELECT ` + runCols + ` FROM etl_runs WHERE 1=1`
 	var args []any
+	if f.GrantedUser != "" {
+		q += ` AND definition_id IN (SELECT definition_id FROM etl_grants WHERE username = ?)`
+		args = append(args, f.GrantedUser)
+	}
 	if f.DefinitionID != "" {
 		q += ` AND definition_id = ?`
 		args = append(args, f.DefinitionID)
