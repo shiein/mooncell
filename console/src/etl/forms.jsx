@@ -213,6 +213,32 @@ registerForm('pipeline', 'unique_hash', ({ cfg, set, ctx }) => {
   );
 });
 
+registerForm('pipeline', 'value_mapper', ({ cfg, set, ctx }) => {
+  const rows = cfg.mappings || [];
+  return (
+    <React.Fragment>
+      <div className="etl-row2">
+        <Field label="取值字段"><FieldSelect fields={ctx.input} value={cfg.field} onChange={(field) => set({ field })} /></Field>
+        <Field label="写入字段" hint="留空 = 覆盖取值字段；输出为字符串"><input className="input" value={cfg.target || ''} placeholder={cfg.field || '同名字段'} onChange={(e) => set({ target: e.target.value })} /></Field>
+      </div>
+      <Field label="未匹配时" hint="留空 = 保留原值"><input className="input" value={cfg.default || ''} placeholder="保留原值" onChange={(e) => set({ default: e.target.value })} /></Field>
+      <Section title="映射表" hint="按值的文本形式比较">
+        <ListEditor
+          columns={[{ label: '源值' }, { label: '目标值' }]}
+          rows={rows} onChange={(mappings) => set({ mappings })}
+          onAdd={() => set({ mappings: [...rows, { source: '', target: '' }] })}
+          empty="没有映射 —— 值原样通过（未匹配策略仍生效）"
+          renderRow={(r, up) => (
+            <React.Fragment>
+              <input className="input" value={r.source ?? ''} onChange={(e) => up({ source: e.target.value })} />
+              <input className="input" value={r.target ?? ''} onChange={(e) => up({ target: e.target.value })} />
+            </React.Fragment>
+          )} />
+      </Section>
+    </React.Fragment>
+  );
+});
+
 registerForm('pipeline', 'dummy', () => (
   <div className="etl-muted" style={{ lineHeight: 1.7 }}>原样透传，无需配置。可把多条字段布局一致的流汇合到这里，或作为调试时的观察点（选中后在底部「数据预览」查看）。</div>
 ));

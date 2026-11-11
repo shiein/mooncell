@@ -190,6 +190,48 @@ func TestTableInputVarsAndErrorPort(t *testing.T) {
 	}
 }
 
+// 值映射：覆盖原字段（含未匹配保留/默认值）与新字段两种形态。
+func TestValueMapper(t *testing.T) {
+	e, db := env(t)
+	mustExec(t, db, `CREATE TABLE src (id INTEGER, status TEXT)`)
+	mustExec(t, db, `CREATE TABLE dst (id INTEGER, status TEXT, label TEXT)`)
+	mustExec(t, db, `INSERT INTO src VALUES (1,'A'),(2,'B'),(3,'X'),(4,NULL)`)
+	def := &pipeline.Definition{
+		Nodes: []pipeline.Node{
+			node("in", "table_input", map[string]any{"connection": "db", "sql": "select id, status from src order by id"}),
+			node("m", "value_mapper", map[string]any{
+				"field":  "status",
+				"target": "label",
+				"mappings": []map[string]any{
+					{"source": "A", "target": "激活"},
+					{"source": "B", "target": "停用"},
+				},
+			}),
+			node("out", "table_output", map[string]any{"connection": "db", "table": "dst"}),
+		},
+		Hops: []pipeline.Hop{hop("in", "main", "m"), hop("m", "main", "out")},
+	}
+	res := run(t, e, def, nil)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	var got []string
+	rows, err := db.Query(`SELECT label FROM dst ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s sql.NullString
+		rows.Scan(&s)
+		got = append(got, s.String)
+	}
+	want := []string{"激活", "停用", "X", ""} // 未匹配保留原值；NULL 按空文本
+	if len(got) != 4 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] || got[3] != want[3] {
+		t.Fatalf("映射结果错误：%v", got)
+	}
+}
+
 // 表输出连接错误端口：批次内混入唯一约束冲突行 → 批量失败后退化逐行写入，
 // 坏行进错误输出、好行照常提交、步骤成功；未连接错误端口则整步失败。
 func TestTableOutputErrorRowDegrade(t *testing.T) {
